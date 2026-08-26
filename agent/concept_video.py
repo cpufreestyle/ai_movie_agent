@@ -368,26 +368,42 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
 
     cards: list[Image.Image] = []
 
-    # 1) 封面卡
+    # 1) 封面卡（片名 + 一句话梗概 + 主角提示：这是 Agent 的作品）
     cover_lines = [logline] if logline else []
     if tone:
         cover_lines.append(f"基调：{tone}")
     cover_lines.append("由本地 AI 电影 Agent 自动企划 · 全链路生成")
-    cards.append(_card(width, height, title, cover_lines))
+    cards.append(_card(width, height, title, cover_lines, accent=(120, 200, 255)))
 
-    # 2) 项目介绍卡（更详细）
-    intro_lines = [
-        "本片由一个本地运行的 AI 电影 Agent 自动企划：",
-        "① 选题检索：RAGFlow 知识库召回素材，回流灵感与设定；",
-        "② 概念企划：自动生成世界观、人物与分镜结构（即本视频内容）；",
-        "③ 关键帧：ComfyUI / SDXL 按分镜绘制视觉参考图；",
-        "④ 视频续写：SkyReels / DF 基于关键帧做 I2V 运动生成；",
-        "⑤ 成片与投稿：渲染剪辑并一键投稿 B 站。",
-        "从一句话创意到可投稿 demo，无需人工剪辑。",
+    # 2) ★重点：我做的 AI 电影 Agent 是什么（前置，作为视频主角）
+    agent_what = [
+        "我做了一个本地运行的「AI 电影 Agent」——",
+        "给它一句话创意，它就能自动写出世界观、人物、分镜，",
+        "再生成画面、续写成片，最后一键投稿。",
+        "核心是两个能力：",
+        "① 持续创作：基于 SkyReels-V2 的 Diffusion Forcing 续写，",
+        "   影片能不断在结尾追加新镜头，理论上「无限时长」；",
+        "② 全自动流水线：从选题到投稿一条龙，几乎不用人动手。",
+        "本届目标：用 AI 提前看见未来——让 Agent 把创意变成影像。",
     ]
-    cards.append(_card(width, height, "关于这个项目 · 本地 AI 电影 Agent", intro_lines))
+    cards.append(_card(width, height, "我做的 AI 电影 Agent · 是什么", agent_what,
+                       accent=(255, 196, 92)))
 
-    # 3) 世界观设定卡（扩展：含派生美术/声音方向）
+    # 3) ★重点：全链路 A→H 流水线（逐段展开，这是 Agent 的「肌肉」）
+    pipeline_stages = [
+        "A 资料采集：Crawl4AI 抓取素材，沉淀灵感；",
+        "B 知识沉淀：RAGFlow 本地知识库，检索与企划回填；",
+        "C 概念企划：自动产出世界观 / 人物 / 三幕结构；",
+        "D 关键帧：ComfyUI + SDXL 按分镜绘制视觉参考图；",
+        "E 剧本分镜：本地 LLM 写剧本（无模型也能模板兜底）；",
+        "F 去 AI 味：润色方法论，让台词更自然；",
+        "G 视频导演：SkyReels / DF 做 I2V 运动生成与续写；",
+        "H 自动发布：biliup-rs 一键投稿 B 站。",
+    ]
+    cards.append(_card(width, height, "全链路 A→H · Agent 自动跑完", pipeline_stages,
+                       accent=(120, 200, 255)))
+
+    # 4) 世界观设定卡（作品本身，作为 Agent 的产出示例）
     setting_lines: list[str] = []
     if setting:
         setting_lines.append(f"场景 / 时代：{setting}")
@@ -406,9 +422,11 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         setting_lines.append(style)
     if tone:
         setting_lines.append(f"声音基调：以「{tone}」为底，配乐留白与电子质感交织。")
-    cards.append(_card(width, height, "世界观设定", setting_lines))
+    if not setting_lines:
+        setting_lines.append("（由 Agent 基于创意自动派生，此处为占位。）")
+    cards.append(_card(width, height, f"Agent 的产出 · 世界观设定", setting_lines))
 
-    # 3.5) 人物小传卡（C+ 真实数据，最多 3 个）
+    # 5) 人物小传卡（C+ 真实数据，最多 3 个）
     for ci, ch in enumerate(characters[:3]):
         if isinstance(ch, dict):
             cname = ch.get("name", f"人物 {ci + 1}")
@@ -422,7 +440,7 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         clines = [c for c in clines if c]
         cards.append(_card(width, height, f"人物小传 · {cname}", clines))
 
-    # 4) 叙事结构卡（三幕）：优先用 enrich 产出的 three_act
+    # 6) 叙事结构卡（三幕）：优先用 enrich 产出的 three_act
     if three_act:
         structure = [t if isinstance(t, str) else json.dumps(t, ensure_ascii=False)
                      for t in three_act]
@@ -430,7 +448,7 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         structure = _build_structure(logline, outline)
     cards.append(_card(width, height, "叙事结构 · 三幕", structure))
 
-    # 5) 分镜卡：有 outline 逐镜展示；否则给出概念阶段规划
+    # 7) 分镜卡：有 outline 逐镜展示；否则给出概念阶段规划
     if outline:
         for i, beat in enumerate(outline):
             beat_text = beat if isinstance(beat, str) else json.dumps(beat, ensure_ascii=False)
@@ -440,30 +458,30 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
     else:
         cards.append(_card(width, height, "分镜规划（概念阶段）", structure))
 
-    # 6) 视觉参考卡（关键帧九宫格）
+    # 8) 视觉参考卡（关键帧九宫格）
     cards.append(_contact_sheet(width, height, keyframes, "视觉参考 · 关键帧",
                                 note="关键帧将在 D 阶段由 ComfyUI / SDXL 生成，此处为占位。"))
 
-    # 7) 制作链路卡
-    pipeline = [
-        "技术链路（全本地 / 开源）：",
-        "RAGFlow  ——  知识库检索与选题回流；",
-        "概念模型  ——  世界观 / 人物 / 分镜企划；",
-        "ComfyUI + SDXL  ——  分镜关键帧绘制；",
-        "SkyReels / DF  ——  关键帧到视频（I2V）续写；",
-        "OpenCV / PIL  ——  demo 渲染与编码（无 ffmpeg 依赖）；",
-        "biliup-rs  ——  一键投稿 B 站。",
-        f"输出规格：{width}x{height} · {fps}fps · 约 {int(len(cards) * hold)}s 规划 demo。",
+    # 9) 技术栈卡（开源工具链，呼应流水线）
+    stack = [
+        "技术栈（全本地 / 开源）：",
+        "Crawl4AI + RAGFlow  ——  素材与知识；",
+        "MetaGPT 式多角色  ——  概念企划；",
+        "ComfyUI + SDXL  ——  关键帧出图；",
+        "SkyReels-V2 / DF  ——  视频续写引擎；",
+        "OpenCV / PIL  ——  demo 渲染编码（无 ffmpeg 依赖）；",
+        "biliup-rs  ——  一键投稿 B 站；",
+        f"规格：{width}x{height} · {fps}fps · 约 {int(len(cards) * hold)}s demo。",
     ]
-    cards.append(_card(width, height, "制作链路 · 开源工具链", pipeline))
+    cards.append(_card(width, height, "技术栈 · 开源工具链", stack))
 
-    # 8) 结尾卡
+    # 10) 结尾卡（回到 Agent + 求三连/打赏）
     end_lines = ["本片创意 / 规划由本地 AI 电影 Agent 自动生成。"]
     if refs:
         end_lines.append(f"知识库参考 {len(refs)} 条（RAGFlow / 本地）。")
-    end_lines.append("从一句话到 demo，自动化电影生产。")
-    end_lines.append("欢迎三连 / 关注，看 Agent 把规划变成成片。")
-    cards.append(_card(width, height, "— 规划 demo 完 —", end_lines))
+    end_lines.append("用 AI 提前看见未来——一个 Agent 就能拍电影。")
+    end_lines.append("欢迎三连 / 关注 / 打赏，看 Agent 把规划变成成片。")
+    cards.append(_card(width, height, "— 规划 demo 完 —", end_lines, accent=(255, 196, 92)))
 
     result = _write_mp4(cards, out_path, fps=fps, hold=hold, xfade=xfade, bgm=bgm)
     print(f"  [concept-video] 已生成视频素材: {result}")

@@ -86,6 +86,10 @@ class Publisher:
         if source:
             cmd += ["--source", source]
         if dynamic:
+            # B 站 dynamic 限 233 字，超长截断（保留末尾话题标签更友好）
+            if len(dynamic) > 233:
+                tail = dynamic[-120:]
+                dynamic = dynamic[:233 - len(tail) - 1].rstrip() + "…" + tail
             cmd += ["--dynamic", dynamic]
         if cover and os.path.exists(cover):
             cmd += ["--cover", cover]
@@ -117,6 +121,24 @@ class Publisher:
         logline = agent_state.get("bible", {}).get("logline", "")
         return self.upload(final_movie, episode=ep, title=title, logline=logline)
 
+    # ---------- 下架 / 删除已投稿 ----------
+    def delete_video(self, bvid: str) -> dict:
+        """biliup-rs 不支持删除已投稿视频。下架请前往 B 站网页端创作中心手动操作。"""
+        return {"ok": False, "error":
+                "biliup-rs 无删除子命令，请到 B 站创作中心 "
+                "(https://member.bilibili.com) 手动下架/删除该视频。"}
+
+    def upload_and_replace(self, video_path: str, old_bvid: str | None = None,
+                           title: str | None = None, logline: str = "", desc: str | None = None,
+                           tags=None, dynamic: str | None = None, source: str | None = None,
+                           cover: str | None = None, submit: bool = True) -> dict:
+        """上传新视频并替换旧视频（下架旧片需手动在 B 站创作中心操作）。"""
+        if old_bvid:
+            d = self.delete_video(old_bvid)
+            print(f"  [warn] 旧视频需手动下架: {d.get('error')}")
+        return self.upload(video_path, episode=1, title=title, logline=logline,
+                           desc=desc, tags=tags, dynamic=dynamic, source=source,
+                           cover=cover, submit=submit)
     # ---------- 便捷：把创意/规划渲染成视频 demo 并投稿 ----------
     def publish_concept(self, out_path: str | None = None,
                         title: str | None = None, desc: str | None = None,
@@ -163,10 +185,18 @@ class Publisher:
         if not title:
             title = (state or {}).get("title") or concept.get("logline") or "AI 电影创意"
         if not desc:
-            desc = (f"{concept.get('logline', '')}\n"
-                    f"（本视频为创意/规划 demo，由本地 AI 电影 Agent 生成）")
+            desc = (
+                f"片名《{title}》——一部由本地 AI 电影 Agent 自动企划、生成的概念短片 demo。\n\n"
+                "这个 Agent 能做什么：\n"
+                "· 持续创作 / 无限时长：基于 SkyReels-V2 的 Diffusion Forcing 续写，影片可一直生长；\n"
+                "· 全链路自动化：素材采集 → 知识沉淀 → 概念企划 → 关键帧 → 剧本 → 去 AI 味润色 → 视频导演 → 自动投稿 B 站；\n"
+                "· 本地 LLM 自动写剧本（无模型也能跑通模板兜底）。\n\n"
+                "用 AI 提前看见未来——让 Agent 把一句话创意变成可投稿的影像。\n"
+                "#魔搭社区 #Qoder #AI无限开发者创作大赛 #用AI提前看见未来 #AIGC"
+            )
         if not tags:
-            tags = [concept.get("theme") or "AI电影", "创意策划", "短片"]
+            tags = ["AI电影Agent", "开源项目", "AIGC", "AI影视", "短片",
+                    "打赏", concept.get("theme") or "AI电影", "创意策划"]
         return self.upload(video, title=title, desc=desc, tags=tags,
                            source=source, dynamic=desc, cover=cover_path,
                            submit=submit)

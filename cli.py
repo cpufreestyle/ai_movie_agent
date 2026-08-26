@@ -90,6 +90,8 @@ def main():
                       help="混入 BGM（需 ffmpeg，否则仅做卡片转场）")
     p_pc.add_argument("--xfade", type=float, default=0.4,
                       help="卡片间交叉淡入转场时长(秒)，默认 0.4")
+    p_pc.add_argument("--replace", default=None, metavar="BVID",
+                      help="投新片前先下架该 BVID 旧视频（用于替换旧投稿）")
 
     p_en = sub.add_parser("enrich-bible",
                           help="C+ 阶段：充实 bible（人物小传/视觉风格/三幕）并重渲染 demo")
@@ -157,6 +159,10 @@ def main():
                             or "cookie" in str(res.get("error", "")).lower():
                         print(agent.publisher.login_guide())
         else:  # publish-concept：把创意/规划渲染成视频 demo（biliup 就绪则投稿）
+            old_bvid = getattr(args, "replace", None)
+            if old_bvid:
+                d = agent.publisher.delete_video(old_bvid)
+                print(f"  [warn] 旧视频需手动下架: {d.get('error')}")
             res = agent.publisher.publish_concept(submit=args.submit,
                                                   xfade=args.xfade, bgm=args.bgm)
             if isinstance(res, dict):
