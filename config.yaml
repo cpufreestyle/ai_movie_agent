@@ -1,0 +1,119 @@
+# ============================================================
+# AI 电影 Agent 配置
+# 本地持续创作的 AI 电影生成器，视频引擎基于 SkyReels-V2 (Diffusion Forcing)
+# ============================================================
+
+project:
+  title: "我的 AI 电影"
+  # 主题/世界观，会作为剧本大模型的系统设定
+  theme: "一部发生在近未来赛博都市的科幻短片，探讨记忆与身份"
+  # 视觉风格，会拼接到每个分镜提示词里
+  style: "cinematic, film grain, 35mm, dramatic lighting, slow camera movement"
+  # 单集目标时长（秒），仅用于展示进度；真正的"持续创作"靠循环
+  episode_seconds: 60
+  # 每个分镜生成的帧数（97 帧 @24fps ≈ 4 秒）。可改 145≈6s
+  scene_frames: 97
+
+engine:
+  # SkyReels-V2 仓库的本地路径（由 setup_wsl.sh 克隆）
+  skyreels_repo: "./skyreels_v2"
+  # 模型：本地 16G 显存推荐 1.3B-540P；有 48G+ 可换 14B
+  model_id: "Skywork/SkyReels-V2-DF-1.3B-540P"
+  resolution: "540P"
+  offload: true                 # 显存不足时把模型卸载到 CPU
+  fps: 24
+  # Diffusion Forcing 长视频一致性参数
+  ar_step: 0
+  overlap_history: 17
+  addnoise_condition: 20
+  base_num_frames: 97
+  guidance_scale: 6.0
+  inference_steps: 30
+  # I2V 二次续写：有起始关键帧时，先以关键帧做 I2V 生成起始片段，再对该片段跑一轮 DF 续写/精修
+  two_pass_i2v: true
+  # 生成用的 python（setup 会装好 venv 并自动探测）
+  python: ""
+
+llm:
+  # 本地 LLM 通过 OpenAI 兼容接口接入（默认 Ollama）。
+  # 启用步骤：1) ollama serve   2) ollama pull qwen2.5:14b（或下方任一模型）
+  # Ollama 离线 / 未配置时自动降级为模板生成，管线照样能跑通（bible 为派生内容）。
+  base_url: "http://localhost:11434/v1"   # Ollama 默认地址；也可指向云端或其它 OpenAI 兼容服务
+  api_key: "ollama"                        # Ollama 随意填；其它服务填真实 key
+  # 模型 tag（ollama 拉取的模型名）。按显存/质量选一个：
+  model: "qwen2.5:14b"                      # 平衡之选；显存充足可换 32b，轻量可换 7b/3b
+  # model: "qwen2.5:7b"                    # 轻量，~8G 显存可用
+  # model: "llama3.1:8b"                   # 备选
+  # model: "deepseek-r1:14b"              # 长思维链，适合复杂企划（慢）
+  temperature: 0.85                         # 企划偏创意，略高；要稳定可降到 0.6
+  # disabled: true 可强制纯模板（无 GPU / 没模型时先跑通流程）
+  disabled: false
+
+# ============================================================
+# A 阶段 · 资料采集（Crawl4AI）
+# ============================================================
+collector:
+  enabled: true
+  method: "requests"          # crawl4ai | requests；装了 crawl4ai 改 crawl4ai
+  urls: []                    # 起始采集链接；留空则跳过 A 阶段
+  save_dir: "material"        # 相对 workdir，存抓取文本
+
+# ============================================================
+# B 阶段 · 知识沉淀（RAGFlow / 本地）
+# ============================================================
+knowledge:
+  enabled: true
+  # 默认读 RAGFlow 云端后端；未配置 api/api_key 时自动降级到 local，不影响管线
+  backend: "ragflow"          # local | ragflow
+  local_dir: "kb"
+  ragflow:
+    api: "http://localhost:80/api"
+    dataset: "ai_movie"
+    api_key: ""
+
+# ============================================================
+# C 阶段 · 概念企划（MetaGPT 多角色法）
+# ============================================================
+planner:
+  enabled: true
+  roles: ["编剧", "导演", "制片人"]   # MetaGPT 风格角色分工
+
+# ============================================================
+# D 阶段 · 图像提示词 / 关键帧（ComfyUI）
+# ============================================================
+image_prompt:
+  enabled: true
+  comfyui:
+    api: "http://localhost:8188"     # ComfyUI 地址（生成关键帧用，可选）
+    workflow: ""
+
+# ============================================================
+# F 阶段 · 去 AI 味润色（qu-ai-wei 方法论）
+# ============================================================
+polisher:
+  enabled: true
+  method: "llm"              # llm | qu-ai-wei | none
+
+output:
+  dir: "./outputs"
+
+# ============================================================
+# 发布（H 阶段）：自动投稿到 B 站，封装开源工具 biliup-rs
+# 使用前先手动执行一次 `biliup login`（扫码/密码，写入 cookies.json）
+# ============================================================
+publish:
+  enabled: true              # 生成结束后是否自动投稿；也可单独用 `python cli.py publish`
+  # biliup-rs 可执行文件（tools/ 下已下载 v0.2.4；执行 `biliup login` 后才能投稿）
+  binary: "C:/Users/michael/CodeBuddy/20260825154207/ai_movie_agent/tools/biliup/biliupR-v0.2.4-x86_64-windows/biliup.exe"
+  account: ""                 # 多账号时填 cookie 文件名（-u 参数），留空用默认 cookies.json
+  # 投稿模板，支持占位符 {title} {n} {logline}
+  title_template: "{title} · 第{n}集"
+  desc_template: |
+    由本地 AI 电影 Agent 自动生成。
+    世界观：{logline}
+  tags: "AI影视,人工智能,短片,AIGC,打赏"
+  tid: 171                    # 投稿分区（171=科技/野生技术？投稿前请核对 B 站 tid 表）
+  source: ""                  # 转载来源（仅当 copyright=2 时需填；自制留空）
+  dynamic: "AI 自动生成的实验短片"
+  cover: ""                   # 可选封面图路径；留空则由 B 站自动选帧
+  dtime: 0                    # 0=立即发布；或填 10 位时间戳延时（需晚于当前 4 小时以上）

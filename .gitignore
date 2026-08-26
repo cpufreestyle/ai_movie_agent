@@ -1,0 +1,22 @@
+# 虚拟环境
+.venv/
+env/
+venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 生成的产物（渲染视频、state.json 等运行时输出）
+outputs/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 本地日志
+*.log
+
+# 第三方发布工具（运行时通过 tools/_install_biliup.py 安装，不入库）
+tools/biliup/
