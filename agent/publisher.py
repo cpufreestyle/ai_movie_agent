@@ -26,9 +26,18 @@ class Publisher:
         self.binary = self.cfg.get("binary") or "biliup"
         self.account = self.cfg.get("account") or ""  # 多账号时的 cookie 文件名(-u)
 
+    def _resolve_binary(self) -> str:
+        """Return the binary path, resolving relative paths against the project root."""
+        if os.path.isabs(self.binary):
+            return self.binary
+        # Resolve relative to the agent package's parent (project root)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rel = os.path.join(project_root, self.binary)
+        return rel if os.path.exists(rel) else self.binary
+
     # ---------- 工具 ----------
     def is_ready(self) -> bool:
-        return shutil.which(self.binary) is not None
+        return shutil.which(self._resolve_binary()) is not None
 
     @staticmethod
     def login_guide() -> str:
@@ -75,7 +84,7 @@ class Publisher:
         cover = self.cfg.get("cover", "") if cover is None else cover
         dtime = int(self.cfg.get("dtime", 0))
 
-        cmd = [self.binary]
+        cmd = [self._resolve_binary()]
         if self.account:
             cmd += ["-u", self.account]
         cmd += ["upload", video_path,
@@ -166,8 +175,11 @@ class Publisher:
             os.makedirs(os.path.join(self.workdir, "scenes"), exist_ok=True)
             out_path = os.path.join(self.workdir, "scenes", "concept_demo.mp4")
 
+        # 白模分镜预视图（Blender 生成，可选）：优先用于分镜卡与视觉参考
+        blocking_previs = (state or {}).get("blocking_previs") or None
         video = render_concept_video(concept, keyframes, out_path,
-                                     xfade=xfade, bgm=bgm)
+                                     xfade=xfade, bgm=bgm,
+                                     blocking_images=blocking_previs)
         print(f"  [publish] 创意/规划视频已生成: {video}")
         if not self.is_ready():
             print("  [publish] 未检测到 biliup，跳过投稿。安装并 login 后重跑即可投稿。")

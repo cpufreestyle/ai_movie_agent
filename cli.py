@@ -105,6 +105,17 @@ def main():
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8000)
 
+    p_bl = sub.add_parser("blender",
+                          help="渲染 Blender 白模（需本地 Blender + Blender MCP 插件并已启动 MCP Server）")
+    p_bl.add_argument("--beat", default="一个角色的中景，镜头缓慢平摇",
+                      help="分镜描述文本（用于解析机位/运镜/角色）")
+    p_bl.add_argument("--mode", default="block",
+                      choices=["block", "previs", "control", "anim"],
+                      help="block=全套(预视+线框+深度+法线); previs=仅预视; control=控制图; anim=灰模动画")
+    p_bl.add_argument("--host", default=None, help="Blender MCP 端口主机（默认 127.0.0.1）")
+    p_bl.add_argument("--port", type=int, default=None, help="Blender MCP 端口（默认 9876）")
+    p_bl.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
+
     args = ap.parse_args()
     config = load_config(args.config)
 
@@ -139,9 +150,35 @@ def main():
               f"three_act: {len(b.get('three_act', []))} 段")
     elif args.cmd == "webui":
         from webui import main as webui_main
-        import sys as _sys
-        _sys.argv = ["webui", "--host", args.host, "--port", str(args.port)]
+        sys.argv = ["webui", "--host", args.host, "--port", str(args.port)]
         webui_main()
+    elif args.cmd == "blender":
+        agent = MovieAgent(config, args.workdir)
+        if args.host:
+            agent.blocking.client.host = args.host
+        if args.port:
+            agent.blocking.client.port = args.port
+        if not agent.blocking.is_ready():
+            print("[blender] 未就绪：请先安装 Blender + Blender MCP 插件，"
+                  "并在 Blender 内启动 MCP Server（端口 9876）。")
+            print("  插件：https://github.com/ahujasid/blender-mcp  安装后侧栏 N → BlenderMCP → Start MCP Server")
+            sys.exit(1)
+        spec = agent.blocking.parse_spec(args.beat)
+        print(f"[blender] 解析 spec: {spec}")
+        if args.mode == "anim":
+            out = agent.blocking.render_animation(spec,
+                                                  os.path.join(agent.blocking.out_dir, "anim"),
+                                                  agent.blocking.anim_frames)
+            print(f"[blender] 灰模动画帧序列已渲染到: {out}")
+        elif args.mode == "previs":
+            out = agent.blocking.render_previs(spec, os.path.join(agent.blocking.out_dir, "preview.png"))
+            print(f"[blender] 预视图: {out}")
+        elif args.mode == "control":
+            out = agent.blocking.render_control(spec, agent.blocking.out_dir)
+            print(f"[blender] 控制图: {out}")
+        else:
+            out = agent.blocking.render_block(spec, agent.blocking.out_dir)
+            print(f"[blender] 全套白模资产: {out}")
     elif args.cmd in ("publish", "publish-concept"):
         ensure(config.get("publish", {}).get("enabled", False), "未启用发布(publish.enabled)")
         agent = MovieAgent(config, args.workdir)

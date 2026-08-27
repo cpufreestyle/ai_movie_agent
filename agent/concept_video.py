@@ -196,11 +196,12 @@ def _encode_frames(seq: list[Image.Image], out_path: str, fps: int) -> str:
     # 1) OpenCV
     try:
         import cv2  # type: ignore
+        import numpy as np
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         h, w = seq[0].height, seq[0].width
         vw = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
         for f in seq:
-            vw.write(cv2.cvtColor(__import__("numpy").array(f), cv2.COLOR_RGB2BGR))
+            vw.write(cv2.cvtColor(np.array(f), cv2.COLOR_RGB2BGR))
         vw.release()
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
@@ -345,7 +346,8 @@ def _contact_sheet(width: int, height: int, images: list[str],
 
 def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
                          fps: int = 24, hold: float = 3.0, xfade: float = 0.4,
-                         bgm=None, width: int = 1280, height: int = 720) -> str:
+                         bgm=None, width: int = 1280, height: int = 720,
+                         blocking_images: list[str] | None = None) -> str:
     """把概念企划渲染成更详细的视频 demo（或 PNG 序列），返回输出路径。
 
     卡组：封面 → 项目介绍 → 世界观设定 → 人物小传(C+真实数据) → 叙事结构
@@ -449,18 +451,27 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
     cards.append(_card(width, height, "叙事结构 · 三幕", structure))
 
     # 7) 分镜卡：有 outline 逐镜展示；否则给出概念阶段规划
+    #    分镜卡配图优先用 Blender 白模预视图（blocking_images），其次关键帧
     if outline:
         for i, beat in enumerate(outline):
             beat_text = beat if isinstance(beat, str) else json.dumps(beat, ensure_ascii=False)
-            kf = keyframes[i] if (keyframes and i < len(keyframes)) else None
+            kf = None
+            if blocking_images and i < len(blocking_images) and blocking_images[i]:
+                kf = blocking_images[i]
+            elif keyframes and i < len(keyframes):
+                kf = keyframes[i]
             cards.append(_card(width, height, f"分镜 {i + 1} / {len(outline)}",
                                [beat_text], image=kf if kf else None))
     else:
         cards.append(_card(width, height, "分镜规划（概念阶段）", structure))
 
-    # 8) 视觉参考卡（关键帧九宫格）
-    cards.append(_contact_sheet(width, height, keyframes, "视觉参考 · 关键帧",
-                                note="关键帧将在 D 阶段由 ComfyUI / SDXL 生成，此处为占位。"))
+    # 8) 视觉参考卡：优先用白模分镜预视图，其次关键帧九宫格
+    visual_refs = blocking_images if (blocking_images and any(blocking_images)) else keyframes
+    ref_title = "视觉参考 · 白模分镜" if blocking_images else "视觉参考 · 关键帧"
+    ref_note = ("白模(Blender)分镜预视：锁定机位 / 景别 / 角色站位，供 AI 出图与视频参考。"
+                if blocking_images else
+                "关键帧将在 D 阶段由 ComfyUI / SDXL 生成，此处为占位。")
+    cards.append(_contact_sheet(width, height, visual_refs, ref_title, note=ref_note))
 
     # 9) 技术栈卡（开源工具链，呼应流水线）
     stack = [
