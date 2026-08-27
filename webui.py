@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import glob
 import io
 import json
 import os
+import shutil
 import threading
 
 import yaml
@@ -49,6 +51,16 @@ _state = {
     "result": None,
 }
 _lock = threading.Lock()
+STAGE_NAMES = {
+    "A": "资料采集",
+    "B": "知识沉淀",
+    "C": "概念企划",
+    "D": "关键帧",
+    "E": "剧本分镜",
+    "F": "文本润色",
+    "G": "视频导演",
+    "H": "封装发布",
+}
 
 
 # ---------------- 工具 ----------------
@@ -113,10 +125,67 @@ def run_in_background(fn):
     t.start()
 
 
+def start_stage(stage: str, fn):
+    if _state["running"]:
+        return json_resp({"ok": False, "error": "已有任务在运行"}, status=409)
+
+    def _job():
+        print(f"\n=== {stage} 阶段：{STAGE_NAMES[stage]} ===")
+        result = fn()
+        print(f"=== {stage} 阶段完成 ===")
+        return result
+
+    run_in_background(_job)
+    return json_resp({"ok": True, "msg": f"{stage} 阶段已启动"})
+
+
+def load_material() -> list[dict]:
+    items = []
+    for path in sorted(glob.glob(os.path.join(WORKDIR, "material", "*.md"))):
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        heading, _, content = text.partition("\n")
+        items.append({"url": heading.lstrip("# ").strip(), "text": content.strip()})
+    return items
+
+
+def save_agent_state(agent):
+    agent._save_state(agent.state)
+
+
+def pipeline_snapshot():
+    agent = get_agent()
+    state = agent.state
+    material = load_material()
+    kb_path = os.path.join(WORKDIR, "kb", "chunks.jsonl")
+    keyframes = sorted(glob.glob(os.path.join(WORKDIR, "keyframes", "*.*")))
+    stages = {
+        "A": {"done": bool(material), "count": len(material)},
+        "B": {"done": os.path.exists(kb_path), "count": sum(1 for _ in open(kb_path, encoding="utf-8")) if os.path.exists(kb_path) else 0},
+        "C": {"done": bool(state.get("bible", {}).get("outline")), "count": len(state.get("bible", {}).get("outline", []))},
+        "D": {"done": bool(state.get("image_prompts")), "count": len(keyframes), "ready": agent.keyframe_gen.is_ready()},
+        "E": {"done": bool(state.get("draft_beat") or state.get("beats")), "count": len(state.get("beats", []))},
+        "F": {"done": bool(state.get("draft_beat", {}).get("polished")), "count": 1 if state.get("draft_beat", {}).get("polished") else 0},
+        "G": {"done": bool(state.get("draft_prompt") or state.get("scene_count")), "count": state.get("scene_count", 0), "ready": agent.engine.is_ready()},
+        "H": {"done": os.path.exists(MEDIA["movie_final"]), "count": 1 if os.path.exists(MEDIA["movie_final"]) else 0},
+    }
+    return {
+        "stages": stages,
+        "material": [{"url": x["url"], "text": x["text"][:1200]} for x in material],
+        "bible": state.get("bible", {}),
+        "image_prompts": state.get("image_prompts", []),
+        "keyframes": [os.path.basename(x) for x in keyframes],
+        "draft_beat": state.get("draft_beat"),
+        "draft_prompt": state.get("draft_prompt", ""),
+        "beats": state.get("beats", []),
+        "engine_ready": agent.engine.is_ready(),
+    }
+
+
 # ---------------- 页面 ----------------
 @app.route("/")
 def index():
-    html_path = os.path.join(HERE, "webui", "index.html")
+    html_path = os.path.join(HERE, "webui", "pipeline.html")
     with open(html_path, "r", encoding="utf-8") as f:
         return Response(f.read(), mimetype="text/html")
 
@@ -255,6 +324,126 @@ def api_biliup():
         "cookies_exist": os.path.exists(os.path.join(WORKDIR, "cookies.json")),
         "guide": agent.publisher.login_guide(),
     })
+
+
+# ---------------- A-H 流程控制台 ----------------
+@app.route("/api/pipeline")
+def api_pipeline():
+    try:
+        return json_resp(pipeline_snapshot())
+    except RuntimeError as e:
+        return json_resp({"agent_error": str(e)}, status=200)
+
+
+@app.route("/api/pipeline/bible", methods=["POST"])
+def api_pipeline_bible():
+    body = request.get_json(force=True, silent=True) or {}
+    bible = body.get("bible")
+    if not isinstance(bible, dict):
+        return json_resp({"ok": False, "error": "bible 必须是 JSON 对象"}, status=400)
+    agent = get_agent()
+    agent.state["bible"] = bible
+    save_agent_state(agent)
+    return json_resp({"ok": True})
+
+
+@app.route("/api/pipeline/draft", methods=["POST"])
+def api_pipeline_draft():
+    body = request.get_json(force=True, silent=True) or {}
+    beat = body.get("draft_beat")
+    if not isinstance(beat, dict):
+        return json_resp({"ok": False, "error": "draft_beat 必须是 JSON 对象"}, status=400)
+    agent = get_agent()
+    agent.state["draft_beat"] = beat
+    agent.state["draft_prompt"] = str(body.get("draft_prompt") or "")
+    save_agent_state(agent)
+    return json_resp({"ok": True})
+
+
+@app.route("/api/pipeline/stage/<stage>", methods=["POST"])
+def api_pipeline_stage(stage):
+    stage = stage.upper()
+    if stage not in STAGE_NAMES:
+        return json_resp({"ok": False, "error": "未知阶段"}, status=404)
+    body = request.get_json(force=True, silent=True) or {}
+
+    def _job():
+        agent = get_agent()
+        topic = str(body.get("topic") or
+                    agent.config.get("project", {}).get("theme", ""))
+        if stage == "A":
+            items = agent.collector.collect(topic)
+            return {"ok": True, "material_count": len(items)}
+        if stage == "B":
+            items = load_material()
+            agent.knowledge.ingest(items)
+            return {"ok": True, "chunk_count": sum(
+                1 for _ in open(agent.knowledge.store_path, encoding="utf-8")
+            ) if os.path.exists(agent.knowledge.store_path) else 0}
+        if stage == "C":
+            material = load_material()
+            if material:
+                agent.knowledge.ingest(material)
+            concept = agent.planner.plan(topic, material, agent.knowledge)
+            agent.state["bible"] = concept
+            save_agent_state(agent)
+            return {"ok": True, "bible": concept}
+        if stage == "D":
+            concept = agent.state.get("bible") or agent.writer.story_bible()
+            prompts = agent.image_prompt.generate(concept)
+            images = agent.keyframe_gen.generate(prompts)
+            agent.state["image_prompts"] = prompts
+            agent.state["keyframe_images"] = images
+            save_agent_state(agent)
+            return {"ok": True, "prompt_count": len(prompts),
+                    "keyframe_count": sum(1 for x in images if x)}
+        if stage == "E":
+            beat = agent.writer.next_beat(agent.state.get("bible", {}),
+                                          agent.state.get("beats", []))
+            agent.state["draft_beat"] = beat
+            agent.state["draft_prompt"] = ""
+            save_agent_state(agent)
+            return {"ok": True, "draft_beat": beat}
+        if stage == "F":
+            beat = dict(agent.state.get("draft_beat") or {})
+            if not beat:
+                raise RuntimeError("请先执行 E 阶段生成分镜草稿")
+            beat["description"] = agent.polisher.polish(beat.get("description", ""))
+            beat["polished"] = True
+            agent.state["draft_beat"] = beat
+            save_agent_state(agent)
+            return {"ok": True, "draft_beat": beat}
+        if stage == "G":
+            beat = dict(agent.state.get("draft_beat") or {})
+            if not beat:
+                raise RuntimeError("请先执行 E 阶段生成或保存分镜草稿")
+            prompt = agent.director.beat_to_prompt(beat)
+            agent.state["draft_prompt"] = prompt
+            save_agent_state(agent)
+            if not body.get("generate", False):
+                return {"ok": True, "prompt": prompt}
+            n = agent.state.get("scene_count", 0)
+            keyframes = agent.state.get("keyframe_images", [])
+            keyframe = keyframes[n] if n < len(keyframes) else None
+            tmp = os.path.join(agent.scenes_dir, f"scene_{n + 1:03d}.mp4")
+            prev = agent.film if n > 0 and os.path.exists(agent.film) else None
+            agent.engine.generate(prompt, tmp, prev_clip=prev, image=keyframe)
+            if prev:
+                shutil.copy(agent.film, os.path.join(agent.scenes_dir, f"film_after_{n:03d}.mp4"))
+            shutil.move(tmp, agent.film)
+            agent.state["beats"].append(beat)
+            agent.state["scene_count"] = n + 1
+            agent.state.pop("draft_beat", None)
+            agent.state.pop("draft_prompt", None)
+            save_agent_state(agent)
+            agent._log_beat(beat, prompt, agent.film)
+            return {"ok": True, "scene_count": n + 1}
+        if stage == "H":
+            output = agent.finalize()
+            return {"ok": bool(output), "output": output}
+        raise RuntimeError("未实现的阶段")
+
+    return start_stage(stage, _job)
 
 
 @app.route("/api/publish", methods=["POST"])

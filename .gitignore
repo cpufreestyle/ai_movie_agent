@@ -1,5 +1,6 @@
 # 虚拟环境
 .venv/
+.venv-win/
 env/
 venv/
 
@@ -10,6 +11,7 @@ __pycache__/
 
 # 生成的产物（渲染视频、state.json 等运行时输出）
 outputs/
+outputs-windows-test/
 
 # 系统文件
 Thumbs.db
@@ -17,6 +19,7 @@ Thumbs.db
 
 # 本地日志
 *.log
+.github_ssh_known_hosts
 
 # 第三方发布工具（运行时通过 tools/_install_biliup.py 安装，不入库）
 tools/biliup/

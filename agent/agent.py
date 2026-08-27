@@ -24,6 +24,7 @@ from .planner import Planner
 from .image_prompt import ImagePrompt
 from .polisher import Polisher
 from .keyframe import KeyframeGenerator
+from .configutil import for_stage
 
 
 class MovieAgent:
@@ -31,18 +32,18 @@ class MovieAgent:
         self.config = config
         self.workdir = os.path.abspath(workdir)
         os.makedirs(self.workdir, exist_ok=True)
-        self.writer = Writer(config)
-        self.director = Director(config)
-        self.engine = SkyReelsEngine(config, agent_root=os.path.dirname(os.path.dirname(__file__)))
-        self.editor = Editor(fps=int(config.get("engine", {}).get("fps", 24)))
-        self.publisher = Publisher(config, workdir)
+        self.writer = Writer(for_stage(config, "E"))
+        self.director = Director(for_stage(config, "G"))
+        self.engine = SkyReelsEngine(for_stage(config, "G"), agent_root=os.path.dirname(os.path.dirname(__file__)))
+        self.editor = Editor(fps=int(for_stage(config, "G").get("engine", {}).get("fps", 24)))
+        self.publisher = Publisher(for_stage(config, "H"), workdir)
         # A–D / F 阶段工具
-        self.collector = Collector(config, workdir)
-        self.knowledge = Knowledge(config, workdir)
-        self.planner = Planner(config, workdir)
-        self.image_prompt = ImagePrompt(config, workdir)
-        self.polisher = Polisher(config, workdir)
-        self.keyframe_gen = KeyframeGenerator(config, workdir)
+        self.collector = Collector(for_stage(config, "A"), workdir)
+        self.knowledge = Knowledge(for_stage(config, "B"), workdir)
+        self.planner = Planner(for_stage(config, "C"), workdir)
+        self.image_prompt = ImagePrompt(for_stage(config, "D"), workdir)
+        self.polisher = Polisher(for_stage(config, "F"), workdir)
+        self.keyframe_gen = KeyframeGenerator(for_stage(config, "D"), workdir)
         self.image_prompts: list[str] = []
         self.keyframe_images: list[str] = []
 
