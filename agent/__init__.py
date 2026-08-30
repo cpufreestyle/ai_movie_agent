@@ -27,8 +27,10 @@ from .planner import Planner
 from .image_prompt import ImagePrompt
 from .polisher import Polisher
 from .keyframe import KeyframeGenerator
+from .blocking import BlockingGenerator
 
 __all__ = [
     "MovieAgent", "Writer", "Director", "SkyReelsEngine", "Editor", "Publisher",
     "Collector", "Knowledge", "Planner", "ImagePrompt", "Polisher", "KeyframeGenerator",
+    "BlockingGenerator",
 ]

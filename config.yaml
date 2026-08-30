@@ -163,7 +163,7 @@ output:
 publish:
   enabled: false             # Windows 初装默认禁止自动投稿；完成 biliup 登录和文案确认后再启用
   # biliup-rs 可执行文件（tools/ 下已下载 v0.2.4；执行 `biliup login` 后才能投稿）
-  binary: ""
+  binary: "tools/biliup/biliupR-v0.2.4-x86_64-windows/biliup.exe"
   account: ""                 # 多账号时填 cookie 文件名（-u 参数），留空用默认 cookies.json
   # 投稿模板，支持占位符 {title} {n} {logline}
   title_template: "{title} · 第{n}集"
@@ -183,3 +183,22 @@ publish:
   dynamic: "AI 自动生成的实验短片"
   cover: ""                   # 可选封面图路径；留空则由 B 站自动选帧
   dtime: 0                    # 0=立即发布；或填 10 位时间戳延时（需晚于当前 4 小时以上）
+
+# ============================================================
+# Blender 白模辅助（blocking / previs）
+# 通过 Blender MCP 渲染灰度预览 / 控制图 / 灰模动画，辅助构图、机位与一致性。
+# 前置：本地安装 Blender + Blender MCP 插件，并在 Blender 内启动 MCP Server（端口 9876）。
+#   - 插件：https://github.com/ahujasid/blender-mcp
+#   - Blender 内：Edit → Preferences → Add-ons → 启用 BlenderMCP；
+#     3D 视口侧栏 N → BlenderMCP → 点 "Start MCP Server"
+# 未安装/未启动时 is_ready() 为 False，管线自动跳过，不影响现有流程。
+# ============================================================
+blender:
+  enabled: true               # 总开关；Blender 未就绪时自动降级跳过
+  host: 127.0.0.1
+  port: 9876                  # Blender MCP Server 端口
+  width: 1280                 # 白模渲染分辨率
+  height: 720
+  anim_frames: 24             # 灰模动画帧数
+  use_as_i2v_start: false     # true=用白模预视图作为 SkyReels I2V 起始帧（锁定机位/构图；偏灰）
+  use_llm_parse: false        # true=用 LLM 增强分镜解析（角色数/道具）；默认规则解析

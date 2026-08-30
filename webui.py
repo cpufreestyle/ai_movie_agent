@@ -221,8 +221,9 @@ def save_config():
     # 备份原配置
     try:
         if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH + ".bak", "w", encoding="utf-8") as f:
-                f.write(open(CONFIG_PATH, "r", encoding="utf-8").read())
+            with open(CONFIG_PATH, "r", encoding="utf-8") as src:
+                with open(CONFIG_PATH + ".bak", "w", encoding="utf-8") as f:
+                    f.write(src.read())
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.safe_dump(body, f, allow_unicode=True, sort_keys=False)
         # 重置已缓存的 agent，使其使用新配置

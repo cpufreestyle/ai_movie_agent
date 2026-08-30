@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import shutil
 import time
 
@@ -25,6 +24,7 @@ from .image_prompt import ImagePrompt
 from .polisher import Polisher
 from .keyframe import KeyframeGenerator
 from .configutil import for_stage
+from .blocking import BlockingGenerator
 
 
 class MovieAgent:
@@ -37,13 +37,15 @@ class MovieAgent:
         self.engine = SkyReelsEngine(for_stage(config, "G"), agent_root=os.path.dirname(os.path.dirname(__file__)))
         self.editor = Editor(fps=int(for_stage(config, "G").get("engine", {}).get("fps", 24)))
         self.publisher = Publisher(for_stage(config, "H"), workdir)
-        # A–D / F 阶段工具
+        # A–D / F 阶段工具（fork 的按阶段配置）
         self.collector = Collector(for_stage(config, "A"), workdir)
         self.knowledge = Knowledge(for_stage(config, "B"), workdir)
         self.planner = Planner(for_stage(config, "C"), workdir)
         self.image_prompt = ImagePrompt(for_stage(config, "D"), workdir)
         self.polisher = Polisher(for_stage(config, "F"), workdir)
         self.keyframe_gen = KeyframeGenerator(for_stage(config, "D"), workdir)
+        # Blender 白模分镜（远程重构新增，未就绪自动跳过）
+        self.blocking = BlockingGenerator(config, workdir)
         self.image_prompts: list[str] = []
         self.keyframe_images: list[str] = []
 
@@ -137,6 +139,22 @@ class MovieAgent:
             self.state["bible"] = concept
             self.state["image_prompts"] = self.image_prompts
             self.state["keyframe_images"] = self.keyframe_images
+            # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
+            if self.blocking.is_ready():
+                print("[agent] 生成 Blender 白模分镜资产 ...")
+                blk = self.blocking.render_assets(self.image_prompts)
+                self.state["blocking_previs"] = blk["previews"]
+                self.state["blocking_control"] = blk["controls"]
+                self.state["blocking_anim"] = blk["anims"]
+                if self.config.get("blender", {}).get("use_as_i2v_start") and blk["previews"]:
+                    merged = list(self.keyframe_images)
+                    for i, p in enumerate(blk["previews"]):
+                        if p:
+                            if i < len(merged):
+                                merged[i] = p
+                            else:
+                                merged.append(p)
+                    self.keyframe_images = merged
             self._save_state(self.state)
             print(f"世界观: {concept.get('logline', '')}")
             print(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
@@ -221,10 +239,14 @@ class MovieAgent:
             os.path.join(kf_dir, f) for f in os.listdir(kf_dir)
             if f.lower().endswith((".png", ".jpg", ".jpeg"))
         ) if os.path.isdir(kf_dir) else [])
+        blocking_previs = state.get("blocking_previs") or None
         video = render_concept_video(concept, keyframes,
                                      os.path.join(scenes_dir, "concept_demo.mp4"),
-                                     xfade=xfade, bgm=bgm)
-        cover = render_cover(concept, keyframes,
+                                     xfade=xfade, bgm=bgm,
+                                     blocking_images=blocking_previs)
+        cover_kf = (blocking_previs[0] if (blocking_previs and blocking_previs[0])
+                    else (keyframes[0] if keyframes else None))
+        cover = render_cover(concept, cover_kf,
                              os.path.join(scenes_dir, "concept_cover.png"))
         return {"video": video, "cover": cover, "bible": concept}
 

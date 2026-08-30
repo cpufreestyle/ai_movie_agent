@@ -20,6 +20,12 @@ class Knowledge:
         self.dir = os.path.join(workdir, "kb")
         os.makedirs(self.dir, exist_ok=True)
         self.store_path = os.path.join(self.dir, "chunks.jsonl")
+        rc = self.cfg.get("ragflow", {}) or {}
+        self._ragflow = {
+            "base": (rc.get("api") or "").rstrip("/"),
+            "dataset": rc.get("dataset", "ai_movie"),
+            "key": rc.get("api_key", ""),
+        }
 
     def ingest(self, items: list[dict]) -> "Knowledge":
         chunks = []
@@ -55,15 +61,10 @@ class Knowledge:
 
     # ---- RAGFlow 后端（官方 HTTP API /api/v1）----
     def _ragflow_cfg(self):
-        rc = self.cfg.get("ragflow", {}) or {}
-        return {
-            "base": (rc.get("api") or "").rstrip("/"),
-            "dataset": rc.get("dataset", "ai_movie"),
-            "key": rc.get("api_key", ""),
-        }
+        return self._ragflow
 
     def _ragflow_headers(self):
-        return {"Authorization": f"Bearer {self._ragflow_cfg()['key']}"}
+        return {"Authorization": f"Bearer {self._ragflow['key']}"}
 
     def _resolve_dataset(self, base, headers, name):
         # 先查是否已存在
