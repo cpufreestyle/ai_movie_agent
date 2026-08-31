@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 from typing import Optional
 
 
@@ -48,7 +49,7 @@ class BlenderMCP:
                 line = buf.split(b"\n", 1)[0]
                 return json.loads(line.decode("utf-8"))
         except Exception as e:
-            print(f"  [blender-mcp] 通信失败: {e}")
+            print(f"  [blender-mcp] 通信失败: {e}", file=sys.stderr)
             return None
 
     def exec_code(self, code: str) -> Optional[str]:
@@ -62,6 +63,6 @@ class BlenderMCP:
             if alt and alt.get("status") == "success":
                 r = alt
         if r.get("status") != "success":
-            print(f"  [blender-mcp] exec 错误: {r.get('message')}")
+            print(f"  [blender-mcp] exec 错误: {r.get('message')}", file=sys.stderr)
             return None
         return r.get("message") or ""

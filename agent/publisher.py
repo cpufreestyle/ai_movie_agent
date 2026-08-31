@@ -17,6 +17,8 @@ import os
 import shutil
 import subprocess
 
+from .llmutil import log
+
 
 class Publisher:
     def __init__(self, config: dict, workdir: str):
@@ -108,7 +110,7 @@ class Publisher:
         if submit:
             cmd += ["--submit", "client"]
 
-        print(f"  [publish] 投稿到 B 站: {title_text}")
+        log(f"  [publish] 投稿到 B 站: {title_text}")
         try:
             # 注意：biliup 输出为 UTF-8，Windows 默认 GBK 解码会崩，故捕获字节后手动解码
             proc = subprocess.run(cmd, cwd=self.workdir, capture_output=True)
@@ -144,7 +146,7 @@ class Publisher:
         """上传新视频并替换旧视频（下架旧片需手动在 B 站创作中心操作）。"""
         if old_bvid:
             d = self.delete_video(old_bvid)
-            print(f"  [warn] 旧视频需手动下架: {d.get('error')}")
+            log(f"  [warn] 旧视频需手动下架: {d.get('error')}")
         return self.upload(video_path, episode=1, title=title, logline=logline,
                            desc=desc, tags=tags, dynamic=dynamic, source=source,
                            cover=cover, submit=submit)
@@ -180,9 +182,9 @@ class Publisher:
         video = render_concept_video(concept, keyframes, out_path,
                                      xfade=xfade, bgm=bgm,
                                      blocking_images=blocking_previs)
-        print(f"  [publish] 创意/规划视频已生成: {video}")
+        log(f"  [publish] 创意/规划视频已生成: {video}")
         if not self.is_ready():
-            print("  [publish] 未检测到 biliup，跳过投稿。安装并 login 后重跑即可投稿。")
+            log("  [publish] 未检测到 biliup，跳过投稿。安装并 login 后重跑即可投稿。")
             return video
 
         # 竖版封面（B 站投稿用）
@@ -191,7 +193,7 @@ class Publisher:
             from agent.concept_video import render_cover
             render_cover(concept, keyframes, cover_path)
         except Exception as e:
-            print(f"  [publish] 封面生成失败（忽略）: {e}")
+            log(f"  [publish] 封面生成失败（忽略）: {e}")
             cover_path = ""
 
         if not title:

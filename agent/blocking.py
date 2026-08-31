@@ -20,7 +20,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from tools.blender_mcp import BlenderMCP
-from agent.llmutil import make_client, chat, extract_json
+from agent.llmutil import make_client, chat, extract_json, log
 
 
 class BlockingGenerator:
@@ -84,7 +84,7 @@ class BlockingGenerator:
                         if j.get("height") in ("eye", "low", "high"):
                             spec["height"] = j["height"]
             except Exception as e:
-                print(f"  [blocking] LLM 解析失败，用规则兜底: {e}")
+                log(f"  [blocking] LLM 解析失败，用规则兜底: {e}")
         return spec
 
     # ---------- 代码模板填充 ----------
@@ -243,7 +243,7 @@ for o in scn.collection.objects:
 scn.use_nodes=False
 scn.render.filepath={NORMAL}
 bpy.ops.render.render(write_still=True, scene=scn)
-print("OK_BLOCK", {PREVIS}, {LINE}, {DEPTH}, {NORMAL})
+log("OK_BLOCK", {PREVIS}, {LINE}, {DEPTH}, {NORMAL})
 '''
 
 _ANIM_TAIL = r'''
@@ -269,5 +269,5 @@ if MV!="static":
 scn.render.filepath={OUTDIR} + "/blocking_"
 scn.frame_step=1
 bpy.ops.render.render(write_still=False, scene=scn, animation=True)
-print("OK_ANIM", {OUTDIR})
+log("OK_ANIM", {OUTDIR})
 '''

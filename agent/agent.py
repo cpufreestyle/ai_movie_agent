@@ -25,6 +25,7 @@ from .polisher import Polisher
 from .keyframe import KeyframeGenerator
 from .configutil import for_stage
 from .blocking import BlockingGenerator
+from .llmutil import log
 
 
 class MovieAgent:
@@ -97,7 +98,7 @@ class MovieAgent:
         if keyframe:
             beat["keyframe_image"] = keyframe
         prompt = self.director.beat_to_prompt(beat)
-        print(f"[agent] 第 {n+1} 镜: {beat.get('title')} | 提示词: {prompt}")
+        log(f"[agent] 第 {n+1} 镜: {beat.get('title')} | 提示词: {prompt}")
 
         prev = self.film if (n > 0 and os.path.exists(self.film)) else None
         # 先生成到临时片段，再作为续写结果替换 film
@@ -126,7 +127,7 @@ class MovieAgent:
             topic: str | None = None, do_research: bool = False) -> None:
         title = self.config.get("project", {}).get("title", "未命名")
         topic = topic or self.config.get("project", {}).get("theme", "")
-        print(f"=== 开始创作《{title}》===")
+        log(f"=== 开始创作《{title}》===")
 
         # ---- A→D 素材层 + 创意层前半 ----
         if do_research:
@@ -141,7 +142,7 @@ class MovieAgent:
             self.state["keyframe_images"] = self.keyframe_images
             # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
             if self.blocking.is_ready():
-                print("[agent] 生成 Blender 白模分镜资产 ...")
+                log("[agent] 生成 Blender 白模分镜资产 ...")
                 blk = self.blocking.render_assets(self.image_prompts)
                 self.state["blocking_previs"] = blk["previews"]
                 self.state["blocking_control"] = blk["controls"]
@@ -156,25 +157,25 @@ class MovieAgent:
                                 merged.append(p)
                     self.keyframe_images = merged
             self._save_state(self.state)
-            print(f"世界观: {concept.get('logline', '')}")
-            print(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
+            log(f"世界观: {concept.get('logline', '')}")
+            log(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
                   f"（已出图 {sum(1 for x in self.keyframe_images if x)} 张）")
         else:
             concept = self.state.get("bible") or self.writer.story_bible()
             self.state["bible"] = concept
             self.image_prompts = self.state.get("image_prompts", [])
             self.keyframe_images = self.state.get("keyframe_images", [])
-            print(f"世界观: {concept.get('logline', '')}")
+            log(f"世界观: {concept.get('logline', '')}")
 
         # ---- E→G→H 创意层后半 + 发布 ----
         try:
             while True:
                 if max_scenes and self.state["scene_count"] >= max_scenes:
-                    print(f"已达到目标分镜数 {max_scenes}，停止。")
+                    log(f"已达到目标分镜数 {max_scenes}，停止。")
                     break
                 beat = self.generate_one_scene(seed=seed)
                 dur = self.editor.probe_duration(self.film)
-                print(f"  [agent] 当前影片时长 ≈ {dur:.1f}s，"
+                log(f"  [agent] 当前影片时长 ≈ {dur:.1f}s，"
                       f"共 {self.state['scene_count']} 镜 @ {self.film}")
                 if not continuous:
                     break
@@ -183,7 +184,7 @@ class MovieAgent:
                     if ans not in ("y", "yes"):
                         break
         except KeyboardInterrupt:
-            print("\n[agent] 用户中断，已保留当前影片。")
+            log("\n[agent] 用户中断，已保留当前影片。")
         self.finalize()
 
     def finalize(self) -> str:
@@ -192,20 +193,20 @@ class MovieAgent:
         out = os.path.join(self.workdir, "movie_final.mp4")
         try:
             self.editor.finalize(self.film, out)
-            print(f"[agent] 已封装最终影片: {out}")
+            log(f"[agent] 已封装最终影片: {out}")
         except Exception as e:
-            print(f"[agent] 封装失败（不影响原始影片）: {e}")
+            log(f"[agent] 封装失败（不影响原始影片）: {e}")
             out = self.film
         # 自动投稿 B 站（config.publish.enabled 时）
         if self.publisher.enabled:
             res = self.publisher.publish_latest(self.state, out)
             if res.get("ok"):
-                print(f"[agent] 已投稿 B 站: {res['title']}")
+                log(f"[agent] 已投稿 B 站: {res['title']}")
             else:
-                print(f"[agent] 投稿失败: {res.get('error')}")
+                log(f"[agent] 投稿失败: {res.get('error')}")
                 if "login" in str(res.get("error", "")).lower() \
                         or "cookie" in str(res.get("error", "")).lower():
-                    print(self.publisher.login_guide())
+                    log(self.publisher.login_guide())
         return out
 
     def publish_only(self, video: str) -> dict:

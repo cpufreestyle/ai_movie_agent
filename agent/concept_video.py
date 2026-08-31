@@ -23,6 +23,8 @@ import subprocess
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .llmutil import log
+
 # ---------- 字体 ----------
 def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     candidates = [
@@ -206,7 +208,7 @@ def _encode_frames(seq: list[Image.Image], out_path: str, fps: int) -> str:
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
     except Exception as e:
-        print(f"  [concept-video] OpenCV 编码失败，尝试其它方式: {e}")
+        log(f"  [concept-video] OpenCV 编码失败，尝试其它方式: {e}")
     # 2) imageio
     try:
         import imageio.v2 as imageio  # imageio>=2.9
@@ -225,7 +227,7 @@ def _encode_frames(seq: list[Image.Image], out_path: str, fps: int) -> str:
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 return out_path
         except Exception as e:
-            print(f"  [concept-video] imageio 编码失败，退化 PNG 序列: {e}")
+            log(f"  [concept-video] imageio 编码失败，退化 PNG 序列: {e}")
     # 3) 退化：PNG 序列
     base = os.path.splitext(out_path)[0]
     outdir = base + "_frames"
@@ -280,13 +282,13 @@ def _write_mp4(frames: list[Image.Image], out_path: str, fps: int,
                         except Exception:
                             pass
                         os.replace(tmp, out_path)
-                        print("  [concept-video] 已混入 BGM")
+                        log("  [concept-video] 已混入 BGM")
                     else:
-                        print("  [concept-video] ffmpeg 不可用，跳过 BGM（仅转场）")
+                        log("  [concept-video] ffmpeg 不可用，跳过 BGM（仅转场）")
                 else:
-                    print("  [concept-video] 无 ffmpeg，跳过 BGM（仅转场）")
+                    log("  [concept-video] 无 ffmpeg，跳过 BGM（仅转场）")
         except Exception as e:
-            print(f"  [concept-video] BGM 处理跳过: {e}")
+            log(f"  [concept-video] BGM 处理跳过: {e}")
     return result
 
 
@@ -495,7 +497,7 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
     cards.append(_card(width, height, "— 规划 demo 完 —", end_lines, accent=(255, 196, 92)))
 
     result = _write_mp4(cards, out_path, fps=fps, hold=hold, xfade=xfade, bgm=bgm)
-    print(f"  [concept-video] 已生成视频素材: {result}")
+    log(f"  [concept-video] 已生成视频素材: {result}")
     return result
 
 
@@ -560,5 +562,5 @@ def render_cover(concept: dict, keyframes: list[str], out_path: str,
         y += int(lf.size * 1.4)
 
     img.save(out_path)
-    print(f"  [concept-video] 已生成封面: {out_path}")
+    log(f"  [concept-video] 已生成封面: {out_path}")
     return out_path

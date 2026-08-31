@@ -20,6 +20,8 @@ import shutil
 import subprocess
 import sys
 
+from .llmutil import log
+
 
 class SkyReelsEngine:
     def __init__(self, config: dict, agent_root: str):
@@ -115,7 +117,7 @@ class SkyReelsEngine:
         if image and os.path.exists(image):
             cmd += ["--image", image]
 
-        print(f"  [engine] 运行 SkyReels: {os.path.basename(out_path)} "
+        log(f"  [engine] 运行 SkyReels: {os.path.basename(out_path)} "
               f"({'I2V起始帧' if image else '续写' if prev_clip else '开新片'})")
         subprocess.run(cmd, cwd=self.repo, check=True)
 

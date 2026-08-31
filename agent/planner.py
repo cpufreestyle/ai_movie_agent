@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from .llmutil import make_client, chat, extract_json
+from .llmutil import make_client, chat, extract_json, log
 
 
 class Planner:
@@ -40,7 +40,7 @@ class Planner:
             try:
                 concept = json.loads(extract_json(out))
             except Exception:
-                print("  [C] LLM 返回非 JSON，降级模板")
+                log("  [C] LLM 返回非 JSON，降级模板")
                 concept = _template_concept(topic)
         else:
             concept = _template_concept(topic)
@@ -96,7 +96,7 @@ class Planner:
         try:
             return kb.retrieve(query, k=k) or []
         except Exception as e:
-            print(f"  [C] 检索失败（忽略）: {e}")
+            log(f"  [C] 检索失败（忽略）: {e}")
             return []
 
 

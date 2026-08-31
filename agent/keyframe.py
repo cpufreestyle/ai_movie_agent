@@ -19,6 +19,8 @@ import json
 import os
 import time
 
+from .llmutil import log
+
 
 class KeyframeGenerator:
     def __init__(self, config: dict, workdir: str):
@@ -44,7 +46,7 @@ class KeyframeGenerator:
         if not self.enabled:
             return []
         if not self.is_ready():
-            print("  [D] ComfyUI 未就绪，跳过关键帧出图（退化为纯 T2V/DF）。")
+            log("  [D] ComfyUI 未就绪，跳过关键帧出图（退化为纯 T2V/DF）。")
             return []
         return [self._one(p, i) for i, p in enumerate(prompts)]
 
@@ -52,7 +54,7 @@ class KeyframeGenerator:
     def _one(self, prompt: str, idx: int):
         wf = self._load_workflow(prompt)
         if wf is None:
-            print("  [D] 未提供 ComfyUI workflow，无法出图（请配置 image_prompt.comfyui.workflow）。")
+            log("  [D] 未提供 ComfyUI workflow，无法出图（请配置 image_prompt.comfyui.workflow）。")
             return None
         try:
             import requests
@@ -68,9 +70,9 @@ class KeyframeGenerator:
                     if img:
                         return self._save(img, idx)
                 time.sleep(2)
-            print("  [D] ComfyUI 出图超时")
+            log("  [D] ComfyUI 出图超时")
         except Exception as e:
-            print(f"  [D] ComfyUI 出图失败: {e}")
+            log(f"  [D] ComfyUI 出图失败: {e}")
         return None
 
     def _load_workflow(self, prompt: str):

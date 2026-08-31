@@ -4,6 +4,13 @@
 """
 from __future__ import annotations
 
+import sys
+
+
+def log(*args, **kwargs):
+    """统一日志输出到 stderr，保持 stdout 干净（供 JSON / 管道解析使用）。"""
+    print(*args, file=sys.stderr, **kwargs)
+
 
 def make_client(config: dict):
     llm = config.get("llm", {}) or {}
@@ -33,7 +40,7 @@ def chat(client, system: str, user: str, max_tokens: int = 400,
         )
         return r.choices[0].message.content.strip()
     except Exception as e:
-        print(f"  [llm] 调用失败: {e}")
+        log(f"  [llm] 调用失败: {e}")
         return None
 
 
