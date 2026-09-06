@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import re
 
+from .llmutil import log
+
 
 class Collector:
     def __init__(self, config: dict, workdir: str):
@@ -25,7 +27,7 @@ class Collector:
         if not items and urls:
             items = self._fetch(urls)
         if not items:
-            print("  [A 资料采集] 未配置采集源(config.collector.urls)，跳过。"
+            log("  [A 资料采集] 未配置采集源(config.collector.urls)，跳过。"
                   "可在 config 填入起始链接列表。")
         for i, it in enumerate(items):
             with open(os.path.join(self.dir, f"doc_{i+1}.md"), "w", encoding="utf-8") as f:
@@ -37,7 +39,7 @@ class Collector:
             import asyncio
             import crawl4ai
         except Exception as e:
-            print(f"  [A] crawl4ai 未安装，降级 requests: {e}")
+            log(f"  [A] crawl4ai 未安装，降级 requests: {e}")
             return self._fetch(urls)
         async def run():
             out = []
@@ -49,7 +51,7 @@ class Collector:
         try:
             return asyncio.run(run())
         except Exception as e:
-            print(f"  [A] crawl4ai 运行失败: {e}")
+            log(f"  [A] crawl4ai 运行失败: {e}")
             return self._fetch(urls)
 
     def _fetch(self, urls: list[str]) -> list[dict]:
@@ -67,5 +69,5 @@ class Collector:
                 txt = re.sub(r"\s+", " ", txt).strip()
                 out.append({"url": u, "text": txt[:8000]})
             except Exception as e:
-                print(f"  [A] 抓取失败 {u}: {e}")
+                log(f"  [A] 抓取失败 {u}: {e}")
         return out

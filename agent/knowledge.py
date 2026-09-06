@@ -13,6 +13,8 @@ import json
 import os
 import re
 
+from .llmutil import log
+
 
 class Knowledge:
     def __init__(self, config: dict, workdir: str):
@@ -20,6 +22,12 @@ class Knowledge:
         self.dir = os.path.join(workdir, "kb")
         os.makedirs(self.dir, exist_ok=True)
         self.store_path = os.path.join(self.dir, "chunks.jsonl")
+        rc = self.cfg.get("ragflow", {}) or {}
+        self._ragflow = {
+            "base": (rc.get("api") or "").rstrip("/"),
+            "dataset": rc.get("dataset", "ai_movie"),
+            "key": rc.get("api_key", ""),
+        }
 
     def ingest(self, items: list[dict]) -> "Knowledge":
         chunks = []
@@ -34,7 +42,7 @@ class Knowledge:
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
         if self.cfg.get("backend") == "ragflow":
             self._push_ragflow(items)
-        print(f"  [B 知识沉淀] 入库 {len(chunks)} 个片段 -> {self.store_path}")
+        log(f"  [B 知识沉淀] 入库 {len(chunks)} 个片段 -> {self.store_path}")
         return self
 
     def retrieve(self, query: str, k: int = 5) -> list[str]:
@@ -55,15 +63,10 @@ class Knowledge:
 
     # ---- RAGFlow 后端（官方 HTTP API /api/v1）----
     def _ragflow_cfg(self):
-        rc = self.cfg.get("ragflow", {}) or {}
-        return {
-            "base": (rc.get("api") or "").rstrip("/"),
-            "dataset": rc.get("dataset", "ai_movie"),
-            "key": rc.get("api_key", ""),
-        }
+        return self._ragflow
 
     def _ragflow_headers(self):
-        return {"Authorization": f"Bearer {self._ragflow_cfg()['key']}"}
+        return {"Authorization": f"Bearer {self._ragflow['key']}"}
 
     def _resolve_dataset(self, base, headers, name):
         # 先查是否已存在
@@ -81,20 +84,20 @@ class Knowledge:
             if r.ok:
                 return (r.json().get("data") or {}).get("id")
         except Exception as e:
-            print(f"  [B] RAGFlow 解析数据集失败: {e}")
+            log(f"  [B] RAGFlow 解析数据集失败: {e}")
         return None
 
     def _push_ragflow(self, items):
         cfg = self._ragflow_cfg()
         if not cfg["base"] or not cfg["key"]:
-            print("  [B] RAGFlow 未配置 api/api_key，跳过云端入库（仍保留本地 store）。")
+            log("  [B] RAGFlow 未配置 api/api_key，跳过云端入库（仍保留本地 store）。")
             return
         try:
             import requests
             base, headers = cfg["base"], self._ragflow_headers()
             ds_id = self._resolve_dataset(base, headers, cfg["dataset"])
             if not ds_id:
-                print("  [B] RAGFlow 无法获取数据集，跳过云端入库。")
+                log("  [B] RAGFlow 无法获取数据集，跳过云端入库。")
                 return
             doc_ids = []
             for i, it in enumerate(items):
@@ -111,9 +114,9 @@ class Knowledge:
             if doc_ids:
                 requests.post(f"{base}/api/v1/datasets/{ds_id}/chunks",
                               headers=headers, json={"document_ids": doc_ids}, timeout=60)
-                print(f"  [B] RAGFlow 已上传并触发解析 {len(doc_ids)} 篇文档 (dataset={ds_id})")
+                log(f"  [B] RAGFlow 已上传并触发解析 {len(doc_ids)} 篇文档 (dataset={ds_id})")
         except Exception as e:
-            print(f"  [B] RAGFlow 推送失败（已忽略，保留本地 store）: {e}")
+            log(f"  [B] RAGFlow 推送失败（已忽略，保留本地 store）: {e}")
 
     def _retrieve_ragflow(self, query, k):
         cfg = self._ragflow_cfg()
@@ -133,5 +136,5 @@ class Knowledge:
                 out = [c["content"] for c in chunks if c.get("content")]
                 return out or None
         except Exception as e:
-            print(f"  [B] RAGFlow 检索失败（降级本地）: {e}")
+            log(f"  [B] RAGFlow 检索失败（降级本地）: {e}")
         return None

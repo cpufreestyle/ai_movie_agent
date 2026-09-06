@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import shutil
 import time
 
 from .writer import Writer
 from .director import Director
 from .engine import SkyReelsEngine
+from .ltx_engine import LTXEngine
 from .editor import Editor
 from .publisher import Publisher
 from .collector import Collector
@@ -24,6 +24,9 @@ from .planner import Planner
 from .image_prompt import ImagePrompt
 from .polisher import Polisher
 from .keyframe import KeyframeGenerator
+from .configutil import for_stage
+from .blocking import BlockingGenerator
+from .llmutil import log
 
 
 class MovieAgent:
@@ -31,18 +34,24 @@ class MovieAgent:
         self.config = config
         self.workdir = os.path.abspath(workdir)
         os.makedirs(self.workdir, exist_ok=True)
-        self.writer = Writer(config)
-        self.director = Director(config)
-        self.engine = SkyReelsEngine(config, agent_root=os.path.dirname(os.path.dirname(__file__)))
-        self.editor = Editor(fps=int(config.get("engine", {}).get("fps", 24)))
-        self.publisher = Publisher(config, workdir)
-        # A–D / F 阶段工具
-        self.collector = Collector(config, workdir)
-        self.knowledge = Knowledge(config, workdir)
-        self.planner = Planner(config, workdir)
-        self.image_prompt = ImagePrompt(config, workdir)
-        self.polisher = Polisher(config, workdir)
-        self.keyframe_gen = KeyframeGenerator(config, workdir)
+        self.writer = Writer(for_stage(config, "E"))
+        self.director = Director(for_stage(config, "G"))
+        eng_cfg = for_stage(config, "G")
+        if (eng_cfg.get("engine", {}) or {}).get("backend") == "comfyui_ltx":
+            self.engine = LTXEngine(eng_cfg, agent_root=os.path.dirname(os.path.dirname(__file__)))
+        else:
+            self.engine = SkyReelsEngine(eng_cfg, agent_root=os.path.dirname(os.path.dirname(__file__)))
+        self.editor = Editor(fps=int(for_stage(config, "G").get("engine", {}).get("fps", 24)))
+        self.publisher = Publisher(for_stage(config, "H"), workdir)
+        # A–D / F 阶段工具（fork 的按阶段配置）
+        self.collector = Collector(for_stage(config, "A"), workdir)
+        self.knowledge = Knowledge(for_stage(config, "B"), workdir)
+        self.planner = Planner(for_stage(config, "C"), workdir)
+        self.image_prompt = ImagePrompt(for_stage(config, "D"), workdir)
+        self.polisher = Polisher(for_stage(config, "F"), workdir)
+        self.keyframe_gen = KeyframeGenerator(for_stage(config, "D"), workdir)
+        # Blender 白模分镜（远程重构新增，未就绪自动跳过）
+        self.blocking = BlockingGenerator(config, workdir)
         self.image_prompts: list[str] = []
         self.keyframe_images: list[str] = []
 
@@ -94,8 +103,11 @@ class MovieAgent:
         if keyframe:
             beat["keyframe_image"] = keyframe
         prompt = self.director.beat_to_prompt(beat)
-        print(f"[agent] 第 {n+1} 镜: {beat.get('title')} | 提示词: {prompt}")
+        log(f"[agent] 第 {n+1} 镜: {beat.get('title')} | 提示词: {prompt}")
 
+        if not self.engine.is_ready():
+            log("[agent] 视频引擎未就绪，停止创作（请安装对应后端或检查 engine.backend 配置）。")
+            return None
         prev = self.film if (n > 0 and os.path.exists(self.film)) else None
         # 先生成到临时片段，再作为续写结果替换 film
         tmp = os.path.join(self.scenes_dir, f"scene_{n+1:03d}.mp4")
@@ -123,7 +135,7 @@ class MovieAgent:
             topic: str | None = None, do_research: bool = False) -> None:
         title = self.config.get("project", {}).get("title", "未命名")
         topic = topic or self.config.get("project", {}).get("theme", "")
-        print(f"=== 开始创作《{title}》===")
+        log(f"=== 开始创作《{title}》===")
 
         # ---- A→D 素材层 + 创意层前半 ----
         if do_research:
@@ -136,26 +148,45 @@ class MovieAgent:
             self.state["bible"] = concept
             self.state["image_prompts"] = self.image_prompts
             self.state["keyframe_images"] = self.keyframe_images
+            # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
+            if self.blocking.is_ready():
+                log("[agent] 生成 Blender 白模分镜资产 ...")
+                blk = self.blocking.render_assets(self.image_prompts)
+                self.state["blocking_previs"] = blk["previews"]
+                self.state["blocking_control"] = blk["controls"]
+                self.state["blocking_anim"] = blk["anims"]
+                if self.config.get("blender", {}).get("use_as_i2v_start") and blk["previews"]:
+                    merged = list(self.keyframe_images)
+                    for i, p in enumerate(blk["previews"]):
+                        if p:
+                            if i < len(merged):
+                                merged[i] = p
+                            else:
+                                merged.append(p)
+                    self.keyframe_images = merged
             self._save_state(self.state)
-            print(f"世界观: {concept.get('logline', '')}")
-            print(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
+            log(f"世界观: {concept.get('logline', '')}")
+            log(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
                   f"（已出图 {sum(1 for x in self.keyframe_images if x)} 张）")
         else:
             concept = self.state.get("bible") or self.writer.story_bible()
             self.state["bible"] = concept
             self.image_prompts = self.state.get("image_prompts", [])
             self.keyframe_images = self.state.get("keyframe_images", [])
-            print(f"世界观: {concept.get('logline', '')}")
+            log(f"世界观: {concept.get('logline', '')}")
 
         # ---- E→G→H 创意层后半 + 发布 ----
         try:
             while True:
                 if max_scenes and self.state["scene_count"] >= max_scenes:
-                    print(f"已达到目标分镜数 {max_scenes}，停止。")
+                    log(f"已达到目标分镜数 {max_scenes}，停止。")
                     break
                 beat = self.generate_one_scene(seed=seed)
+                if beat is None:
+                    log("[agent] 引擎未就绪，已停止创作。")
+                    break
                 dur = self.editor.probe_duration(self.film)
-                print(f"  [agent] 当前影片时长 ≈ {dur:.1f}s，"
+                log(f"  [agent] 当前影片时长 ≈ {dur:.1f}s，"
                       f"共 {self.state['scene_count']} 镜 @ {self.film}")
                 if not continuous:
                     break
@@ -164,7 +195,7 @@ class MovieAgent:
                     if ans not in ("y", "yes"):
                         break
         except KeyboardInterrupt:
-            print("\n[agent] 用户中断，已保留当前影片。")
+            log("\n[agent] 用户中断，已保留当前影片。")
         self.finalize()
 
     def finalize(self) -> str:
@@ -173,28 +204,34 @@ class MovieAgent:
         out = os.path.join(self.workdir, "movie_final.mp4")
         try:
             self.editor.finalize(self.film, out)
-            print(f"[agent] 已封装最终影片: {out}")
+            log(f"[agent] 已封装最终影片: {out}")
         except Exception as e:
-            print(f"[agent] 封装失败（不影响原始影片）: {e}")
+            log(f"[agent] 封装失败（不影响原始影片）: {e}")
             out = self.film
         # 自动投稿 B 站（config.publish.enabled 时）
         if self.publisher.enabled:
             res = self.publisher.publish_latest(self.state, out)
             if res.get("ok"):
-                print(f"[agent] 已投稿 B 站: {res['title']}")
+                log(f"[agent] 已投稿 B 站: {res['title']}")
             else:
-                print(f"[agent] 投稿失败: {res.get('error')}")
+                log(f"[agent] 投稿失败: {res.get('error')}")
                 if "login" in str(res.get("error", "")).lower() \
                         or "cookie" in str(res.get("error", "")).lower():
-                    print(self.publisher.login_guide())
+                    log(self.publisher.login_guide())
         return out
 
     def publish_only(self, video: str) -> dict:
         """单独发布某个已存在的影片（供 cli publish 子命令使用）。"""
+        ep = self.state.get("scene_count", 1) or 1
+        film_title = self.state.get("title", "未命名")
+        template = self.publisher.cfg.get("title_template", "{title} · 第{n}集")
+        title = self.publisher._fill(template, title=film_title, n=ep)
+        title = title.replace(f"第{ep}集", f"第{Publisher._cn_episode(ep)}集")
         return self.publisher.upload(
             video,
-            episode=self.state.get("scene_count", 1),
-            title=self.state.get("title", "未命名"),
+            episode=ep,
+            title=title,
+            film_title=film_title,
             logline=self.state.get("bible", {}).get("logline", ""),
         )
 
@@ -220,10 +257,14 @@ class MovieAgent:
             os.path.join(kf_dir, f) for f in os.listdir(kf_dir)
             if f.lower().endswith((".png", ".jpg", ".jpeg"))
         ) if os.path.isdir(kf_dir) else [])
+        blocking_previs = state.get("blocking_previs") or None
         video = render_concept_video(concept, keyframes,
                                      os.path.join(scenes_dir, "concept_demo.mp4"),
-                                     xfade=xfade, bgm=bgm)
-        cover = render_cover(concept, keyframes,
+                                     xfade=xfade, bgm=bgm,
+                                     blocking_images=blocking_previs)
+        cover_kf = (blocking_previs[0] if (blocking_previs and blocking_previs[0])
+                    else (keyframes[0] if keyframes else None))
+        cover = render_cover(concept, cover_kf,
                              os.path.join(scenes_dir, "concept_cover.png"))
         return {"video": video, "cover": cover, "bible": concept}
 

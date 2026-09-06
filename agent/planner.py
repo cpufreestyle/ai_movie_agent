@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from .llmutil import make_client, chat, extract_json
+from .llmutil import make_client, chat, extract_json, log
 
 
 class Planner:
@@ -34,13 +34,14 @@ class Planner:
             "theme(主题), outline(分镜大纲数组，每项是英文短句画面描述)。只输出 JSON。"
         )
         user = f"主题：{topic}\n参考素材：\n{chr(10).join(global_refs)[:3000]}"
-        out = chat(self.client, system, user, max_tokens=800,
-                   temperature=self.temperature, model=self.model) if self.client else None
+        out = chat(self.client, system, user, max_tokens=2000,
+                   temperature=self.temperature, model=self.model,
+                   extra_body={"enable_thinking": False}) if self.client else None
         if out:
             try:
                 concept = json.loads(extract_json(out))
             except Exception:
-                print("  [C] LLM 返回非 JSON，降级模板")
+                log("  [C] LLM 返回非 JSON，降级模板")
                 concept = _template_concept(topic)
         else:
             concept = _template_concept(topic)
@@ -73,8 +74,9 @@ class Planner:
             "three_act(数组3项：起 / 承 / 转 各一句)。只输出 JSON。"
         )
         user = f"主题：{topic}\n已有企划：\n{json.dumps(concept, ensure_ascii=False)}"
-        out = (chat(self.client, system, user, max_tokens=900,
-                    temperature=self.temperature, model=self.model)
+        out = (chat(self.client, system, user, max_tokens=2000,
+                    temperature=self.temperature, model=self.model,
+                    extra_body={"enable_thinking": False})
                if self.client else None)
         extra = None
         if out:
@@ -96,7 +98,7 @@ class Planner:
         try:
             return kb.retrieve(query, k=k) or []
         except Exception as e:
-            print(f"  [C] 检索失败（忽略）: {e}")
+            log(f"  [C] 检索失败（忽略）: {e}")
             return []
 
 
