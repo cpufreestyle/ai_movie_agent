@@ -1,17 +1,30 @@
 # AI 电影 Agent（本地持续创作）
 
-一个在 **WSL / 本地** 持续创作的 AI 电影生成 Agent。参考开源项目
+一个在 **Windows / Linux / macOS（WSL）** 持续创作的 AI 电影生成 Agent。视频引擎支持
 [SkyReels-V2](https://github.com/SkyworkAI/SkyReels-V2)（昆仑万维开源的
-**无限时长电影生成模型**，基于 Diffusion Forcing）作为视频引擎，并在其上叠加一个
+**无限时长电影生成模型**，基于 Diffusion Forcing）、以及 ComfyUI 生态的
+**MiniMax H3** / **LTX-2.5**，并在其上叠加一个
 "编剧 → 导演 → 引擎" 的 Agent 编排层，实现自动化、可无限续写的电影创作。
+
+> 跨平台一键部署（Docker / 原生脚本，**NVIDIA + AMD 均可**）：见 [DEPLOY.md](DEPLOY.md)。
 
 ## 它能做什么
 - **持续创作 / 无限时长**：用 SkyReels 的 Diffusion Forcing 续写能力，每次在当前影片
   末尾追加一段新镜头，影片无缝变长，Agent 可一直创作到手动停止。
 - **自动剧本**：用本地 LLM（默认 Ollama，OpenAI 兼容接口）生成世界观设定与逐镜分镜；
   无 LLM 时自动降级为模板生成，保证流程可跑通。
-- **电影感提示词**：导演模块把分镜压缩成 SkyReels 友好的英文提示词（含运镜、风格）。
+- **电影感提示词**：导演模块把分镜压缩成视频引擎友好的英文提示词（含运镜、风格）。
 - **状态持久化**：每一镜的剧本、提示词、片段都落盘，可随时 `status` 查看进度。
+
+## 部署方式（跨平台，Docker / 原生脚本 二选一）
+
+详细见 [DEPLOY.md](DEPLOY.md)。两种都支持 Windows / Linux / macOS，视频引擎跑在带显卡的
+ComfyUI 上（本机或远程，应用与引擎解耦）：
+
+- **Docker Compose（推荐交付）**：`cp .env.example .env` → `docker compose up -d` → 拉 LLM → 开 `http://localhost:8000`。
+- **原生一键脚本**：Windows `setup_windows.bat` / `start_webui_windows.bat`；Linux/macOS `bash setup_unix.sh` / `./start_webui.sh`。
+- **显卡后端**：NVIDIA 开箱即用；AMD 走 ROCm（`docker compose -f docker-compose.yml -f docker-compose.amd.yml --profile gpu up -d`，权重用 `--gpu amd` 下载）。`bash detect_gpu.sh` 自动探测给建议。
+- **视频权重**：NVIDIA 用 `python download_mmh3_models.py` / `download_ltx_models.py`（免 token，走 hf-mirror，多源续传）；AMD 加 `--gpu amd` 切 bf16/INT8 变体。
 
 ## 架构
 ```
@@ -23,7 +36,7 @@ cli.py ──> agent/agent.py (MovieAgent, 统一编排 A→H)
            ├── keyframe.py     D 关键帧出图 (ComfyUI -> SkyReels I2V)
            ├── writer.py       E 剧本/分镜  (LLM + 模板兜底)
            ├── polisher.py     F 去AI味润色 (qu-ai-wei 方法论)
-           ├── engine.py       G 视频导演   (SkyReels-V2 DF 续写, 子进程)
+           ├── engine.py       G 视频导演   (SkyReels-V2 DF 续写 / ComfyUI: MiniMax H3 / LTX-2.5)
            ├── director.py     分镜 -> SkyReels 提示词
            └── publisher.py    H 自动发布   (biliup-rs, B 站)
 
@@ -34,11 +47,11 @@ cli.py ──> agent/agent.py (MovieAgent, 统一编排 A→H)
 `scenes/`（每镜片段与备份）。
 
 ## 环境要求
-- WSL2 + Ubuntu，NVIDIA 显卡 + CUDA 驱动（WSL 内 `nvidia-smi` 可见）。
-- 本项目实测环境：RTX 5070 Ti 16GB → 跑 `SkyReels-V2-DF-1.3B-540P`（约 14.7GB 显存）。
-- 想要 14B 画质需 ≥48GB 显存，改 `config.yaml` 的 `model_id` 即可。
-- 本地 LLM 可选：装 [Ollama](https://ollama.com) 并 `ollama pull qwen2.5:14b`。
-  不装也能跑（模板模式）。
+- **跨平台**：Windows / Linux / macOS（WSL2）。视频生成需 NVIDIA 或 AMD 显卡（后者走 ROCm，见 [DEPLOY.md](DEPLOY.md)）。
+- 本项目实测环境：RTX 5070 Ti 16GB 跑 MiniMax H3（int4_convrot，约 12~14GB 显存）。
+- 想要更高画质 / 更长镜头需更大显存，改 `config.yaml` 的 `engine` 段即可。
+- 本地 LLM 可选：装 [Ollama](https://ollama.com) 并 `ollama pull qwen2.5:3b`（WebUI 默认模型）。不装也能跑（模板模式）。
+- 完整依赖与部署步骤见 [DEPLOY.md](DEPLOY.md)。
 
 ## 快速开始（WSL）
 ```bash
@@ -91,7 +104,9 @@ python cli.py webui --port 9000   # 自定义端口
 | 项 | 说明 |
 |----|------|
 | `project.theme` / `style` | 世界观主题与视觉风格 |
-| `engine.model_id` | 模型，1.3B-540P / 14B-540P / 14B-720P |
+| `engine.backend` | 视频引擎：`comfyui_mmH3`(MiniMax H3, 默认) / `comfyui_ltx`(LTX-2.5) / `skyreels` |
+| `engine.comfyui_mmH3.*` / `comfyui_ltx.*` | ComfyUI 地址与量化(`precision`)；AMD 下自动改 bf16 |
+| `engine.model_id` | SkyReels 模型，1.3B-540P / 14B-540P / 14B-720P |
 | `engine.offload` | 显存不足时卸载到 CPU |
 | `engine.scene_frames` | 每镜帧数（97≈4s @24fps） |
 | `llm.*` | Ollama / 任意 OpenAI 兼容端点；`disabled: true` 强制模板 |
@@ -112,7 +127,7 @@ python cli.py webui --port 9000   # 自定义端口
 | D 图像提示词/关键帧 | ImagePrompt+KeyframeGenerator | skills/D_image_prompt.md | ComfyUI |
 | E 剧本创作 | Writer | skills/E_writer.md | ShortGPT(参考) |
 | F 去AI味润色 | Polisher | skills/F_polisher.md | qu-ai-wei |
-| G 视频导演 | Engine+Director | skills/G_director.md | SkyReels-V2 |
+| G 视频导演 | Engine+Director | skills/G_director.md | SkyReels-V2 / MiniMax H3 / LTX-2.5 |
 | H 自动发布 | Publisher | skills/H_publisher.md | biliup-rs |
 
 ## 发布到 B 站（H 阶段，自动投稿）
