@@ -1,0 +1,32 @@
+# AMD / ROCm 覆盖文件：与 docker-compose.yml 一起使用
+#   docker compose -f docker-compose.yml -f docker-compose.amd.yml --profile gpu up -d
+#
+# 作用：把 comfyui 服务从 NVIDIA(CUDA) 切换为 AMD(ROCm)。
+#   - 直连 /dev/kfd + /dev/dri，不再需要 nvidia 设备预留（清空 base 里的 deploy.devices）
+#   - 镜像换成 ROCm 版 ComfyUI（在 .env 设 COMFYUI_IMAGE_ROCM）
+#   - 视频权重需改用 bf16/GGUF/INT8 变体（见 download_*_models.py 的 --gpu amd）
+#
+# 仅 Linux + 装好 ROCm 驱动的主机有效；Windows AMD 需走 Zluma，不在本覆盖范围内。
+services:
+  comfyui:
+    image: ${COMFYUI_IMAGE_ROCM:-your-registry/comfyui-rocm:latest}
+    profiles: ["gpu"]
+    ports:
+      - "8188:8188"
+    volumes:
+      - comfyui_models:/ComfyUI/models
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video          # 渲染组（多数发行版 gid 44）
+    environment:
+      - COMFYUI_API=http://comfyui:8188
+      # ROCm 常用调优（遇到「unsupported gfx」或选错卡时按需取消注释）
+      # - HSA_OVERRIDE_GFX_VERSION=11.0.0   # 例如 RX 7000 系列用 11.0.0
+      # - HIP_VISIBLE_DEVICES=0
+    # 清空 base 里的 NVIDIA 设备预留（ROCm 走上面的 devices）
+    deploy:
+      resources:
+        reservations:
+          devices: []

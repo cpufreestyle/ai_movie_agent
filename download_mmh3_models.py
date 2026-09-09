@@ -9,10 +9,12 @@
 #   audio_vae   -> vae/
 #   lora        -> loras/
 #
-# 用法（在「有 NVIDIA 显卡、已装好 ComfyUI」的机器上跑）：
-#   python download_mmh3_models.py --models-dir D:\ComfyUI\models
-#   # 或指定环境变量：  set COMFYUI_MODELS_DIR=D:\ComfyUI\models
-#   # 权重会落到 <models-dir>/{diffusion_models,text_encoders,vae,loras}
+# 用法（在「有显卡、已装好 ComfyUI」的机器上跑）：
+#   python download_mmh3_models.py --models-dir D:\ComfyUI\models            # NVIDIA（默认，int4 convrot）
+#   python download_mmh3_models.py --gpu amd --models-dir /ComfyUI/models  # AMD/ROCm（INT8 convrot）
+#
+# 说明：NVFP4 / int4_convrot 是 NVIDIA(CUDA) 专属；AMD(ROCm) 需改用 INT8/bf16/GGUF 变体。
+#       AMD 文件名随社区仓库变动，脚本会 HEAD 自检、源不存在自动跳过，失败请按实际仓库调整。
 import os, sys, time, argparse, requests
 
 # 走本地代理（Clash mixed-port 7897）；已手工设置过代理时不覆盖
@@ -22,6 +24,8 @@ if not os.environ.get("HTTPS_PROXY") and not os.environ.get("HTTP_PROXY"):
 ap = argparse.ArgumentParser(description="下载 MiniMax H3 权重（免 token / 续传 / 重试）")
 ap.add_argument("--models-dir", default=os.environ.get("COMFYUI_MODELS_DIR") or "ComfyUI/models",
                 help="ComfyUI 的 models 根目录（默认 COMFYUI_MODELS_DIR 或 ./ComfyUI/models）")
+ap.add_argument("--gpu", choices=["nvidia", "amd"], default="nvidia",
+                help="目标显卡后端：nvidia=默认 int4 convrot；amd=INT8/bf16 变体（ROCm）")
 args = ap.parse_args()
 
 MIRROR = "https://hf-mirror.com"
@@ -34,18 +38,27 @@ for d in (DIFF, TE, VAE, LORA):
     os.makedirs(d, exist_ok=True)
 
 # ([(repo_id, src_path), ...备源], dst_dir, dst_filename)
-# 首源 Merserk/MiniMax-H3-INT4-ConvRot 与 config 的 int4_convrot 命名一致；
-# 其余社区/官方重打包仓作备源，脚本会 HEAD 自检、自动跳过不存在的源。
-JOBS = [
-    ([("Merserk/MiniMax-H3-INT4-ConvRot", "minimax_h3_fl2va_pruned_int4_convrot.safetensors"),
-      ("Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot", "minimax_h3_fl2va_pruned_int4_convrot.safetensors"),
-      ("Comfy-Org/MiniMax-H3", "minimax_h3_fl2va_pruned_int4_convrot.safetensors")],
-     DIFF, "minimax_h3_fl2va_pruned_int4_convrot.safetensors"),
+if args.gpu == "amd":
+    # AMD/ROCm：INT8 convrot（比 int4 更稳，且非 CUDA 专属）。备源 Comfy-Org 重打包。
+    UNET = [("Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
+            ("Comfy-Org/MiniMax-H3", "minimax_h3_fl2va_pruned_int8_convrot.safetensors")]
+    TE_SRC = [("Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot", "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
+              ("Comfy-Org/MiniMax-H3", "qwen3vl_32b_minimax_h3_int8_convrot.safetensors")]
+else:
+    # NVIDIA：int4 convrot（与 config 的 engine.comfyui_mmH3 命名一致）
+    UNET = [("Merserk/MiniMax-H3-INT4-ConvRot", "minimax_h3_fl2va_pruned_int4_convrot.safetensors"),
+            ("Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot", "minimax_h3_fl2va_pruned_int4_convrot.safetensors"),
+            ("Comfy-Org/MiniMax-H3", "minimax_h3_fl2va_pruned_int4_convrot.safetensors")]
+    TE_SRC = [("Merserk/MiniMax-H3-INT4-ConvRot", "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"),
+              ("Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot", "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"),
+              ("Comfy-Org/MiniMax-H3", "qwen3vl_32b_minimax_h3_int4_convrot.safetensors")]
 
-    ([("Merserk/MiniMax-H3-INT4-ConvRot", "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"),
-      ("Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot", "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"),
-      ("Comfy-Org/MiniMax-H3", "qwen3vl_32b_minimax_h3_int4_convrot.safetensors")],
-     TE, "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"),
+JOBS = [
+    (UNET, DIFF, "minimax_h3_fl2va_pruned_int4_convrot.safetensors" if args.gpu == "nvidia"
+                 else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
+
+    (TE_SRC, TE, "qwen3vl_32b_minimax_h3_int4_convrot.safetensors" if args.gpu == "nvidia"
+                 else "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
 
     ([("Merserk/MiniMax-H3-INT4-ConvRot", "minimax_h3_video_vae_fp16.safetensors"),
       ("Comfy-Org/MiniMax-H3", "minimax_h3_video_vae_fp16.safetensors")],
@@ -128,7 +141,7 @@ def _fetch(final_url, dstdir, dstname, total):
     return False
 
 if __name__ == "__main__":
-    log(f"=== MiniMax H3 权重下载（续传+重试+多源） ===")
+    log(f"=== MiniMax H3 权重下载（续传+重试+多源） GPU={args.gpu} ===")
     log(f"models 根目录: {MODELS_ROOT}")
     for sources, d, name in JOBS:
         try:

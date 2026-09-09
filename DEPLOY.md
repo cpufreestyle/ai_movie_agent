@@ -55,6 +55,38 @@ docker compose exec ollama ollama pull qwen2.5:3b
   - **MiniMax H3（默认引擎）**：`python download_mmh3_models.py --models-dir <ComfyUI/models 路径>`（int4_convrot pruned unet + qwen3vl_32b 文本编码器 + 音视频 VAE + turbo LoRA，多源续传）。
   - 两条脚本都自动走本地代理 `127.0.0.1:7897`、断连自动重试，在「有 NVIDIA 显卡、已装好 ComfyUI」的机器上跑。
 
+## 显卡后端：NVIDIA 还是 AMD？
+
+视频生成依赖的具体量化格式不同，ComfyUI 运行时也不同：
+
+| 后端 | 运行时 | 默认权重 | 说明 |
+|---|---|---|---|
+| **NVIDIA** | CUDA | NVFP4（LTX）/ int4_convrot（MiniMax H3） | 开箱即用，性能最好 |
+| **AMD** | ROCm（仅 Linux） | bf16 / INT8 / GGUF 变体 | NVFP4/int4_convrot 是 CUDA 专属，必须换权重 |
+
+**自动探测（尽力而为，给建议）**：`bash detect_gpu.sh` 会看 `nvidia-smi` / `rocminfo` / `/dev/kfd`，输出该用哪条命令。
+
+**Docker 下选择**：
+```bash
+# NVIDIA（默认）
+docker compose --profile gpu up -d
+
+# AMD / ROCm（叠加覆盖文件，把 comfyui 切成 ROCm 镜像 + 直连 /dev/kfd /dev/dri）
+docker compose -f docker-compose.yml -f docker-compose.amd.yml --profile gpu up -d
+#   .env 里设：GPU_BACKEND=amd  且  COMFYUI_IMAGE_ROCM=你们的 ROCm ComfyUI 镜像
+```
+
+**原生脚本下选择**：下载权重时按后端切换（HEAD 自检，源不存在自动跳过）：
+```bash
+python download_mmh3_models.py --gpu nvidia --models-dir D:\ComfyUI\models   # MiniMax H3
+python download_mmh3_models.py --gpu amd    --models-dir /ComfyUI/models     # INT8 变体
+python download_ltx_models.py   --gpu nvidia --models-dir D:\ComfyUI\models   # NVFP4
+python download_ltx_models.py   --gpu amd    --models-dir /ComfyUI/models     # bf16 官方权重
+```
+AMD 上把 `.env` 的 `GPU_BACKEND=amd`，Agent 会自动把 LTX 精度注入改为 `bf16`；MiniMax H3 走 INT8 变体即可。
+
+> Windows 上的 AMD 需经 Zluma/DirectML 跑 ComfyUI，不稳定，本交付未内置专门配置；建议 AMD 视频在 Linux(ROCm) 或远程 NVIDIA 机器上跑。
+
 ## 环境变量（Docker / 远程部署用，免改 config.yaml）
 | 变量 | 作用 |
 |---|---|

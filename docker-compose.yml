@@ -17,6 +17,7 @@ services:
       - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
       - COMFYUI_API=${COMFYUI_API:-http://comfyui:8188}
       - ENGINE_BACKEND=${ENGINE_BACKEND:-comfyui_mmH3}
+      - GPU_BACKEND=${GPU_BACKEND:-nvidia}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b}
     volumes:
       - ./config.yaml:/app/config.yaml:ro

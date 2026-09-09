@@ -9,6 +9,8 @@
                  -> 改写 engine.comfyui_ltx.api / engine.comfyui_mmH3.api /
                     image_prompt.comfyui.api 及所有 comfyui 档案
   ENGINE_BACKEND 默认视频引擎：comfyui_mmH3（MiniMax H3）或 comfyui_ltx（LTX-2.5）
+  GPU_BACKEND    显卡后端：nvidia（默认）或 amd。amd 时 NVFP4 不支持，
+                 自动把 LTX 精度降为 bf16（视频权重需改用 bf16/GGUF/INT8 变体，见下载脚本）
 """
 import os
 
@@ -40,4 +42,8 @@ def apply_env_overrides(cfg: dict) -> dict:
 
     if os.environ.get("ENGINE_BACKEND"):
         cfg.setdefault("engine", {})["backend"] = os.environ["ENGINE_BACKEND"]
+
+    # 显卡后端：amd 时 NVFP4 不支持，把 LTX 精度降为 bf16（bf16 权重跑 ROCm 更稳）
+    if os.environ.get("GPU_BACKEND") == "amd":
+        cfg.setdefault("engine", {}).setdefault("comfyui_ltx", {})["precision"] = "bf16"
     return cfg

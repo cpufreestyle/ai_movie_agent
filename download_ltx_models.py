@@ -1,28 +1,53 @@
 #!/usr/bin/env python
 # 后台下载 LTX-2.5 必需权重（无需 HF token，走 hf-mirror.com 镜像）
 # 支持断点续传 + 连接中断自动重试
-import os, sys, time, requests
+#
+# 用法：
+#   python download_ltx_models.py --models-dir D:\ComfyUI\models          # NVIDIA（默认，NVFP4）
+#   python download_ltx_models.py --gpu amd --models-dir /ComfyUI/models # AMD/ROCm（bf16 变体）
+#
+# 说明：NVFP4 是 NVIDIA Blackwell 专属；AMD(ROCm) 须用 bf16 权重（--gpu amd）。
+import os, sys, time, argparse, requests
 
 # 走本地代理（Clash mixed-port 7897）；已手工设置过代理时不覆盖
 if not os.environ.get("HTTPS_PROXY") and not os.environ.get("HTTP_PROXY"):
     os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
 
+ap = argparse.ArgumentParser(description="下载 LTX-2.5 权重（免 token / 续传 / 重试）")
+ap.add_argument("--models-dir", default=os.environ.get("COMFYUI_MODELS_DIR") or "ComfyUI/models",
+                help="ComfyUI 的 models 根目录（默认 COMFYUI_MODELS_DIR 或 ./ComfyUI/models）")
+ap.add_argument("--gpu", choices=["nvidia", "amd"], default="nvidia",
+                help="目标显卡后端：nvidia=默认 NVFP4；amd=bf16 变体（ROCm）")
+args = ap.parse_args()
+
 MIRROR = "https://hf-mirror.com"
-DIFF = r"D:\ComfyUI\models\diffusion_models"
-TE = r"D:\ComfyUI\models\text_encoders"
-VAE = r"D:\ComfyUI\models\vae"
-os.makedirs(DIFF, exist_ok=True)
-os.makedirs(TE, exist_ok=True)
-os.makedirs(VAE, exist_ok=True)
+MODELS_ROOT = os.path.abspath(args.models_dir)
+DIFF = os.path.join(MODELS_ROOT, "diffusion_models")
+TE = os.path.join(MODELS_ROOT, "text_encoders")
+VAE = os.path.join(MODELS_ROOT, "vae")
+for d in (DIFF, TE, VAE):
+    os.makedirs(d, exist_ok=True)
+
+# transformer / 文本编码器：NVIDIA 用 NVFP4 + int8 convrot；AMD 用 bf16（HEAD 自检，源不存在自动跳过）
+if args.gpu == "amd":
+    TRANSFORMER = [("Lightricks/LTX-2.5", "ltx-2.5-21b-beta.safetensors"),
+                   ("comfyicu/LTX-2.5", "ltx-2.5-21b-beta-transformers-bf16.safetensors")]
+    TEXTENC = [("comfyicu/LTX-2.5", "gemma4-12b-with-proj-ltx-2.5-comfy-bf16.safetensors"),
+               ("Lightricks/LTX-2.5", "gemma4-12b-with-proj-ltx-2.5-comfy-bf16.safetensors")]
+    TF_NAME = "ltx-2.5-21b-beta.safetensors"
+    TE_NAME = "gemma4-12b-with-proj-ltx-2.5-comfy-bf16.safetensors"
+else:
+    TRANSFORMER = [("BennyDaBall/LTX-2.5-22b-distilled-nvfp4-comfy",
+                    "ltx-2.5-22b-distilled-transformer-nvfp4-comfy.safetensors")]
+    TEXTENC = [("DeepNeuralNerd/Gemma-4-12B-it-uncensored-heretic-DeepNeuralNerd-LTX_2.5_ComfyUI",
+                "Gemma-4-12B-it-uncensored-heretic - DeepNeuralNerd -LTX 2.5-ComfyUI-int8convrot.safetensors")]
+    TF_NAME = "ltx-2.5-22b-distilled-transformer-nvfp4-comfy.safetensors"
+    TE_NAME = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
 
 # ([(repo_id, src_path), ...备源], dst_dir, dst_filename)
 JOBS = [
-    ([("BennyDaBall/LTX-2.5-22b-distilled-nvfp4-comfy",
-       "ltx-2.5-22b-distilled-transformer-nvfp4-comfy.safetensors")],
-     DIFF, "ltx-2.5-22b-distilled-transformer-nvfp4.safetensors"),
-    ([("DeepNeuralNerd/Gemma-4-12B-it-uncensored-heretic-DeepNeuralNerd-LTX_2.5_ComfyUI",
-       "Gemma-4-12B-it-uncensored-heretic - DeepNeuralNerd -LTX 2.5-ComfyUI-int8convrot.safetensors")],
-     TE, "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"),
+    (TRANSFORMER, DIFF, TF_NAME),
+    (TEXTENC, TE, TE_NAME),
     # LTX-2.5 的音视频 VAE：官方 Lightricks/LTX-2.5 是 gated(401)，改用镜像仓库。
     # 缺 VAE 时 LTXVEmptyLatentAudio 会报
     #   'PixelspaceConversionVAE' object has no attribute 'latent_frequency_bins'
@@ -105,7 +130,8 @@ def _fetch(final_url, dstdir, dstname, total):
     return False
 
 if __name__ == "__main__":
-    log("=== LTX-2.5 权重下载（续传+重试+多源） ===")
+    log(f"=== LTX-2.5 权重下载（续传+重试+多源） GPU={args.gpu} ===")
+    log(f"models 根目录: {MODELS_ROOT}")
     for sources, d, name in JOBS:
         try:
             ok = download(sources, d, name)
