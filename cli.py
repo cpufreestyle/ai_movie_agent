@@ -25,6 +25,7 @@ import os
 import sys
 
 import yaml
+from config_env import apply_env_overrides
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -37,7 +38,7 @@ def ensure(cond, msg: str):
 
 def load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return apply_env_overrides(yaml.safe_load(f) or {})
 
 
 def main():
@@ -125,6 +126,20 @@ def main():
     p_ltx.add_argument("--out", default=os.path.join(HERE, "outputs", "ltx_clip.mp4"))
     p_ltx.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
 
+    p_h3 = sub.add_parser("mmh3",
+                          help="用 ComfyUI + MiniMax H3(Turbo 4 步) 生成带原生立体声的短视频")
+    p_h3.add_argument("--prompt", default="一个赛博都市的远景，镜头缓慢推进",
+                      help="视频提示词；H3 会同时用它生成画面与音效")
+    p_h3.add_argument("--image", default=None, help="可选首帧（I2VA 图生视频）")
+    p_h3.add_argument("--frames", type=int, default=None,
+                      help="帧数（自动吸附到 H3 的 17n+5 网格）")
+    p_h3.add_argument("--resolution", default=None,
+                      help="如 768x448（自动修正为 32 的倍数）")
+    p_h3.add_argument("--no-turbo", action="store_true",
+                      help="关闭 Turbo LoRA，改用 30 步基线（画质对比用）")
+    p_h3.add_argument("--out", default=os.path.join(HERE, "outputs", "mmh3_clip.mp4"))
+    p_h3.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
+
     args = ap.parse_args()
     config = load_config(args.config)
 
@@ -199,6 +214,22 @@ def main():
             eng.num_frames = args.frames
         out = eng.generate(args.prompt, os.path.abspath(args.out), image=args.image)
         print(f"[ltx] 已生成片段: {out}")
+    elif args.cmd == "mmh3":
+        from agent.mmh3_engine import MMH3Engine
+        agent_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        eng = MMH3Engine(config, agent_root=agent_root)
+        if not eng.is_ready():
+            print("[mmh3] 未就绪：请启动 ComfyUI(8188) 并安装 comfyui-minimax-h3-audio-T8 "
+                  "+ ComfyUI-VideoHelperSuite 节点。")
+            sys.exit(1)
+        if args.frames:
+            eng.num_frames = args.frames
+        if args.resolution:
+            eng.resolution = args.resolution
+        if args.no_turbo:
+            eng.lora = ""
+        out = eng.generate(args.prompt, os.path.abspath(args.out), image=args.image)
+        print(f"[mmh3] 已生成片段: {out}")
     elif args.cmd in ("publish", "publish-concept"):
         ensure(config.get("publish", {}).get("enabled", False), "未启用发布(publish.enabled)")
         agent = MovieAgent(config, args.workdir)

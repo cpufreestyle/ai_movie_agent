@@ -20,6 +20,7 @@ import glob
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ import threading
 
 import yaml
 import requests
+from config_env import apply_env_overrides
 from flask import Flask, Response, request, send_file
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +48,9 @@ MEDIA = {
 
 # WebUI 编辑分镜/解说后的保存位置；生成脚本检测到它就覆盖内置分镜
 STORYBOARD_PATH = os.path.join(WORKDIR, "storyboard.json")
+
+# 三集剧集标题（series_script.json 缺失时的兜底）
+EP_TITLES = {1: "进城", 2: "觉醒", 3: "对抗"}
 
 app = Flask(__name__)
 app.json.ensure_ascii = False  # 中文不乱码
@@ -81,7 +86,7 @@ def json_resp(data, status=200):
 
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        return apply_env_overrides(yaml.safe_load(f) or {})
 
 
 def get_agent():
@@ -633,10 +638,30 @@ def api_publish():
         video = os.path.abspath(os.path.join(HERE, video))
     if not os.path.exists(video):
         return json_resp({"ok": False, "error": f"影片不存在: {video}"}, status=400)
+    episode = body.get("episode")
+    episode = int(episode) if str(episode).strip().isdigit() else None
+    subtitle = str(body.get("subtitle") or "").strip()
+    submit = bool(body.get("submit", False))
 
     def _job():
         agent = get_agent()
-        return agent.publish_only(video)
+        if episode is None:
+            # 兼容旧调用（发布页手填路径）：标题沿用 agent.state 里的片名与集数
+            return agent.publish_only(video)
+        # 多集投稿：publish_only 的集数取自 state.scene_count，三集会全部标成同一集，
+        # 因此这里按 episode 现算标题，并过一遍标题门禁。
+        pub = agent.publisher
+        film_title = (load_config().get("project", {}) or {}).get("title") or "未命名"
+        template = pub.cfg.get("title_template", "{title} · 第{n}集")
+        title = pub._fill(template, title=film_title, n=episode)
+        title = title.replace(f"第{episode}集", f"第{pub._cn_episode(episode)}集")
+        if subtitle:
+            title = f"{title}：{subtitle}"
+        err = pub.validate_title(title, episode=episode, film_title=film_title)
+        if err:
+            return {"ok": False, "error": f"标题校验未通过：{err}（{title}）"}
+        return pub.upload(video, episode=episode, title=title,
+                          film_title=film_title, submit=submit)
     try:
         run_in_background(_job)
     except RuntimeError as e:
@@ -918,6 +943,124 @@ def api_film_render():
 
     run_in_background(_job)
     return json_resp({"ok": True, "msg": "已启动重新生成（后台运行，看下方日志）"})
+
+
+# ---------------- 看板：三集成片总览 ----------------
+_probe_cache: dict = {}
+
+
+def probe_media(path: str) -> dict:
+    """探视频规格（时长/分辨率/帧率/编码）。
+
+    按 (path, mtime, size) 缓存：ffmpeg 探一次要 fork 进程，看板每刷新一次
+    就要探 3~6 个文件，不缓存会明显卡顿；mtime/size 变了自动失效。
+    """
+    try:
+        st = os.stat(path)
+        key = (path, int(st.st_mtime), st.st_size)
+    except OSError:
+        return {}
+    if key in _probe_cache:
+        return _probe_cache[key]
+    info: dict = {}
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        r = subprocess.run([exe, "-i", path], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        err = r.stderr or ""
+        m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
+        if m:
+            info["duration_sec"] = round(
+                int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)), 2)
+        for line in err.splitlines():
+            if " Video: " in line and "width" not in info:
+                mm = re.search(r"(\d{2,5})x(\d{2,5})", line)
+                if mm:
+                    info["width"], info["height"] = int(mm.group(1)), int(mm.group(2))
+                fm = re.search(r"([\d.]+) fps", line)
+                if fm:
+                    info["fps"] = round(float(fm.group(1)), 2)
+                cm = re.search(r"Video: (\w+)", line)
+                if cm:
+                    info["vcodec"] = cm.group(1)
+            if " Audio: " in line and "acodec" not in info:
+                cm = re.search(r"Audio: (\w+)", line)
+                if cm:
+                    info["acodec"] = cm.group(1)
+                sm = re.search(r"(\d+) Hz", line)
+                if sm:
+                    info["sample_rate"] = int(sm.group(1))
+                chm = re.search(r"(mono|stereo|5\.1)", line)
+                if chm:
+                    info["channels"] = chm.group(1)
+    except Exception as e:  # noqa: BLE001  探测失败只降级显示，不能拖垮看板
+        info["probe_error"] = str(e)
+    _probe_cache[key] = info
+    return info
+
+
+def series_script() -> dict:
+    path = os.path.join(WORKDIR, "series_script.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+@app.route("/api/board")
+def api_board():
+    """看板数据源：三集（原始成片 + 旁白同步版）规格、镜头素材数、台词、同步状态。"""
+    script = series_script()
+    eps = []
+    for n in (1, 2, 3):
+        shots = sorted(glob.glob(
+            os.path.join(WORKDIR, "series_shots_mmh3", f"ep{n}_shot*.mp4")))
+        ep = script.get(f"ep{n}") or {}
+        item = {
+            "ep": n,
+            "title": ep.get("title") or EP_TITLES.get(n, ""),
+            "shots": len(shots),
+            "narration": len(ep.get("narration") or []),
+            "narration_en": len(ep.get("narration_en") or []),
+            "lines_en": ep.get("narration_en") or [],
+            "lines_zh": ep.get("narration") or [],
+        }
+        for kind, name in (("vo", f"ep{n}_vo_mmh3.mp4"),
+                           ("raw", f"ep{n}_series_film_mmh3.mp4")):
+            path = os.path.join(WORKDIR, name)
+            if os.path.exists(path):
+                item[kind] = {
+                    "name": name,
+                    "size_mb": round(os.path.getsize(path) / 2 ** 20, 2),
+                    "mtime": os.path.getmtime(path),
+                    **probe_media(path),
+                }
+        # 同步判据与 make_narration.py 的镜头块对齐一致：镜头数能被旁白段数整除
+        seg = item["narration"]
+        item["synced"] = bool(item.get("vo")) and seg > 0 and item["shots"] % seg == 0
+        eps.append(item)
+
+    ready = [e for e in eps if e.get("vo")]
+    return json_resp({
+        "series": script.get("series") or "",
+        "note": script.get("note") or "",
+        "episodes": eps,
+        "summary": {
+            "episodes": len(eps),
+            "ready": len(ready),
+            "total_duration_sec": round(
+                sum(e["vo"].get("duration_sec") or 0 for e in ready), 2),
+            "total_size_mb": round(
+                sum(e["vo"].get("size_mb") or 0 for e in ready), 2),
+            "shots": sum(e["shots"] for e in eps),
+            "narration": sum(e["narration"] for e in eps),
+            "engine": "MiniMax H3 (Turbo 4v/8a)",
+        },
+    })
 
 
 def main():

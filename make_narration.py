@@ -152,6 +152,20 @@ def _apply_storyboard() -> None:
     print(f"[storyboard] 使用 outputs/storyboard.json：{N_SHOTS} 镜 / {len(LINES)} 段解说")
 
 
+def _set_lines(zh: list, en: list, label: str) -> None:
+    """写入台词，强制双语成对（中英文行数相等），避免「英讲 A、中讲 B」。"""
+    global LINES, LINES_EN, TTS_LINES
+    if not zh:
+        raise RuntimeError(f"台词缺少 narration（中文行）: {label}")
+    if len(en) != len(zh):
+        raise RuntimeError(
+            f"台词 narration({len(zh)}) 与 narration_en({len(en)}) 不等长，"
+            f"双语会错位，已中止: {label}")
+    LINES, LINES_EN = zh, en
+    TTS_LINES = LINES_EN if LANG == "en" else LINES
+    print(f"[lines] {label}（{len(zh)} 段）")
+
+
 def _apply_lines_file(path: str) -> None:
     """从 JSON 文件加载「某一集」的专属台词，优先级高于 storyboard / 内置。
 
@@ -161,22 +175,34 @@ def _apply_lines_file(path: str) -> None:
 
     双语必须成对，这里强制校验等长，避免又出现「英讲 A、中讲 B」。
     """
-    global LINES, LINES_EN, TTS_LINES
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     zh = [x.strip() for x in (data.get("narration") or [])
           if isinstance(x, str) and x.strip()]
     en = [x.strip() for x in (data.get("narration_en") or [])
           if isinstance(x, str) and x.strip()]
-    if not zh:
-        raise RuntimeError(f"台词文件缺少 narration（中文行）: {path}")
-    if len(en) != len(zh):
-        raise RuntimeError(
-            f"台词文件 narration({len(zh)}) 与 narration_en({len(en)}) 不等长，"
-            f"双语会错位，已中止: {path}")
-    LINES, LINES_EN = zh, en
-    TTS_LINES = LINES_EN if LANG == "en" else LINES
-    print(f"[lines] 使用指定台词文件：{os.path.basename(path)}（{len(zh)} 段）")
+    _set_lines(zh, en, f"使用指定台词文件：{os.path.basename(path)}")
+
+
+def _apply_series_episode(path: str, ep: int) -> None:
+    """从系列剧本 outputs/series_script.json 取第 N 集台词（三集连贯版）。
+
+    文件结构：{"ep1": {"title":..., "narration":[...], "narration_en":[...]}, ...}
+    三集共用同一份连贯剧本（跨集互文 + 钩子链），取代各自散落的 lines_*.json，
+    是本脚本优先级最高的台词来源。
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    node = data.get(f"ep{ep}") or data.get(str(ep))
+    if not isinstance(node, dict):
+        avail = [k for k, v in data.items() if isinstance(v, dict)]
+        raise RuntimeError(f"系列剧本缺少第 {ep} 集（可用集: {avail}）: {path}")
+    zh = [x.strip() for x in (node.get("narration") or [])
+          if isinstance(x, str) and x.strip()]
+    en = [x.strip() for x in (node.get("narration_en") or [])
+          if isinstance(x, str) and x.strip()]
+    _set_lines(zh, en,
+               f"系列剧本 {os.path.basename(path)} 第{ep}集「{node.get('title', '')}」")
 
 
 _apply_storyboard()
@@ -186,11 +212,33 @@ _apply_storyboard()
 # 不在此硬算，以便同一脚本服务 LTX-2.3 / LTX-2.5 等不同成片。
 RATE = 0  # SAPI 语速 -10~10（仅离线兜底时使用，0=默认）
 AUTO_DUR = False  # 为 True 时用 ffprobe 探测成片真实时长作为 TOTAL（模型无关，最稳）
+FIT_FILM = False   # 旁白整体压缩+顺排以匹配成片时长（用于比旁白短的成片，如 33.5s 的 H3 版）
+FPS = 25           # 输出帧率（H3 成片为 24fps，须传 --fps 24 否则 -shortest 会把音轨截短）
+# FIT 模式专用全局：各段顺排起点、统一变速、压缩后时长
+SEG_STARTS, GLOBAL_TEMPO, COMP_DUR, TEMPOS, BLOCK_SPAN = [], 1.0, [], [], 0.0
 
 
 def seg_start(k: int) -> float:
-    """第 k 段(1起)的起始时间。"""
+    """第 k 段(1起)的起始时间。FIT 模式用顺排起点，否则按段均分。"""
+    if FIT_FILM and SEG_STARTS:
+        return SEG_STARTS[k - 1]
     return (k - 1) * SEG_DUR
+
+
+def _trim_silence() -> None:
+    """FIT 模式：去掉每段旁白首尾静音，缩短总时长、降低所需压缩比（避免念稿腔）。"""
+    ff = ffmpeg_exe()
+    for i in range(1, len(TTS_LINES) + 1):
+        src = os.path.join(NAR, f"nar_{i:02d}.wav")
+        tmp = os.path.join(NAR, f"_trim_{i:02d}.wav")
+        subprocess.run([ff, "-y", "-i", src, "-af",
+                        "silenceremove=start_periods=1:start_duration=0.08:"
+                        "start_threshold=-40dB:stop_periods=1:stop_duration=0.25:"
+                        "stop_threshold=-40dB", tmp],
+                       capture_output=True, text=True, timeout=120)
+        if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+            os.replace(tmp, src)
+    print("[trim] 去首尾静音完成")
 
 
 def write_line_files() -> None:
@@ -317,35 +365,63 @@ def film_duration(path: str) -> float:
 
 
 def compute_timing() -> None:
-    """按当前 FILM / T / X / N_SHOTS / AUTO_DUR 重算 TOTAL/SEG_DUR/AVAIL（供 seg_start 使用）。"""
-    global TOTAL, SEG_DUR, AVAIL
-    if AUTO_DUR:
-        d = film_duration(FILM)
-        if d > 0:
-            TOTAL = d
-            print(f"[timing] 探测成片时长 {TOTAL:.2f}s（--auto-dur）")
-        else:
-            print("[warn] --auto-dur 探测失败，回退按 N_SHOTS*T 估算")
-            TOTAL = N_SHOTS * T - (N_SHOTS - 1) * X
-    else:
-        TOTAL = N_SHOTS * T - (N_SHOTS - 1) * X
-    SEG_DUR = TOTAL / max(len(LINES), 1)
+    """按当前 FILM / T / X / N_SHOTS / AUTO_DUR 重算 TOTAL/SEG_DUR/AVAIL（供 seg_start 使用）。
+
+    镜头块对齐（修复「旁白与画面不同步」）：成片由 N_SHOTS 个镜头经 xfade 拼接，
+    旁白 n 段通常按「2 镜 1 段」对应。每段旁白应落在它覆盖的镜头块起点，并贴合
+    该镜头块时长——超长则整体压缩到该块时长（避免与下一段重叠），不足则 1.0x
+    原速（段间留自然空隙）。起点按 slot 整数倍排布，不再因顺序平铺累积漂移。
+    """
+    global TOTAL, SEG_DUR, AVAIL, SEG_STARTS, GLOBAL_TEMPO, COMP_DUR, TEMPOS, BLOCK_SPAN
+    n = len(TTS_LINES)
+    total = film_duration(FILM) if AUTO_DUR else (N_SHOTS * T - (N_SHOTS - 1) * X)
+    TOTAL = total
+    # 镜头块对齐：N_SHOTS 镜 / n 段，通常 2 镜对应 1 段
+    if N_SHOTS and N_SHOTS >= n and (N_SHOTS % n == 0):
+        sps = N_SHOTS // n                            # 每段覆盖镜头数（如 2）
+        T_actual = (total + (N_SHOTS - 1) * X) / N_SHOTS  # 单镜真实时长
+        slot = sps * (T_actual - X)                   # 每段旁白的可用时长槽（非重叠）
+        starts = [i * slot for i in range(n)]
+        comp, tempo = [], []
+        for i in range(1, n + 1):
+            nat = wav_duration(os.path.join(NAR, f"nar_{i:02d}.wav"))
+            if nat > slot:
+                tempo.append(nat / slot)
+                comp.append(slot)
+            else:
+                tempo.append(1.0)
+                comp.append(nat)
+        SEG_STARTS, COMP_DUR, TEMPOS, BLOCK_SPAN = starts, comp, tempo, slot
+        GLOBAL_TEMPO = 1.0
+        SEG_DUR = slot
+        AVAIL = slot - PAD
+        print(f"[timing/align] {N_SHOTS}镜/{n}段, 每镜{T_actual:.3f}s, "
+              f"每段覆盖{sps}镜≈{slot:.2f}s；旁白贴合镜头块（超则压缩/不足留隙）")
+        return
+    # 回退：均匀分段
+    SEG_DUR = TOTAL / max(n, 1)
     AVAIL = SEG_DUR - PAD
+    SEG_STARTS = [i * SEG_DUR for i in range(n)]
+    BLOCK_SPAN = SEG_DUR
+    comp, tempo = [], []
+    for i in range(1, n + 1):
+        nat = wav_duration(os.path.join(NAR, f"nar_{i:02d}.wav"))
+        if nat > AVAIL:
+            t = min(nat / AVAIL, 1.15)
+            tempo.append(t); comp.append(nat / t)
+        else:
+            tempo.append(1.0); comp.append(nat)
+    COMP_DUR, TEMPOS = comp, tempo
+    GLOBAL_TEMPO = 1.0
 
 
 def build_and_render() -> None:
     ff = ffmpeg_exe()
-    durs, tempos = [], []
+    durs, tempos = list(COMP_DUR), list(TEMPOS)
+    n = len(TTS_LINES)
     print("--- 各段时长（可用 %.2fs）---" % AVAIL)
-    for i in range(1, len(TTS_LINES) + 1):
-        p = os.path.join(NAR, f"nar_{i:02d}.wav")
-        d = wav_duration(p)
-        tempo = 1.0
-        if d > AVAIL:
-            tempo = min(d / AVAIL, 1.15)   # 最多加速 1.15 倍，超过则宁可略微截断，避免明显机械感
-            d = d / tempo
-        durs.append(d)
-        tempos.append(tempo)
+    for i in range(1, n + 1):
+        d, tempo = durs[i - 1], tempos[i - 1]
         print(f"  {i:02d} {d:5.2f}s tempo={tempo:.2f}  {TTS_LINES[i-1][:16]}...")
 
     # ---- 音频：9 段延时后混合，再与原环境音混合 ----
@@ -374,7 +450,11 @@ def build_and_render() -> None:
     vprev, vcur = "0:v", None
     for i in range(1, len(TTS_LINES) + 1):
         s = seg_start(i) + NARR_DELAY
-        e = min(s + durs[i - 1] + 0.35, seg_start(i) + SEG_DUR)
+        e = s + durs[i - 1] + 0.10
+        if i < n:
+            e = min(e, SEG_STARTS[i] - 0.05)   # 不侵入下一段起点
+        else:
+            e = min(e, TOTAL - 0.05)
         vcur = f"v{i}"
         filters = []
         if SUBS in ("bilingual", "en"):
@@ -396,7 +476,7 @@ def build_and_render() -> None:
     cmd = [ff, "-y", *inputs, "-filter_complex", fc,
            "-map", f"[{vcur}]", "-map", "[aout]",
            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
-           "-pix_fmt", "yuv420p", "-r", "25",
+           "-pix_fmt", "yuv420p", "-r", str(FPS),
            "-c:a", "aac", "-b:a", "192k", "-shortest", OUT]
 
     print("[render] 合成中（字幕+解说+环境音）...")
@@ -409,7 +489,8 @@ def build_and_render() -> None:
 
 
 def main():
-    global FILM, OUT, T, X, N_SHOTS, AUTO_DUR, LANG, SUBS, VOICE, TTS_LINES
+    global FILM, OUT, T, X, N_SHOTS, AUTO_DUR, LANG, SUBS, VOICE, TTS_LINES, AMBIENT_VOL
+    global FIT_FILM, FPS
     ap = argparse.ArgumentParser()
     ap.add_argument("--film", default=FILM, help="输入成片（含原生音轨）")
     ap.add_argument("--out", default=OUT, help="输出带解说+字幕的成片")
@@ -418,6 +499,11 @@ def main():
     ap.add_argument("--shots", type=int, default=0, help="镜头数（覆盖 storyboard 推断）")
     ap.add_argument("--auto-dur", action="store_true",
                     help="用 ffprobe 探测成片真实时长作为时间轴（推荐，模型无关）")
+    ap.add_argument("--fit-film", action="store_true",
+                    help="旁白去静音后统一变速+顺排以填满成片时长（用于成片比旁白短的"
+                         "情况，如 33.5s 的 H3 版）。隐含 --auto-dur。")
+    ap.add_argument("--fps", type=int, default=FPS,
+                    help="输出帧率（默认 25；H3 成片为 24fps，须传 24 否则音轨被截短）")
     ap.add_argument("--lang", choices=["en", "zh"], default=LANG,
                     help="配音语言（默认 en 英文）")
     ap.add_argument("--subs", choices=["bilingual", "en", "zh"], default=SUBS,
@@ -425,6 +511,14 @@ def main():
     ap.add_argument("--lines-json", default="",
                     help="某一集的专属台词文件 JSON（narration + narration_en），"
                          "优先级高于 storyboard/内置，用于各集台词互不覆盖")
+    ap.add_argument("--series-script", default="",
+                    help="系列剧本 JSON（outputs/series_script.json），配合 --ep 取某一集台词；"
+                         "三集共用同一连贯剧本，优先级最高")
+    ap.add_argument("--ep", type=int, default=0,
+                    help="集数（配合 --series-script 使用，如 1/2/3）")
+    ap.add_argument("--orig-vol", type=float, default=AMBIENT_VOL,
+                    help="原片音轨音量（默认 0.18 作背景垫底）；"
+                         "设 0 = 完全去掉原音轨，只留解说")
     a = ap.parse_args()
 
     # build_and_render 会把 cwd 切到 outputs/nar 找字幕文本，
@@ -435,21 +529,30 @@ def main():
     X = a.xfade
     if a.shots:
         N_SHOTS = a.shots
-    AUTO_DUR = a.auto_dur
+    AUTO_DUR = a.auto_dur or a.fit_film   # --fit-film 隐含 --auto-dur
+    FIT_FILM = a.fit_film
+    FPS = a.fps
     LANG = a.lang
     SUBS = a.subs
     VOICE = VOICE_EN if LANG == "en" else VOICE_ZH
     TTS_LINES = LINES_EN if LANG == "en" else LINES
+    AMBIENT_VOL = a.orig_vol
     # LANG/SUBS 变了，分镜覆盖的分支判定也要跟着重跑一次
     _apply_storyboard()
-    # 指定集的台词文件最后应用，覆盖 storyboard / 内置台词
-    if a.lines_json:
+    # 台词优先级：系列剧本(--series-script + --ep) > 单集台词文件 > storyboard > 内置
+    if a.series_script:
+        if not a.ep:
+            raise SystemExit("[err] --series-script 必须配合 --ep <N>（如 --ep 1）")
+        _apply_series_episode(a.series_script, a.ep)
+    elif a.lines_json:
         _apply_lines_file(a.lines_json)
-    print(f"[cfg] 配音={LANG}({VOICE}) 字幕={SUBS} -> {OUT}")
+    print(f"[cfg] 配音={LANG}({VOICE}) 字幕={SUBS} 原音={AMBIENT_VOL} "
+          f"fit={FIT_FILM} fps={FPS} -> {OUT}")
 
-    compute_timing()
+    # FIT 模式需要在算时间轴前先合成旁白以测得自然时长
     write_line_files()
     synth()
+    compute_timing()
     build_and_render()
 
 

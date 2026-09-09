@@ -1,0 +1,67 @@
+# AI 电影 Agent — 跨平台一键部署（Linux / Windows / macOS 均可，依赖 Docker Desktop）
+# 用法：
+#   docker compose up -d                                  # 起 agent + ollama
+#   docker compose exec ollama ollama pull qwen2.5:3b     # 拉取 LLM 模型
+#   浏览器打开 http://localhost:8000
+#
+# 视频生成（G 阶段）需要 NVIDIA 显卡 + ComfyUI：
+#   - 若本机/同局域网有 GPU：在 .env 设 COMFYUI_IMAGE，再 `docker compose --profile gpu up -d`
+#   - macOS / 无显卡机器：不加 --profile gpu，把 .env 的 COMFYUI_API 指向远程有显卡的 ComfyUI
+
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
+      - COMFYUI_API=${COMFYUI_API:-http://comfyui:8188}
+      - ENGINE_BACKEND=${ENGINE_BACKEND:-comfyui_mmH3}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./workflows:/app/workflows:ro
+      - agent_outputs:/app/outputs
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # 想用 GPU 跑 LLM（更快）：Linux 上取消下面注释（需 nvidia-container-toolkit）
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ComfyUI（视频生成，需 NVIDIA 显卡）：用 profile 可选启用，无需改文件。
+  #   启用：  docker compose --profile gpu up -d
+  #   前置：在 .env 设置 COMFYUI_IMAGE 为「含 LTX-2.5 / MiniMax H3 节点」的 ComfyUI 镜像，
+  #         并把该镜像的模型目录指向 /ComfyUI/models（下载脚本已把权重放到对应子目录）。
+  comfyui:
+    image: ${COMFYUI_IMAGE:-your-registry/comfyui-ltx-mmh3:latest}
+    profiles: ["gpu"]
+    ports:
+      - "8188:8188"
+    volumes:
+      - comfyui_models:/ComfyUI/models
+    environment:
+      - COMFYUI_API=http://comfyui:8188
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  ollama_data:
+  agent_outputs:
+  comfyui_models:

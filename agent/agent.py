@@ -16,6 +16,7 @@ from .writer import Writer
 from .director import Director
 from .engine import SkyReelsEngine
 from .ltx_engine import LTXEngine
+from .mmh3_engine import MMH3Engine
 from .editor import Editor
 from .publisher import Publisher
 from .collector import Collector
@@ -37,10 +38,15 @@ class MovieAgent:
         self.writer = Writer(for_stage(config, "E"))
         self.director = Director(for_stage(config, "G"))
         eng_cfg = for_stage(config, "G")
-        if (eng_cfg.get("engine", {}) or {}).get("backend") == "comfyui_ltx":
-            self.engine = LTXEngine(eng_cfg, agent_root=os.path.dirname(os.path.dirname(__file__)))
+        backend = (eng_cfg.get("engine", {}) or {}).get("backend")
+        agent_root = os.path.dirname(os.path.dirname(__file__))
+        if backend == "comfyui_ltx":
+            self.engine = LTXEngine(eng_cfg, agent_root=agent_root)
+        elif backend == "comfyui_mmH3":
+            # MiniMax H3（Turbo 4 步，原生立体声）
+            self.engine = MMH3Engine(eng_cfg, agent_root=agent_root)
         else:
-            self.engine = SkyReelsEngine(eng_cfg, agent_root=os.path.dirname(os.path.dirname(__file__)))
+            self.engine = SkyReelsEngine(eng_cfg, agent_root=agent_root)
         self.editor = Editor(fps=int(for_stage(config, "G").get("engine", {}).get("fps", 24)))
         self.publisher = Publisher(for_stage(config, "H"), workdir)
         # A–D / F 阶段工具（fork 的按阶段配置）
