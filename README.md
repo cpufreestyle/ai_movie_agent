@@ -111,6 +111,54 @@ python cli.py webui --port 9000   # 自定义端口
 | `engine.scene_frames` | 每镜帧数（97≈4s @24fps） |
 | `llm.*` | Ollama / 任意 OpenAI 兼容端点；`disabled: true` 强制模板 |
 
+## 环境变量（换机器 / 远程部署时用，不必改代码）
+
+分两类：**覆盖 `config.yaml`**（见 `config_env.py`）与**路径解析**（见 `comfy_paths.py`）。
+
+### 1) 覆盖 config.yaml
+
+| 变量 | 作用 |
+|------|------|
+| `OLLAMA_URL` | LLM 服务地址（自动补 `/v1`，并写入所有 llm 档案） |
+| `LLM_MODEL` / `LLM_API_KEY` | LLM 模型名 / 密钥（Ollama 默认 `ollama`） |
+| `COMFYUI_API` | 视频服务地址，写入 `engine.comfyui_mmH3.api`、`engine.comfyui_ltx.api`、`image_prompt.comfyui.api` 及所有 comfyui 档案 |
+| `ENGINE_BACKEND` | 默认视频引擎：`comfyui_mmH3`(MiniMax H3) / `comfyui_ltx`(LTX-2.5) |
+| `GPU_BACKEND` | `nvidia`(默认) / `amd`；`amd` 时自动把 LTX 精度降为 bf16 |
+| `COMFYUI_IMAGE` / `COMFYUI_IMAGE_ROCM` | 仅 docker compose 的 `--profile gpu` 启用视频服务时使用 |
+
+### 2) 路径解析（`comfy_paths.py`）
+
+优先级：**显式参数 > 环境变量 > 由 `COMFYUI_ROOT` 推导 > 候选路径探测 > 字面兜底**。
+
+| 变量 | 缺省行为 |
+|------|----------|
+| `COMFYUI_ROOT` | 自动探测 `D:/ComfyUI`、`~/ComfyUI`、`/workspace/ComfyUI`、`./ComfyUI`（目录内含 `main.py` 才算命中） |
+| `COMFYUI_MODELS_DIR` | `<COMFYUI_ROOT>/models` |
+| `COMFYUI_OUTPUT` | `<COMFYUI_ROOT>/output` |
+| `COMFYUI_CUSTOM_NODES` | `<COMFYUI_ROOT>/custom_nodes` |
+
+下载脚本另有：
+
+| 变量 | 作用 |
+|------|------|
+| `HF_MIRROR` | 下载源（默认官方站；设 `https://hf-mirror.com` 走镜像） |
+| `HF_PROXY` | 下载代理（默认 `http://127.0.0.1:7897`；设 `none` 表示不使用代理） |
+
+换机器时通常只需设 `COMFYUI_ROOT`，其余路径自动推导：
+
+```bash
+export COMFYUI_ROOT=/workspace/ComfyUI
+export HF_MIRROR=https://hf-mirror.com
+python launch_comfy.py --sage-attention
+```
+
+```powershell
+$env:COMFYUI_ROOT='D:/ComfyUI'; $env:HF_MIRROR='https://hf-mirror.com'
+python launch_comfy.py --sage-attention
+```
+
+> `launch_comfy.py` 也可用 `--comfyui-root D:/ComfyUI --port 8188` 显式指定，优先级高于环境变量。
+
 ## 全链路 A–H 与 Skills
 
 流水线：`A 资料采集 → B 知识沉淀 → C 概念企划 → D 图像提示词 → E 剧本创作
