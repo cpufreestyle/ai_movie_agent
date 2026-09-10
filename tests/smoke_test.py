@@ -25,7 +25,7 @@ TMP = tempfile.mkdtemp(prefix="smoke_")
 # 模板模式配置：禁用所有外部依赖，验证降级路径
 CFG = {
     "project": {"title": "测试片", "theme": "a test theme about memory",
-                "style": "cinematic", "scene_frames": 97},
+                "style": "anime style, cel-shaded", "scene_frames": 97},
     "engine": {"fps": 24, "skyreels_repo": "./skyreels_v2"},
     "llm": {"disabled": True},
     "publish": {"enabled": False, "binary": "definitely_not_exist_biliup_xyz"},
@@ -86,7 +86,7 @@ def test_director_template_prompt():
     d = Director(CFG)
     p = d.beat_to_prompt({"description": "a figure in rain", "shot": "wide",
                           "camera": "slow pan", "mood": "tense"})
-    assert isinstance(p, str) and len(p) <= 200 and "cinematic" in p
+    assert isinstance(p, str) and len(p) <= 200 and "anime style" in p
 
 
 # ---------- Knowledge ----------

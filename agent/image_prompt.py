@@ -30,10 +30,11 @@ class ImagePrompt:
                 extra = "\n参考资料(来自知识库，用于保持角色/场景一致):\n" + "\n".join(ref[:2])
             out = chat(
                 self.client,
-                "把分镜写成一条用于图像生成(ComfyUI/SDXL)的英文提示词，含主体、风格、构图，不解释。",
-                f"分镜: {beat}\n风格: {concept.get('theme', 'cinematic')}{extra}",
+                "把分镜写成一条用于图像生成(ComfyUI/SDXL)的英文提示词，含主体、风格、构图，"
+                "默认日式动漫（anime style / cel-shaded）风格，不解释。",
+                f"分镜: {beat}\n风格: {concept.get('theme', 'anime style')}{extra}",
                 max_tokens=120, model=self.model,
             )
             if out:
                 return out.strip().strip('"')
-        return f"cinematic keyframe of {beat}, {concept.get('theme', 'cinematic')}"
+        return f"anime style keyframe of {beat}, {concept.get('theme', 'anime style')}"

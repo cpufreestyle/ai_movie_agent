@@ -29,7 +29,7 @@ TMP = os.path.join(OUT, "_tmp")
 # ---- Mira 固定形象（与 outputs/series_bible.json 的 fixed_appearance 一致）----
 MIRA = ("a woman in her twenties, short dark hair, dark worn trench coat, "
         "subtle cybernetic ports on her knuckles, pale determined face")
-STYLE = "cinematic, film grain, 35mm, dramatic lighting"
+STYLE = "anime style, cel-shaded, clean line art, vibrant colors, dramatic lighting"
 NEUTRAL = "plain soft neutral studio backdrop, even lighting"
 
 SHOTS = [

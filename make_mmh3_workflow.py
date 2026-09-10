@@ -35,10 +35,11 @@ except Exception:      # 单独拷走使用时退回字面兜底
     )
 DEFAULT_OUT = os.path.join("workflows", "mmh3_turbo_4v8a_ui.json")
 DEFAULT_PROMPT = (
-    "Cinematic shot of a young woman with short dark hair in a worn dark trench coat "
-    "standing on a windswept city rooftop at golden hour, gazing over a sprawling neon "
-    "skyline, slow push-in camera, warm volumetric backlight, shallow depth of field, "
-    "subtle film grain; ambient city wind and a low distant traffic hum."
+    "Anime style cel-shaded 2D animation shot of a young woman with short dark hair in a "
+    "worn dark trench coat standing on a windswept city rooftop at golden hour, gazing over "
+    "a sprawling neon skyline, clean line art, vibrant colors, detailed background art, "
+    "slow push-in camera, warm volumetric backlight; "
+    "ambient city wind and a low distant traffic hum."
 )
 
 # 节点 ID 与 widgets_values 位序（来自官方示例，改动前请对照示例文件）

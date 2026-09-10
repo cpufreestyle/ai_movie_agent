@@ -10,7 +10,8 @@ from .llmutil import make_client, chat
 
 class Director:
     def __init__(self, config: dict):
-        self.style = config.get("project", {}).get("style", "cinematic")
+        # 默认日式动漫风格（无 project.style 时的兜底）
+        self.style = config.get("project", {}).get("style", "anime style, cel-shaded, clean line art")
         llm = config.get("llm", {})
         self.model = llm.get("model", "qwen2.5:14b")
         self.temperature = float(llm.get("temperature", 0.85))

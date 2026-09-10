@@ -64,7 +64,7 @@
 
 - **Mira 角色参考图（character sheet）**：用 ComfyUI 出一张定妆照（或复用 Blender 白模渲染），固定其作为每集 I2V 起始帧/参考，保证长相服装统一。
 - **风格锚 prompt 模板**：每集 prompt 末尾固定拼接
-  `cinematic, film grain, 35mm, dramatic lighting, slow camera movement, <固定城市描述>, <Mira 固定服装描述>`
+  `anime style, cel-shaded, clean line art, vibrant colors, dramatic lighting, slow camera movement, <固定城市描述>, <Mira 固定服装描述>`
   写入 `config.yaml` 的 `engine.comfyui_ltx.style_anchor`，引擎注入时追加。
 - **固定 seed 策略**：`seed_ep = BASE_SEED + ep * 1000`，三集共享基调、集间可辨。
 

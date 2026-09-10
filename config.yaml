@@ -1,7 +1,7 @@
 project:
   title: 《看见未来之前》
   theme: 一部发生在近未来赛博都市的科幻短片，探讨记忆与身份第三集
-  style: cinematic, film grain, 35mm, dramatic lighting, slow camera movement
+  style: anime style, cel-shaded 2D animation, clean line art, vibrant colors, detailed background art, dramatic lighting, slow camera movement
   episode_seconds: 60
   scene_frames: 97
 engine:

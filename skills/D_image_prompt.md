@@ -20,5 +20,5 @@
 workflow JSON（含 "text" 字段的节点会被注入提示词）。
 
 ## 兜底
-- 无 LLM → 模板提示词（`cinematic keyframe of <beat>`）。
+- 无 LLM → 模板提示词（`anime style keyframe of <beat>`）。
 - ComfyUI 未就绪 / 未配 workflow → 不出关键帧图，退化为纯 T2V/DF（不影响管线）。

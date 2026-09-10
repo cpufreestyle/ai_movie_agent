@@ -9,7 +9,7 @@
 HERO = ("a lone protagonist in a long dark coat, short dark hair, "
         "a faint glowing scar along the left cheek")
 # 项目统一视觉风格（取自 config.yaml project.style）
-STYLE = "cinematic, film grain, 35mm, dramatic lighting"
+STYLE = "anime style, cel-shaded, clean line art, vibrant colors, dramatic lighting"
 
 # ---- 完整短片分镜：18 镜 / 四幕 / 约 61 秒 ----
 SHOTS = [

@@ -128,7 +128,7 @@ def _template_extra(topic: str, concept: dict) -> dict:
             "motivation": "找回失去之物 / 弄清真相",
             "arc": "从被动承受走向主动抉择",
         }],
-        "visual_style": concept.get("visual_motif") or "冷调霓虹 + 手持纪实质感",
+        "visual_style": concept.get("visual_motif") or "日式赛璐璐动画 + 霓虹赛博美术",
         "three_act": [
             "起：日常被打破，主角被迫卷入事件",
             "承：追逐与代价，关系与世界层层展开",
