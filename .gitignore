@@ -27,3 +27,14 @@ tools/biliup/
 
 # Blender 便携版（运行时下载解压，体积大不入库；用 tools/_install_blender.py 安装）
 tools/blender/
+
+# runtime logs / artifacts / backups (not tracked)
+*.err
+*.bak
+diag_*.png
+comfy_run.log
+
+# one-off dev scripts (underscore prefix)
+_*.py
+kill_test.py
+tmp_vae_test.py

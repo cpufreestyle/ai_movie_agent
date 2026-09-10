@@ -1,10 +1,62 @@
 import argparse
 import os
 import subprocess
+import sys
 import time
+
 import requests
 
-ap = argparse.ArgumentParser(description="重启 ComfyUI 后端（日志: D:/ComfyUI/comfy_run.log）")
+# ComfyUI 安装目录：优先 --comfyui-root / 环境变量 COMFYUI_ROOT，否则按候选路径探测。
+# 这样同一脚本在 Windows(D:/ComfyUI)、Linux/macOS(~/ComfyUI、/workspace/ComfyUI) 都能用。
+_CANDIDATES = (
+    os.environ.get("COMFYUI_ROOT") or "",
+    "D:/ComfyUI",
+    os.path.expanduser("~/ComfyUI"),
+    "/workspace/ComfyUI",
+    "./ComfyUI",
+)
+
+
+def _find_root(explicit: str = "") -> str:
+    for c in (explicit,) + _CANDIDATES:
+        if c and os.path.exists(os.path.join(c, "main.py")):
+            return os.path.abspath(c)
+    return ""
+
+
+def _python_exe(root: str) -> str:
+    """优先用 ComfyUI 自带 venv 的解释器，找不到则退回当前解释器。"""
+    for rel in ("venv/Scripts/python.exe", "venv/bin/python",
+                ".venv/Scripts/python.exe", ".venv/bin/python"):
+        p = os.path.join(root, rel)
+        if os.path.exists(p):
+            return p
+    return sys.executable
+
+
+def _kill_existing() -> None:
+    """只结束 ComfyUI 进程，避免误杀其它 python。"""
+    if os.name == "nt":
+        # 新版 Win11 已移除 wmic，改用 PowerShell CIM 按命令行匹配
+        ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*ComfyUI*main.py*' } | "
+              "Select-Object -ExpandProperty ProcessId")
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True)
+        pids = {ln.strip() for ln in out.stdout.splitlines() if ln.strip().isdigit()}
+        for pid in pids:
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "ComfyUI.exe"], capture_output=True)
+    else:
+        subprocess.run(["pkill", "-f", "ComfyUI/main.py"], capture_output=True)
+
+
+ap = argparse.ArgumentParser(
+    description="重启 ComfyUI 后端（跨平台；目录自动探测，可用 --comfyui-root / COMFYUI_ROOT 指定）")
+ap.add_argument("--comfyui-root", default="", metavar="DIR",
+                help="ComfyUI 安装目录（含 main.py）；缺省自动探测 D:/ComfyUI、~/ComfyUI 等")
+ap.add_argument("--port", type=int, default=8188, help="ComfyUI 监听端口，默认 8188")
+ap.add_argument("--api", default="", help="就绪探测地址，默认 http://127.0.0.1:<port>")
 ap.add_argument("--lowvram", action="store_true",
                 help="加 --lowvram 启动：16GB 显存跑 22B(NVFP4)+12B 文本编码器时避免采样 OOM")
 ap.add_argument("--novram", action="store_true",
@@ -29,24 +81,24 @@ ap.add_argument("--sage-attention", action="store_true",
                      "在支持的显卡上显著加速采样并省显存（需先 pip install sageattention）")
 args = ap.parse_args()
 
+# 0) 定位 ComfyUI 安装目录
+root = _find_root(args.comfyui_root)
+if not root:
+    print("找不到 ComfyUI：请用 --comfyui-root 或环境变量 COMFYUI_ROOT "
+          "指向含 main.py 的目录")
+    raise SystemExit(2)
+api = args.api or f"http://127.0.0.1:{args.port}"
+print(f"ComfyUI 目录: {root}")
+
 # 1) 仅结束 ComfyUI 相关进程（避免误杀其它 python）
-# 注意：新版 Win11 已移除 wmic，改用 PowerShell CIM 按命令行匹配
-ps_cmd = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-          "Where-Object { $_.CommandLine -like '*ComfyUI*main.py*' } | "
-          "Select-Object -ExpandProperty ProcessId")
-out = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
-                     capture_output=True, text=True)
-pids = [ln.strip() for ln in out.stdout.splitlines() if ln.strip().isdigit()]
-for pid in set(pids):
-    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
-subprocess.run(["taskkill", "/F", "/IM", "ComfyUI.exe"], capture_output=True)
+_kill_existing()
 time.sleep(3)
 
 # 2) 重新拉起 ComfyUI 后端
 # 禁用 torch.compile：22B 模型(LTX-2.5)在 16GB 卡上编译会卡死/极慢，关掉只损失少量速度、功能正常
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
-cmd = [r"D:/ComfyUI/venv/Scripts/python.exe", r"D:/ComfyUI/main.py",
-       "--listen", "127.0.0.1", "--port", "8188",
+cmd = [_python_exe(root), os.path.join(root, "main.py"),
+       "--listen", "127.0.0.1", "--port", str(args.port),
        # Wan2.2 VAE 在 bf16 下解码输出纯灰色噪点，必须强制 fp32
        "--fp32-vae"]
 if args.lowvram:
@@ -73,18 +125,17 @@ if args.sage_attention:
     # SageAttention：支持的显卡上大幅加速采样并省显存；依赖 sageattention 包
     cmd.append("--use-sage-attention")
 
-p = subprocess.Popen(
-    cmd,
-    cwd=r"D:/ComfyUI",
-    creationflags=0x00000008,  # DETACHED_PROCESS
-    stdout=open(r"D:/ComfyUI/comfy_run.log", "w"),
-    stderr=subprocess.STDOUT)
-print("launched backend pid", p.pid)
+log_path = os.path.join(root, "comfy_run.log")
+# 后台启动：Windows 用 DETACHED_PROCESS，类 Unix 用新会话，避免随父进程一起退出
+_detach = {"creationflags": 0x00000008} if os.name == "nt" else {"start_new_session": True}
+p = subprocess.Popen(cmd, cwd=root,
+                     stdout=open(log_path, "w"), stderr=subprocess.STDOUT, **_detach)
+print(f"launched backend pid {p.pid}（日志: {log_path}）")
 
 # 3) 等待就绪
 for _ in range(60):
     try:
-        if requests.get("http://127.0.0.1:8188/", timeout=5).status_code == 200:
+        if requests.get(api + "/", timeout=5).status_code == 200:
             print("ComfyUI READY")
             break
     except Exception:

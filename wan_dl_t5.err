@@ -1,2 +1,0 @@
-C:\Users\michael\CodeBuddy\ai_movie_agent\download_hf_mt.py:8: SyntaxWarning: invalid escape sequence '\C'
-  python download_hf_mt.py QuantStack/Wan2.2-TI2V-5B-GGUF Wan2.2-TI2V-5B-Q8_0.gguf D:\ComfyUI\models\diffusion_models\Wan2.2-TI2V-5B-Q8_0.gguf

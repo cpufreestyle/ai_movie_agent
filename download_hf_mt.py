@@ -3,21 +3,31 @@
 
 用法:
     python download_hf_mt.py <repo> <filename> <dest_path> [threads]
+    python download_hf_mt.py --mirror https://hf-mirror.com <repo> <filename> <dest>
+    HF_MIRROR=https://hf-mirror.com python download_hf_mt.py <repo> <filename> <dest>
+    python download_hf_mt.py --models-dir D:/ComfyUI/models      # 批量下内置清单
 
 例:
-    python download_hf_mt.py QuantStack/Wan2.2-TI2V-5B-GGUF Wan2.2-TI2V-5B-Q8_0.gguf D:\ComfyUI\models\diffusion_models\Wan2.2-TI2V-5B-Q8_0.gguf
+    python download_hf_mt.py QuantStack/Wan2.2-TI2V-5B-GGUF Wan2.2-TI2V-5B-Q8_0.gguf D:/ComfyUI/models/diffusion_models/Wan2.2-TI2V-5B-Q8_0.gguf
+
+注：download_hf_mirror.py 是本脚本的 hf-mirror 预设封装（保留旧文件名以兼容既有 import）。
 """
+import argparse
 import os
 import sys
 import time
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 强制走本机代理（127.0.0.1:7897）。环境里可能预置了其他不可用代理，
-# 会导致 HF 下载在 TLS 握手阶段 UNEXPECTED_EOF；这里一律覆盖为已知可用的 7897。
-os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+import requests
 
-MIRROR = "https://huggingface.co"
+# 代理：默认走本机 127.0.0.1:7897（环境里可能预置了其它不可用代理，会导致 HF 下载在
+# TLS 握手阶段 UNEXPECTED_EOF）。用 HF_PROXY 覆盖；设为 none/off/- 则不使用代理。
+_PROXY = os.environ.get("HF_PROXY", "http://127.0.0.1:7897")
+if _PROXY and _PROXY.lower() not in ("none", "off", "-"):
+    os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = _PROXY
+
+# 下载源：--mirror > HF_MIRROR > 官方站
+MIRROR = (os.environ.get("HF_MIRROR") or "https://huggingface.co").rstrip("/")
 CH = 8 * 1024 * 1024
 
 # gated 模型下载需要 HF token（从 HF_TOKEN 环境变量读取）。
@@ -118,25 +128,43 @@ def download(repo, fname, path, nth=4):
     return ok
 
 
-# Wan2.2-TI2V-5B (16GB 显存友好) 所需资产
+# Wan2.2-TI2V-5B (16GB 显存友好) 所需资产：(repo, 仓库内文件名, models 下的相对路径)
 TASKS = [
     ("QuantStack/Wan2.2-TI2V-5B-GGUF", "Wan2.2-TI2V-5B-Q8_0.gguf",
-     r"D:\ComfyUI\models\diffusion_models\Wan2.2-TI2V-5B-Q8_0.gguf"),
+     "diffusion_models/Wan2.2-TI2V-5B-Q8_0.gguf"),
     ("QuantStack/Wan2.2-TI2V-5B-GGUF", "VAE/Wan2.2_VAE.safetensors",
-     r"D:\ComfyUI\models\vae\Wan2.2_VAE.safetensors"),
+     "vae/Wan2.2_VAE.safetensors"),
 ]
+DEFAULT_MODELS_DIR = os.environ.get("COMFYUI_MODELS_DIR") or "D:/ComfyUI/models"
 
 
-if __name__ == "__main__":
-    if len(sys.argv) >= 4:
-        ok = download(sys.argv[1], sys.argv[2], sys.argv[3],
-                      int(sys.argv[4]) if len(sys.argv) > 4 else 4)
-        sys.exit(0 if ok else 1)
-    for repo, fname, dest in TASKS:
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="多线程 Range 续传下载（HF / hf-mirror）")
+    ap.add_argument("repo", nargs="?", help="仓库，如 QuantStack/Wan2.2-TI2V-5B-GGUF")
+    ap.add_argument("filename", nargs="?", help="仓库内文件名")
+    ap.add_argument("dest", nargs="?", help="本地保存路径")
+    ap.add_argument("threads", nargs="?", type=int, default=4, help="并发线程数，默认 4")
+    ap.add_argument("--mirror", default="", help="下载源，默认 https://huggingface.co")
+    ap.add_argument("--models-dir", default=DEFAULT_MODELS_DIR,
+                    help=f"批量模式的 ComfyUI/models 目录（默认 {DEFAULT_MODELS_DIR}）")
+    a = ap.parse_args(argv)
+
+    global MIRROR
+    if a.mirror:
+        MIRROR = a.mirror.rstrip("/")
+
+    # 给了 repo/filename/dest 就下单个文件
+    if a.repo and a.filename and a.dest:
+        return 0 if download(a.repo, a.filename, a.dest, a.threads) else 1
+
+    # 否则批量下内置清单
+    log(f"[mirror] {MIRROR}\n[models] {a.models_dir}")
+    for repo, fname, rel in TASKS:
+        dest = os.path.join(a.models_dir, rel)
         done = False
         for attempt in range(12):
             try:
-                if download(repo, fname, dest, 4):
+                if download(repo, fname, dest, a.threads):
                     done = True
                     break
             except Exception as e:
@@ -144,3 +172,8 @@ if __name__ == "__main__":
             time.sleep(5)
         if not done:
             log(f"[FAIL] {fname} 多次重试仍失败")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

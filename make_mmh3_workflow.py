@@ -124,12 +124,14 @@ def main() -> int:
         cw[1], cw[2], cw[3] = w, h, length
 
     # ---- 输出：帧率 / 前缀 ----
+    # VHS_VideoCombine 的 widgets_values 在 UI/API 两种格式下都是 dict，按键写入即可
     comb = nodes.get(N_COMBINE, {}).get("widgets_values")
     if isinstance(comb, dict):
         comb["frame_rate"] = int(cfg.get("fps", 24))
         comb["filename_prefix"] = cfg.get("filename_prefix") or "H3/pipe"
-    elif isinstance(comb, list) and len(comb) >= 3:
-        comb[comb.index("video/h264-mp4") - 2 if "video/h264-mp4" in comb else 0] = int(cfg.get("fps", 24))
+    else:
+        print(f"[warn] 未找到 VHS_VideoCombine 参数字典，帧率/前缀未改写"
+              f"（{type(comb).__name__}）")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
