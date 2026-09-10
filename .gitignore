@@ -12,6 +12,7 @@ __pycache__/
 # 生成的产物（渲染视频、state.json 等运行时输出）
 outputs/
 outputs-windows-test/
+output/
 
 # 系统文件
 Thumbs.db

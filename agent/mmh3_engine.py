@@ -276,16 +276,21 @@ class MMH3Engine:
         # decode(11) 输出 [IMAGE 帧批次, AUDIO]；音频不动，只增强图像分辨率/锐度。
         # 帧插值(RIFE)故意不接此处：会改变帧率导致音画不同步，作为离线增强单独提供。
         images_src = ["11", 0]
+        # 节点 ID 用 30+ 段：20~28 已被 ref_images 的 LoadImage 占用（"2%d" % i），
+        # 复用会导致后处理节点覆盖参考图节点，使 ref_image_i 指向后处理输出并形成依赖环。
         if self.post_upscale:
-            nodes["20"] = {"class_type": "UpscaleModelLoader",
+            nodes["30"] = {"class_type": "UpscaleModelLoader",
                            "inputs": {"model_name": self.post_upscale}}
-            nodes["21"] = {"class_type": "ImageUpscaleWithModel", "inputs": {
-                "images": images_src, "upscale_model": ["20", 0]}}
-            images_src = ["21", 0]
+            nodes["31"] = {"class_type": "ImageUpscaleWithModel", "inputs": {
+                "images": images_src, "upscale_model": ["30", 0]}}
+            images_src = ["31", 0]
         if self.post_sharpen > 0:
-            nodes["22"] = {"class_type": "ImageSharpen", "inputs": {
-                "image": images_src, "sharpen": self.post_sharpen}}
-            images_src = ["22", 0]
+            # ImageSharpen 的参数是 sharpen_radius/sigma/alpha（comfy_extras/
+            # nodes_post_processing.py），没有 `sharpen`；强度映射到 alpha。
+            nodes["32"] = {"class_type": "ImageSharpen", "inputs": {
+                "image": images_src, "sharpen_radius": 1, "sigma": 1.0,
+                "alpha": self.post_sharpen}}
+            images_src = ["32", 0]
 
         nodes.update({
             "8": {"class_type": "BasicGuider",

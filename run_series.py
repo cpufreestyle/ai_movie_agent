@@ -230,7 +230,8 @@ def _is_char_shot(prompt: str) -> bool:
 def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                 prev_frame: str | None, out_dir: str, use_i2v: bool,
                 anchor: str = "", anchor_mode: str = "first",
-                only: set | None = None, force: bool = False) -> str | None:
+                only: set | None = None, force: bool = False,
+                anchor_map: dict | None = None) -> str | None:
     """出一集。
 
     默认（use_i2v=False）每镜 **T2V**：prompt 语义主导，画面精确匹配该段旁白描写的场景。
@@ -254,12 +255,21 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
         if not (shot and os.path.exists(shot)):
             prompt = f"{base}, {style_anchor}" if style_anchor else base
             out_path = os.path.join(WORK, f"{key}.mp4")
-            # 起始图优先级：角色锚定（锁脸）> 上一镜尾帧续写 > 纯 T2V
+            # 起始图优先级：本镜锚定图（--anchor-map，逐镜精确）> 角色锚定（锁脸）
+            #              > 上一镜尾帧续写 > 纯 T2V
             img, tag = None, "T2V"
-            if anchor and _is_char_shot(base):
+            amap = anchor_map or {}
+            p = amap.get(str(idx)) or amap.get(idx)
+            if p:
+                pth = p if os.path.isabs(p) else os.path.join(ROOT, p)
+                if os.path.exists(pth):
+                    img, tag = pth, "I2V/锚定图"
+                else:
+                    print(f"[{key}] 锚定图不存在，回退: {pth}")
+            if img is None and anchor and _is_char_shot(base):
                 img = anchor if anchor_mode == "first" else (mira_prev or anchor)
-                tag = "I2V/锚定"
-            elif use_i2v and prev_frame:
+                tag = "I2V/角色锚定"
+            elif img is None and use_i2v and prev_frame:
                 img, tag = prev_frame, "I2V"
             print(f"[{key}] {tag} generate "
                   f"{eng.resolution} {eng.num_frames}帧@{eng.fps}fps "
@@ -314,6 +324,9 @@ def main():
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "outputs"))
     ap.add_argument("--anchor", default="",
                     help="角色锚定图路径：含 'woman' 的镜头用它作 I2V 起始帧（锁住同一张脸）")
+    ap.add_argument("--anchor-map", default="",
+                    help="JSON 文件：{镜号: 锚定图路径}。逐镜指定锚定图（场景图 / 人物三视图），"
+                         "优先级高于 --anchor")
     ap.add_argument("--anchor-mode", default="first", choices=["first", "chain"],
                     help="first=每个 Mira 镜都从锚定图起（一致性最强，默认）；"
                          "chain=首镜用锚定图、后续接上一 Mira 镜尾帧（更连贯）")
@@ -332,6 +345,11 @@ def main():
                        a.frames or None, a.fps or None, a.engine)
 
     data = load_json(SHOTS_FILE)
+    anchor_map = {}
+    if a.anchor_map:
+        _p = a.anchor_map if os.path.isabs(a.anchor_map) else os.path.join(ROOT, a.anchor_map)
+        anchor_map = load_json(_p)
+        print(f"[anchor-map] 载入 {len(anchor_map)} 条逐镜锚定")
     try:
         style_anchor = load_json(BIBLE_FILE).get("style_anchor", "")
     except Exception:
@@ -369,7 +387,7 @@ def main():
         prev_frame = run_episode(eng, ep, prompts, style_anchor,
                                  prev_frame, a.out_dir, a.i2v,
                                  anchor=a.anchor, anchor_mode=a.anchor_mode,
-                                 only=only, force=a.force)
+                                 only=only, force=a.force, anchor_map=anchor_map)
         # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
         if not (os.path.exists(film) and os.path.getsize(film) > 0):
             print(f"[abort] 第 {ep} 集失败")

@@ -252,7 +252,9 @@ class LTXEngine:
         return wf
 
     def _apply_post(self, wf: dict) -> dict:
-        """在最终视频保存节点前插入质量后处理（超分 + 锐化），默认关闭。
+        """在最终视频保存节点前插入质量后处理（超分 + 锐化）。
+
+        默认只开轻度锐化（post.sharpen>0）；超分需配置 post.upscale_model 模型名。
 
         只对 images 链路做增强，音频输入保持原样（避免音画不同步）；
         帧插值(RIFE)会改变帧率故不在此自动接入，作为离线增强单独提供。
@@ -276,16 +278,30 @@ class LTXEngine:
         if not isinstance(src, list) or len(src) != 2:
             return wf
         cur: list = src
+        # 用户工作流的节点 ID 是任意的（如 5508 / 5014_5506），固定 ID 可能撞上真实节点，
+        # 故从高位起找空闲 ID。
+        def _free_id(base: int) -> str:
+            n = base
+            while str(n) in wf:
+                n += 1
+            return str(n)
+
         if upscale:
-            wf["90"] = {"class_type": "UpscaleModelLoader",
-                        "inputs": {"model_name": upscale}}
-            wf["91"] = {"class_type": "ImageUpscaleWithModel",
-                        "inputs": {"images": cur, "upscale_model": ["90", 0]}}
-            cur = ["91", 0]
+            u1 = _free_id(90001)
+            wf[u1] = {"class_type": "UpscaleModelLoader",
+                      "inputs": {"model_name": upscale}}
+            u2 = _free_id(90002)
+            wf[u2] = {"class_type": "ImageUpscaleWithModel",
+                      "inputs": {"images": cur, "upscale_model": [u1, 0]}}
+            cur = [u2, 0]
         if sharpen > 0:
-            wf["92"] = {"class_type": "ImageSharpen",
-                        "inputs": {"image": cur, "sharpen": sharpen}}
-            cur = ["92", 0]
+            # ImageSharpen 的参数是 sharpen_radius / sigma / alpha
+            # （comfy_extras/nodes_post_processing.py），没有 `sharpen`；强度映射到 alpha。
+            s1 = _free_id(90003)
+            wf[s1] = {"class_type": "ImageSharpen", "inputs": {
+                "image": cur, "sharpen_radius": 1, "sigma": 1.0,
+                "alpha": sharpen}}
+            cur = [s1, 0]
         wf[sid]["inputs"]["images"] = cur
         log(f"  [ltx] 已接入质量后处理："
             f"{'超分(' + upscale + ')' if upscale else ''}"
