@@ -60,7 +60,13 @@ class SkyReelsEngine:
         seed: int | None = None,
         image: str | None = None,
         two_pass: bool | None = None,
+        ref_images: list | None = None,
     ) -> str:
+        # ref_images（多参考图锁身份）目前只有 MiniMax H3 引擎支持。保留同名参数以维持
+        # 「各引擎接口一致」，否则 run_series.py 等统一调用方会 TypeError。
+        if ref_images:
+            print(f"  [skyreels] 忽略 ref_images（{len(ref_images)} 张）："
+                  f"该能力仅 MiniMax H3 支持")
         if not self.is_ready():
             raise RuntimeError(
                 f"未找到 SkyReels 推理脚本：{self.repo}/generate_video_df.py\n"

@@ -231,7 +231,8 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                 prev_frame: str | None, out_dir: str, use_i2v: bool,
                 anchor: str = "", anchor_mode: str = "first",
                 only: set | None = None, force: bool = False,
-                anchor_map: dict | None = None) -> str | None:
+                anchor_map: dict | None = None,
+                ref_images: list | None = None) -> str | None:
     """出一集。
 
     默认（use_i2v=False）每镜 **T2V**：prompt 语义主导，画面精确匹配该段旁白描写的场景。
@@ -277,7 +278,8 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
             try:
                 produced = eng.generate(prompt, out_path,
                                         seed=BASE_SEED + ep * 1000 + idx,
-                                        image=img)
+                                        image=img,
+                                        ref_images=ref_images or None)
             except Exception as e:
                 print(f"[{key}] 生成失败: {e}")
                 return None
@@ -334,6 +336,9 @@ def main():
                     help="只重出指定镜号（逗号分隔，如 14,15,16），强制重生成并跳过拼接")
     ap.add_argument("--force", action="store_true",
                     help="强制重生成所有镜头（用于跑锚定图升级等场景，仍会拼接）")
+    ap.add_argument("--ref-images", default="auto",
+                    help="身份参考图：'auto' 自动收集 outputs/anchor/mira_*.png（最多9张）；"
+                         "或逗号分隔的显式路径；'none' 关闭。配合首帧锚定走 Hybrid 增强人物一致性（不需白模）")
     a = ap.parse_args()
     only = None
     if a.only.strip():
@@ -354,7 +359,19 @@ def main():
         style_anchor = load_json(BIBLE_FILE).get("style_anchor", "")
     except Exception:
         style_anchor = ""
-    print(f"[cfg] {eng.resolution} {eng.num_frames}帧@{eng.fps}fps  style_anchor={'有' if style_anchor else '无'}")
+    # 身份参考图（增强人物一致性，配合首帧锚定走 Hybrid，不需白模）
+    ref_images = []
+    if a.ref_images and a.ref_images.lower() != "none":
+        if a.ref_images.lower() == "auto":
+            anc_dir = os.path.join(ROOT, "outputs", "anchor")
+            if os.path.isdir(anc_dir):
+                ref_images = sorted([
+                    os.path.join(anc_dir, f) for f in os.listdir(anc_dir)
+                    if f.lower().startswith("mira_") and f.lower().endswith(".png")
+                ])[:9]
+        else:
+            ref_images = [p.strip() for p in a.ref_images.split(",") if p.strip()]
+    print(f"[cfg] {eng.resolution} {eng.num_frames}帧@{eng.fps}fps  style_anchor={'有' if style_anchor else '无'}  ref_images={len(ref_images)}")
 
     if a.concat:
         ep = a.concat
@@ -387,7 +404,8 @@ def main():
         prev_frame = run_episode(eng, ep, prompts, style_anchor,
                                  prev_frame, a.out_dir, a.i2v,
                                  anchor=a.anchor, anchor_mode=a.anchor_mode,
-                                 only=only, force=a.force, anchor_map=anchor_map)
+                                 only=only, force=a.force, anchor_map=anchor_map,
+                                 ref_images=ref_images)
         # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
         if not (os.path.exists(film) and os.path.getsize(film) > 0):
             print(f"[abort] 第 {ep} 集失败")
