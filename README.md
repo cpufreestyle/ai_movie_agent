@@ -1,6 +1,6 @@
 # AI 电影 Agent（本地持续创作）
 
-[![Release](https://img.shields.io/github/v/release/cpufreestyle/ai_movie_agent)](https://github.com/cpufreestyle/ai_movie_agent/releases/tag/v0.9.0)
+[![Release](https://img.shields.io/github/v/release/cpufreestyle/ai_movie_agent)](https://github.com/cpufreestyle/ai_movie_agent/releases/latest)
 
 一个在 **Windows / Linux / macOS（WSL）** 持续创作的 AI 电影生成 Agent。视频引擎支持
 [SkyReels-V2](https://github.com/SkyworkAI/SkyReels-V2)（昆仑万维开源的
