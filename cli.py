@@ -140,6 +140,16 @@ def main():
     p_h3.add_argument("--out", default=os.path.join(HERE, "outputs", "mmh3_clip.mp4"))
     p_h3.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
 
+    p_ab = sub.add_parser(
+        "ab", help="A/B 工作台：同镜不同参数并排对比（需 gen_params.json + series_manifest.json）")
+    p_ab.add_argument("dirs", nargs="+",
+                      help="work 目录（1 个=本目录多镜总览；2 个=两次生成逐镜对比）")
+    p_ab.add_argument("--key", default=None,
+                      help="聚焦某一镜（列出其变体 / 两次生成的参数差异）")
+    p_ab.add_argument("--markdown", action="store_true", help="输出 Markdown 表格")
+    p_ab.add_argument("--grid", default=None, metavar="OUT.png",
+                      help="把聚焦镜的变体视频拼成联系表(contact sheet)")
+
     args = ap.parse_args()
     config = load_config(args.config)
 
@@ -230,6 +240,42 @@ def main():
             eng.lora = ""
         out = eng.generate(args.prompt, os.path.abspath(args.out), image=args.image)
         print(f"[mmh3] 已生成片段: {out}")
+    elif args.cmd == "ab":
+        from agent import ab as ab_mod
+        if len(args.dirs) >= 2:
+            rows = ab_mod.compare_runs(args.dirs[0], args.dirs[1])
+            if args.key:
+                row = next((r for r in rows if r["key"] == args.key), None)
+                if not row:
+                    print(f"[ab] 未找到镜头 {args.key}")
+                    sys.exit(1)
+                print(f"== {args.key} 两次生成参数差异 ==")
+                for f, va, vb in ab_mod.param_diff(row["a"]["params"], row["b"]["params"]):
+                    print(f"  {f}: A={va}  B={vb}")
+                print(f"  A qa: {row['a']['qa']}")
+                print(f"  B qa: {row['b']['qa']}")
+            else:
+                print(ab_mod.render_runs(rows))
+        else:
+            rows = ab_mod.build_rows(args.dirs[0])
+            if args.key:
+                row = next((r for r in rows if r["key"] == args.key), None)
+                if not row:
+                    print(f"[ab] 未找到镜头 {args.key}")
+                    sys.exit(1)
+                print(f"== {args.key} 参数 ==")
+                print(json.dumps(row["params"], ensure_ascii=False, indent=2))
+                if row["variants"]:
+                    print(ab_mod.render_variants(args.key, row["variants"]))
+                else:
+                    print("  (无其它变体视频；series_manifest 只保留最新一版)")
+                if args.grid:
+                    paths = [row["video"]] + [v["path"] for v in row["variants"]]
+                    out = ab_mod.contact_sheet([p for p in paths if p], args.grid)
+                    print(f"  联系表: {out}")
+            else:
+                print(ab_mod.render_markdown(rows) if args.markdown
+                      else ab_mod.render_single(rows))
     elif args.cmd in ("publish", "publish-concept"):
         ensure(config.get("publish", {}).get("enabled", False), "未启用发布(publish.enabled)")
         agent = MovieAgent(config, args.workdir)

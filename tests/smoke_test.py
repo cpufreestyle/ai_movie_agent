@@ -581,6 +581,57 @@ def test_record_collect_and_roundtrip():
     assert len(record.load(wd)) == 2
 
 
+# ---------- agent/ab（A/B 工作台：同镜不同参数并排） ----------
+
+def test_ab_build_rows_and_param_diff():
+    import json
+    import os
+    import tempfile
+    from agent import ab, record
+    d = tempfile.mkdtemp()
+    record.save(d, "ep1_shot1",
+                record.collect(_MMH3LikeEngine(), prompt="a", seed=123, attempt=0))
+    record.save(d, "ep1_shot2",
+                record.collect(_MMH3LikeEngine(), prompt="b", seed=7, attempt=0))
+    man = {"ep1_shot1": os.path.join(d, "ep1_shot1.mp4"),
+           "ep1_shot2": os.path.join(d, "ep1_shot2.mp4")}
+    json.dump(man, open(os.path.join(d, "series_manifest.json"), "w", encoding="utf-8"))
+    open(man["ep1_shot1"], "wb").close()   # 空文件：cv2 读不到帧，QA 应留 0 不崩
+    rows = ab.build_rows(d)
+    keys = [r["key"] for r in rows]
+    assert "ep1_shot1" in keys and "ep1_shot2" in keys
+    r1 = next(r for r in rows if r["key"] == "ep1_shot1")
+    assert r1["params"]["seed"] == 123 and r1["params"]["steps"] == 30
+    assert r1["key"] in ab.render_single(rows)        # 渲染不崩且含镜头 key
+    assert r1["key"] in ab.render_markdown(rows)
+    diff = ab.param_diff({"seed": 1, "steps": 30}, {"seed": 2, "steps": 30})
+    assert ("seed", 1, 2) in diff
+    assert all(f != "steps" for f, _, _ in diff)       # 相同字段不应出现在差异里
+
+
+def test_ab_compare_runs_and_seed_from_name():
+    import json
+    import os
+    import tempfile
+    from agent import ab, record
+    da = tempfile.mkdtemp()
+    db = tempfile.mkdtemp()
+    record.save(da, "ep1_shot1",
+                record.collect(_MMH3LikeEngine(), prompt="a", seed=123, attempt=0))
+    record.save(db, "ep1_shot1",
+                record.collect(_MMH3LikeEngine(), prompt="a", seed=200, attempt=0))
+    for d in (da, db):
+        json.dump({"ep1_shot1": os.path.join(d, "ep1_shot1.mp4")},
+                  open(os.path.join(d, "series_manifest.json"), "w", encoding="utf-8"))
+    rows = ab.compare_runs(da, db)
+    assert len(rows) == 1 and rows[0]["key"] == "ep1_shot1"
+    diff = ab.param_diff(rows[0]["a"]["params"], rows[0]["b"]["params"])
+    assert ("seed", 123, 200) in diff                   # 同镜两次 seed 不同
+    assert ab._seed_from_name("ep1_shot1_s77") == 77    # 变体文件名含 seed 可解析
+    assert ab._seed_from_name("ep1_shot1") is None
+    assert "ep1_shot1" in ab.render_runs(rows)          # 渲染不崩
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
