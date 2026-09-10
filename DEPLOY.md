@@ -55,6 +55,16 @@ docker compose exec ollama ollama pull qwen2.5:3b
   - **MiniMax H3（默认引擎）**：`python download_mmh3_models.py --models-dir <ComfyUI/models 路径>`（int4_convrot pruned unet + qwen3vl_32b 文本编码器 + 音视频 VAE + turbo LoRA，多源续传）。
   - 两条脚本都自动走本地代理 `127.0.0.1:7897`、断连自动重试，在「有 NVIDIA 显卡、已装好 ComfyUI」的机器上跑。
 
+## 视频引擎增强：性能 / 质量 节点与插件
+- 提速：**SageAttention** 注意力后端（`pip install sageattention` 后 `python launch_comfy.py --sage-attention`，已在脚本内置开关），支持的显卡采样提速且更省显存。
+- 提质：在「解码 → 保存」之间插入**超分 + 锐化**，仅增强图像、不动音频。开关在 `config.yaml` 的 `engine.comfyui_mmH3.post` / `engine.comfyui_ltx.post`（默认关闭）：
+  ```yaml
+  post:
+    upscale_model: "4x-UltraSharp.pth"   # ESRGAN 模型，放 ComfyUI/models/upscale_models/
+    sharpen: 0.3                         # 0~1，0=关闭
+  ```
+- 完整插件清单（帧插值 RIFE、SUPIR 综合修复、TeaCache 等）与一键安装见 [docs/comfyui_plugins.md](docs/comfyui_plugins.md)（`bash setup_comfy_plugins.sh`）。
+
 ## 显卡后端：NVIDIA 还是 AMD？
 
 视频生成依赖的具体量化格式不同，ComfyUI 运行时也不同：

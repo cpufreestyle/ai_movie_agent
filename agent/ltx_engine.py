@@ -88,6 +88,7 @@ class LTXEngine:
                 f"  {self.workflow_path or '(空)'}\n不存在。请在 ComfyUI 导出 API Format 工作流后填入路径。"
             )
         wf = self._build_workflow(prompt, seed, image)
+        wf = self._apply_post(wf)
         dest = os.path.dirname(os.path.abspath(out_path))
         model_desc = f"GGUF:{self.unet_gguf}" if self.unet_gguf else self.checkpoint
         log(f"  [ltx] 提交 LTX-2.5 工作流（{model_desc}, precision={self.precision}, "
@@ -248,6 +249,48 @@ class LTXEngine:
         set_in(get_node("i2v_enable", "PrimitiveBoolean"), "value", has_img)
         # 提示词来源：始终走本地提示词（5508），不依赖 Gemma API（需 api_key）
         set_in(get_node("prompt_switch", "ComfySwitchNode"), "switch", False)
+        return wf
+
+    def _apply_post(self, wf: dict) -> dict:
+        """在最终视频保存节点前插入质量后处理（超分 + 锐化），默认关闭。
+
+        只对 images 链路做增强，音频输入保持原样（避免音画不同步）；
+        帧插值(RIFE)会改变帧率故不在此自动接入，作为离线增强单独提供。
+        使用 ComfyUI 内置节点（UpscaleModelLoader / ImageUpscaleWithModel /
+        ImageSharpen），无需额外自定义节点即可启用。
+        """
+        post = self.ltx.get("post") or {}
+        upscale = (post.get("upscale_model") or "").strip()
+        sharpen = max(0.0, float(post.get("sharpen", 0.0) or 0.0))
+        if not upscale and sharpen <= 0:
+            return wf
+        savers = [nid for nid, n in wf.items()
+                  if isinstance(n, dict)
+                  and n.get("class_type") in
+                  ("VHS_VideoCombine", "SaveAnimatedWEBM", "VHS_SaveImageSequence")]
+        if not savers:
+            log("  [ltx] 未找到视频保存节点，跳过质量后处理")
+            return wf
+        sid = savers[0]
+        src = (wf[sid].get("inputs") or {}).get("images")
+        if not isinstance(src, list) or len(src) != 2:
+            return wf
+        cur: list = src
+        if upscale:
+            wf["90"] = {"class_type": "UpscaleModelLoader",
+                        "inputs": {"model_name": upscale}}
+            wf["91"] = {"class_type": "ImageUpscaleWithModel",
+                        "inputs": {"images": cur, "upscale_model": ["90", 0]}}
+            cur = ["91", 0]
+        if sharpen > 0:
+            wf["92"] = {"class_type": "ImageSharpen",
+                        "inputs": {"image": cur, "sharpen": sharpen}}
+            cur = ["92", 0]
+        wf[sid]["inputs"]["images"] = cur
+        log(f"  [ltx] 已接入质量后处理："
+            f"{'超分(' + upscale + ')' if upscale else ''}"
+            f"{'+' if upscale and sharpen > 0 else ''}"
+            f"{'锐化' if sharpen > 0 else ''}")
         return wf
 
     def _make_placeholder_png(self, path: str) -> None:

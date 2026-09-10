@@ -24,6 +24,9 @@ ap.add_argument("--fp8-text-enc", action="store_true",
 ap.add_argument("--cpu", action="store_true",
                 help="加 --cpu 启动：纯 CPU 推理（不占显存）。权重与输入同在 CPU，"
                      "可绕开 GGUF patcher 不分块导致的显存撑满/device mismatch；代价是极慢")
+ap.add_argument("--sage-attention", action="store_true",
+                help="加 --use-sage-attention：用 SageAttention 替换默认注意力后端，"
+                     "在支持的显卡上显著加速采样并省显存（需先 pip install sageattention）")
 args = ap.parse_args()
 
 # 1) 仅结束 ComfyUI 相关进程（避免误杀其它 python）
@@ -66,6 +69,9 @@ if args.cpu:
     os.environ["OMP_NUM_THREADS"] = cores
     os.environ["MKL_NUM_THREADS"] = cores
     cmd.append("--cpu")
+if args.sage_attention:
+    # SageAttention：支持的显卡上大幅加速采样并省显存；依赖 sageattention 包
+    cmd.append("--use-sage-attention")
 
 p = subprocess.Popen(
     cmd,

@@ -68,6 +68,14 @@ class MMH3Engine:
         self.timeout = int(h3.get("timeout", 1800))
         self.filename_prefix = h3.get("filename_prefix") or "H3/pipe"
 
+        # 后处理（质量增强）：默认全部关闭，避免无超分模型/自定义节点时影响默认管线。
+        #   post.upscale_model: ESRGAN 模型文件名（放 ComfyUI models/upscale_models），
+        #                       留空 = 不做超分；如 "4x-UltraSharp.pth"
+        #   post.sharpen:       0~1，>0 启用内置 ImageSharpen 锐化；0 = 关闭
+        post = h3.get("post") or {}
+        self.post_upscale = (post.get("upscale_model") or "").strip()
+        self.post_sharpen = max(0.0, float(post.get("sharpen", 0.0) or 0.0))
+
         self._num_frames = self.snap_length(int(h3.get("num_frames", 56)))
         self._resolution = self.snap_resolution(h3.get("resolution", "768x448"))
 
@@ -125,13 +133,24 @@ class MMH3Engine:
 
     def generate(self, prompt: str, out_path: str, prev_clip: str | None = None,
                  seed: int | None = None, image: str | None = None,
-                 two_pass: bool | None = None) -> str:
+                 two_pass: bool | None = None,
+                 ref_video: str | None = None,
+                 ref_images: list | None = None) -> str:
+        """生成一段视频。
+
+        ref_video: 参考视频（白模走位等），经 VHS_LoadVideoPath 加载成 IMAGE 帧批次后
+            接到条件节点的 ref_videos。与 image(首帧) 同时给则走 Hybrid：
+            首帧锁形象/场景，参考视频锁走位与镜头运动。
+        ref_images: 额外参考图（最多 9 张），接 ref_images.ref_image_i。
+            Hybrid 下只靠 1 张 first_frame 锁形象时，身份信号会被参考视频的运动
+            信号压过导致人物形态崩坏；补多张同角色参考图可显著增强身份一致性。
+        """
         if not self.client.is_ready():
             raise RuntimeError(
                 "ComfyUI 未就绪：请启动 ComfyUI（8188）并安装 comfyui-minimax-h3-audio-T8 "
                 "与 ComfyUI-VideoHelperSuite 节点。"
             )
-        wf = self._build_workflow(prompt, seed, image)
+        wf = self._build_workflow(prompt, seed, image, ref_video, ref_images)
         dest = os.path.dirname(os.path.abspath(out_path)) or "."
         os.makedirs(dest, exist_ok=True)
         w, h = (int(x) for x in self.resolution.split("x"))
@@ -157,11 +176,23 @@ class MMH3Engine:
 
     # ---------- workflow ----------
     def _build_workflow(self, prompt: str, seed: int | None,
-                        image: str | None) -> dict:
+                        image: str | None,
+                        ref_video: str | None = None,
+                        ref_images: list | None = None) -> dict:
         """直接拼 API Format 工作流（不依赖外部 json，避免节点 ID 漂移）。"""
         seed = seed if seed is not None else self.seed
         w, h = (int(x) for x in self.resolution.split("x"))
         has_img = bool(image and os.path.exists(image))
+        has_ref = bool(ref_video and os.path.exists(ref_video))
+        # 任务类型：首帧锁形象/场景，参考视频锁走位与镜头运动，同时给走 Hybrid
+        if has_img and has_ref:
+            task = "Hybrid"
+        elif has_ref:
+            task = "Ref2VA"
+        elif has_img:
+            task = "I2VA"
+        else:
+            task = "T2VA"
 
         nodes: dict = {
             "1": {"class_type": "UNETLoader",
@@ -186,7 +217,7 @@ class MMH3Engine:
         cond_in = {
             "clip": ["3", 0], "video_vae": ["4", 0], "audio_vae": ["5", 0],
             "prompt": prompt, "width": w, "height": h, "length": self.num_frames,
-            "task_type": "I2VA" if has_img else "T2VA",
+            "task_type": task,
             "audio_mode": "native", "audio_denoise_strength": 1.0,
             "add_source_as_reference": False, "prompt_primary_audio_ordinal": 0,
             "strict_prompt_tags": True, "ref_image_size": "match",
@@ -199,6 +230,32 @@ class MMH3Engine:
                 raise RuntimeError(f"起始帧上传失败: {image}")
             nodes["13"] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
             cond_in["first_frame"] = ["13", 0]
+        if has_ref:
+            # 参考视频：本地绝对路径直接加载（免上传），输出 IMAGE 帧批次接 ref_videos
+            nodes["14"] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+                "video": os.path.abspath(ref_video),
+                "force_rate": float(self.fps),
+                "custom_width": 0, "custom_height": 0,
+                "frame_load_cap": 0, "skip_first_frames": 0,
+                "select_every_nth": 1,
+            }}
+            # Autogrow 在 API prompt 里是**带父级前缀的路径键**（finalize_prefix 用 "." 连接）：
+            #   f"{autogrow_input_id}.{prefix}{i}"，i 从 0 开始 → "ref_videos.ref_video_0"
+            # 写成嵌套 dict 或裸 ref_video_1 都会被丢弃（节点不执行，报
+            # "requires at least one reference media input"）。
+            cond_in["ref_videos.ref_video_0"] = ["14", 0]
+        # 多参考图（最多 9 张）：增强身份/形象信号，缓解 Hybrid 下人物形态崩坏。
+        # 同样是 Autogrow：键名带父级前缀 ref_images.ref_image_i，i 从 0 开始。
+        for i, rp in enumerate((ref_images or [])[:9]):
+            if not (rp and os.path.exists(rp)):
+                continue
+            meta = self.client.upload_image(rp)
+            nm = (meta or {}).get("name") or (meta or {}).get("filename")
+            if not nm:
+                continue
+            nid = "2%d" % i          # 20..28，避开已占用的节点 ID
+            nodes[nid] = {"class_type": "LoadImage", "inputs": {"image": nm}}
+            cond_in[f"ref_images.ref_image_{i}"] = [nid, 0]
         nodes["6"] = {"class_type": "MiniMaxH3AudioConditioningT8", "inputs": cond_in}
 
         # 采样器：Turbo 走双速率（4 视频 / 8 音频），否则统一步数双时钟
@@ -215,6 +272,21 @@ class MMH3Engine:
         # Turbo 路线的 model 由采样器输出（T8 官方工作流接法）；非 Turbo 直连模型源
         guider_model = ["7", 0] if self.turbo else model_src
 
+        # ---------- 后处理（质量增强，默认关闭）----------
+        # decode(11) 输出 [IMAGE 帧批次, AUDIO]；音频不动，只增强图像分辨率/锐度。
+        # 帧插值(RIFE)故意不接此处：会改变帧率导致音画不同步，作为离线增强单独提供。
+        images_src = ["11", 0]
+        if self.post_upscale:
+            nodes["20"] = {"class_type": "UpscaleModelLoader",
+                           "inputs": {"model_name": self.post_upscale}}
+            nodes["21"] = {"class_type": "ImageUpscaleWithModel", "inputs": {
+                "images": images_src, "upscale_model": ["20", 0]}}
+            images_src = ["21", 0]
+        if self.post_sharpen > 0:
+            nodes["22"] = {"class_type": "ImageSharpen", "inputs": {
+                "image": images_src, "sharpen": self.post_sharpen}}
+            images_src = ["22", 0]
+
         nodes.update({
             "8": {"class_type": "BasicGuider",
                   "inputs": {"model": guider_model, "conditioning": ["6", 0]}},
@@ -226,7 +298,7 @@ class MMH3Engine:
                 "av_latent": ["10", 0], "video_vae": ["4", 0],
                 "audio_vae": ["5", 0]}},
             "12": {"class_type": "VHS_VideoCombine", "inputs": {
-                "images": ["11", 0], "audio": ["11", 1], "frame_rate": self.fps,
+                "images": images_src, "audio": ["11", 1], "frame_rate": self.fps,
                 "filename_prefix": self.filename_prefix,
                 "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 18,
                 "loop_count": 0, "pingpong": False, "save_output": True}},
