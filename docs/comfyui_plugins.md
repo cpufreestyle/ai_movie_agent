@@ -33,15 +33,18 @@
 | **综合修复** | `ComfyUI-SUPIR` / `SUPIR` | 离线 | 画质天花板高，显存占用大 |
 | **细节增强** | `Detail Daemon`、`FreeU` | 离线 | 注入采样过程，增强纹理/结构 |
 
-默认 `post` 全关，行为与之前一致。示例（打开 2x 超分 + 轻度锐化）：
+**默认状态**：`sharpen: 0.2` 已默认开启（内置节点，零依赖，仅轻微去糊）；
+`upscale_model` 留空（超分需先自行下载 ESRGAN 模型，填了才启用）。
 
 ```yaml
 engine:
   comfyui_mmH3:
     post:
-      upscale_model: "4x-UltraSharp.pth"
-      sharpen: 0.3
+      upscale_model: "4x-UltraSharp.pth"   # 留空 = 不超分；填模型名 = 启用超分
+      sharpen: 0.2                         # 0~1，0=关闭（出问题时兜底）
 ```
+
+> 若 ComfyUI 缺少相关节点导致提交报错，把 `sharpen` 改回 `0` 即可退回原始行为。
 
 ## 三、安装方式
 

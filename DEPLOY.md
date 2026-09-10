@@ -57,12 +57,13 @@ docker compose exec ollama ollama pull qwen2.5:3b
 
 ## 视频引擎增强：性能 / 质量 节点与插件
 - 提速：**SageAttention** 注意力后端（`pip install sageattention` 后 `python launch_comfy.py --sage-attention`，已在脚本内置开关），支持的显卡采样提速且更省显存。
-- 提质：在「解码 → 保存」之间插入**超分 + 锐化**，仅增强图像、不动音频。开关在 `config.yaml` 的 `engine.comfyui_mmH3.post` / `engine.comfyui_ltx.post`（默认关闭）：
+- 提质：在「解码 → 保存」之间插入**超分 + 锐化**，仅增强图像、不动音频。开关在 `config.yaml` 的 `engine.comfyui_mmH3.post` / `engine.comfyui_ltx.post`：
   ```yaml
   post:
-    upscale_model: "4x-UltraSharp.pth"   # ESRGAN 模型，放 ComfyUI/models/upscale_models/
-    sharpen: 0.3                         # 0~1，0=关闭
+    upscale_model: ""      # ESRGAN 模型（放 ComfyUI/models/upscale_models/）；留空=不超分，填了才启用
+    sharpen: 0.2           # 0~1，默认 0.2 轻度锐化已开启；改 0 关闭
   ```
+  锐化默认开启（内置节点、零依赖）。若报节点缺失，把 `sharpen` 改回 `0` 即退回原行为。
 - 完整插件清单（帧插值 RIFE、SUPIR 综合修复、TeaCache 等）与一键安装见 [docs/comfyui_plugins.md](docs/comfyui_plugins.md)（`bash setup_comfy_plugins.sh`）。
 
 ## 显卡后端：NVIDIA 还是 AMD？

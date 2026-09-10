@@ -48,10 +48,10 @@ engine:
       load_image: '2004'
       i2v_enable: '5014_5506'
       prompt_switch: '5014_5556'
-    # 质量后处理（默认关闭）：同 comfyui_mmH3.post，作用于最终视频保存节点前
+    # 质量后处理：同 comfyui_mmH3.post，作用于最终视频保存节点前
     post:
       upscale_model: ''
-      sharpen: 0.0
+      sharpen: 0.2
   comfyui_mmH3:
     api: http://127.0.0.1:8188
     unet: minimax_h3_fl2va_pruned_int4_convrot.safetensors
@@ -69,12 +69,13 @@ engine:
     seed: 0
     timeout: 1800
     filename_prefix: H3/pipe
-    # 质量后处理（默认关闭）：超分 + 锐化。仅增强图像，音频不动。
-    #   upscale_model: ESRGAN 模型文件名（放 ComfyUI models/upscale_models），如 4x-UltraSharp.pth；留空=不超分
-    #   sharpen:       0~1，>0 启用内置 ImageSharpen；0=关闭
+    # 质量后处理：超分 + 锐化。仅增强图像，音频不动。
+    #   upscale_model: ESRGAN 模型文件名（放 ComfyUI models/upscale_models），
+    #                  需先自行下载该模型；留空 = 不做超分（留空不会报错，可安全留空）
+    #   sharpen:       0~1，>0 启用内置 ImageSharpen 轻度锐化去糊；0 = 关闭（出问题时的兜底）
     post:
       upscale_model: ''
-      sharpen: 0.0
+      sharpen: 0.2
 llm:
   base_url: http://localhost:11434/v1
   api_key: ollama
