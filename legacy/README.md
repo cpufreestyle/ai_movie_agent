@@ -11,17 +11,23 @@
 | `run_wan22_scifi.py` | Wan2.2 科幻比赛片（1280x704） | `run_series.py` / `cli.py pipeline` |
 | `run_wan22_test.py` | Wan2.2 单镜冒烟（832x480x49） | `python make_mmh3_workflow.py` + ComfyUI |
 | `run_ltx23.py` | LTX-2.3（GGUF Q3_K_M）单镜 | `agent/ltx_engine.py`（LTX-2.5） |
+| `run_ltx23_multishot.py` | LTX-2.3 多镜头成片（18 镜 + 拼接），原为 WebUI 默认链路 | `run_ltx25_multishot.py`（LTX-2.5）+ `shots.py` |
 | `run_ltx_gguf_test.py` | LTX GGUF 冒烟/排障 | 同上 |
 | `verify_i2v.py` | I2V 产物校验（对比首帧与出片） | `diag_face_consistency.py` |
 | `verify_ltx_graph.py` | 校验 LTX 工作流连线 | `verify_ltx_graph.py` 的逻辑已并入 `ltx_engine._build_workflow` |
 | `download_ltx23_q3.py` | 下载 LTX-2.3 Q3_K_M 量化 | `download_ltx_models.py`（LTX-2.5 NVFP4） |
 | `download_gguf_mt.py` | 单文件 GGUF 下载（写死 D:\ComfyUI） | `download_hf_mt.py`（通用、可配镜像/目录） |
 
-## 仍在根目录、**没有**归档的 LTX 脚本
+## LTX-2.3 的 WebUI 入口已下线
 
-`run_ltx23_multishot.py` / `run_ltx25_multishot.py` 被 `webui.py` 直接调用
-（`run_script(...)` 与 `importlib.import_module("run_ltx23_multishot").SHOTS`），属于 WebUI 上的可用功能，
-故保留在根目录。若要下线 LTX-2.3 那条 WebUI 路线，需同时改 `webui.py` 的相应入口。
+原先 `webui.py` 按请求里的 `model` 在 LTX-2.3 / LTX-2.5 之间二选一
+（调用 `run_ltx23_multishot.py` / `run_ltx25_multishot.py`）。现已**固定走 LTX-2.5**：
+
+- `run_ltx23_multishot.py` 归档到本目录；
+- `run_ltx25_multishot.py` 保留在根目录，仍是 WebUI 的可调用功能；
+- 18 镜剧本原写在 `run_ltx23_multishot.py` 内，已抽成根目录 `shots.py`，
+  供 `run_ltx25_multishot.py` 与 `webui.py`（`importlib.import_module("shots").SHOTS`）复用；
+- `webui.py` 的媒体列表里仍留有 `ltx23_film`，仅为查看**历史成片**，不再是生成入口。
 
 ## 怎么运行这里的脚本
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """LTX-2.5 多镜头成片：复用 agent/ltx_engine.py 的 LTXEngine 按分镜渲染每镜并拼接。
 
-与 run_ltx23_multishot.py 的区别：
+特点：
   - 直接复用 LTXEngine（走 workflows/ltx2_5_t2v_api.json + 注入逻辑），不手写 workflow；
   - LTX-2.5 原生音视频联合生成，每镜自带音轨，拼接时同时处理音频（xfade + acrossfade）；
   - 支持 --width/--height/--frames/--fps 覆盖 config.comfyui_ltx，便于做分辨率/时长稳定性验证；
-  - 分镜默认复用 run_ltx23_multishot 的 SHOTS（同一剧本，不同模型），并同样支持 outputs/storyboard.json 覆盖。
+  - 分镜默认取自 shots.py（18 镜剧本），并同样支持 outputs/storyboard.json 覆盖。
 
 用法:
   python run_ltx25_multishot.py                  # 依次生成全部镜头并拼接
@@ -29,8 +29,8 @@ WORK = os.path.join(ROOT, "outputs", "shots")
 os.makedirs(WORK, exist_ok=True)
 MANIFEST = os.path.join(WORK, "ltx25_manifest.json")
 
-# 复用 LTX-2.3 的多镜剧本（同一《看见未来之前》科幻短片，18 镜）
-from run_ltx23_multishot import SHOTS  # noqa: E402
+# 多镜剧本（《看见未来之前》科幻短片，18 镜）：LTX-2.3 运行器归档后抽成独立模块
+from shots import SHOTS  # noqa: E402
 
 # ---- 生成参数：默认沿用 config.comfyui_ltx，可被 CLI 覆盖 ----
 BASE_SEED = 20260905

@@ -277,7 +277,7 @@ def api_run_full():
 
     与 /api/run 的区别：/api/run 走 agent 的「逐镜续写」循环，其 G 依赖 SkyReels /
     ComfyUI-LTX-2.5(8188) 工作流，本机未就绪会在 G 断链；本接口改用本机已跑通的
-    批处理链路（ComfyUI 8200 + run_ltx23_multishot.py），一次调用直通成片。
+    批处理链路（ComfyUI + run_ltx25_multishot.py），一次调用直通成片。
     """
     if _state["running"]:
         return json_resp({"ok": False, "error": "已有任务在运行"}, status=409)
@@ -285,7 +285,7 @@ def api_run_full():
     do_research = bool(body.get("do_research", True))
     regen_sb = bool(body.get("regenerate_storyboard", True))
     topic_in = body.get("topic") or None
-    model = str(body.get("model") or "ltx23")   # ltx23 | ltx25
+    # LTX-2.3 入口已下线，视频链路固定走 LTX-2.5（不再读 body.model）
 
     def _job():
         result = {"ok": True, "steps": []}
@@ -328,38 +328,26 @@ def api_run_full():
             done("沿用现有分镜", shots=len(sb_data.get("shots", [])),
                  narration=len(sb_data.get("narration", [])))
 
-        # ---- G：LTX 渲染 18 镜并拼接 ----
-        print(f"\n=== G 阶段：LTX({model}) 渲染 18 镜并拼接 ===")
-        if model == "ltx25":
-            run_script("run_ltx25_multishot.py")
-            done("G 视频渲染(LTX-2.5)")
-        else:
-            run_script("run_ltx23_multishot.py")
-            done("G 视频渲染")
+        # ---- G：LTX-2.5 渲染 18 镜并拼接（LTX-2.3 入口已下线）----
+        print("\n=== G 阶段：LTX-2.5 渲染 18 镜并拼接 ===")
+        run_script("run_ltx25_multishot.py")
+        done("G 视频渲染(LTX-2.5)")
 
         # ---- 解说配音 + 字幕 ----
         print("\n=== 解说配音 + 字幕 ===")
-        if model == "ltx25":
-            run_script("make_narration.py", args=[
-                "--film", "outputs/ltx25_film.mp4",
-                "--out", "outputs/ep3_vo.mp4",
-                "--auto-dur"])
-            done("解说配音(LTX-2.5)")
-        else:
-            run_script("make_narration.py")
-            done("解说配音")
+        run_script("make_narration.py", args=[
+            "--film", "outputs/ltx25_film.mp4",
+            "--out", "outputs/ep3_vo.mp4",
+            "--auto-dur"])
+        done("解说配音(LTX-2.5)")
 
         # ---- H：封装成片（可选投稿）----
         print("\n=== H 阶段：封装成片 ===")
-        if model == "ltx25":
-            src = (os.path.join(WORKDIR, "ep3_vo.mp4")
-                   if os.path.exists(os.path.join(WORKDIR, "ep3_vo.mp4"))
-                   else os.path.join(WORKDIR, "ltx25_film.mp4"))
-        else:
-            src = MEDIA["ep1_vo"] if os.path.exists(MEDIA["ep1_vo"]) \
-                else MEDIA["ltx23_film"]
+        src = (os.path.join(WORKDIR, "ep3_vo.mp4")
+               if os.path.exists(os.path.join(WORKDIR, "ep3_vo.mp4"))
+               else os.path.join(WORKDIR, "ltx25_film.mp4"))
         if not os.path.exists(src):
-            raise RuntimeError("未找到成片（ep1_vo.mp4 / ep3_vo.mp4 / ltx23_film.mp4）")
+            raise RuntimeError("未找到成片（ep3_vo.mp4 / ltx25_film.mp4）")
         shutil.copy(src, MEDIA["movie_final"])
         done("H 封装", file="movie_final.mp4",
              size_mb=round(os.path.getsize(MEDIA["movie_final"]) / 2 ** 20, 2))
@@ -705,7 +693,7 @@ def load_storyboard() -> dict:
         if HERE not in sys.path:
             sys.path.insert(0, HERE)
         import importlib
-        shots = list(importlib.import_module("run_ltx23_multishot").SHOTS)
+        shots = list(importlib.import_module("shots").SHOTS)
         narration = list(importlib.import_module("make_narration").LINES)
     return {"shots": shots, "narration": narration, "overridden": overridden}
 
@@ -904,21 +892,15 @@ def api_film_render():
         return json_resp({"ok": False, "error": "已有任务在运行"}, status=409)
     body = request.get_json(force=True, silent=True) or {}
     only = str(body.get("only") or "all")   # all | shots | narration
-    model = str(body.get("model") or "ltx23")  # ltx23 | ltx25
 
+    # LTX-2.3 入口已下线，视频链路固定走 LTX-2.5
     steps = []
     if only in ("all", "shots"):
-        if model == "ltx25":
-            steps.append(("生成分镜并拼接(LTX-2.5)", "run_ltx25_multishot.py", []))
-        else:
-            steps.append(("生成分镜并拼接", "run_ltx23_multishot.py", []))
+        steps.append(("生成分镜并拼接(LTX-2.5)", "run_ltx25_multishot.py", []))
     if only in ("all", "narration"):
-        if model == "ltx25":
-            steps.append(("解说配音+字幕(LTX-2.5)", "make_narration.py",
-                          ["--film", "outputs/ltx25_film.mp4",
-                           "--out", "outputs/ep3_vo.mp4", "--auto-dur"]))
-        else:
-            steps.append(("解说配音+字幕", "make_narration.py", []))
+        steps.append(("解说配音+字幕(LTX-2.5)", "make_narration.py",
+                      ["--film", "outputs/ltx25_film.mp4",
+                       "--out", "outputs/ep3_vo.mp4", "--auto-dur"]))
 
     def _job():
         result = {"ok": True, "steps": []}
