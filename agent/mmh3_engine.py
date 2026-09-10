@@ -30,6 +30,8 @@ import os
 import shutil
 
 from tools.comfyui_client import ComfyUIClient
+
+from . import comfyui_post
 from .llmutil import log
 
 
@@ -72,9 +74,7 @@ class MMH3Engine:
         #   post.upscale_model: ESRGAN 模型文件名（放 ComfyUI models/upscale_models），
         #                       留空 = 不做超分；如 "4x-UltraSharp.pth"
         #   post.sharpen:       0~1，>0 启用内置 ImageSharpen 锐化；0 = 关闭
-        post = h3.get("post") or {}
-        self.post_upscale = (post.get("upscale_model") or "").strip()
-        self.post_sharpen = max(0.0, float(post.get("sharpen", 0.0) or 0.0))
+        self.post_upscale, self.post_sharpen = comfyui_post.read_post_cfg(h3.get("post"))
 
         self._num_frames = self.snap_length(int(h3.get("num_frames", 56)))
         self._resolution = self.snap_resolution(h3.get("resolution", "768x448"))
@@ -280,25 +280,19 @@ class MMH3Engine:
         # Turbo 路线的 model 由采样器输出（T8 官方工作流接法）；非 Turbo 直连模型源
         guider_model = ["7", 0] if self.turbo else model_src
 
-        # ---------- 后处理（质量增强，默认关闭）----------
+        # ---------- 后处理（质量增强，由 config.engine.comfyui_mmH3.post 控制）----------
         # decode(11) 输出 [IMAGE 帧批次, AUDIO]；音频不动，只增强图像分辨率/锐度。
         # 帧插值(RIFE)故意不接此处：会改变帧率导致音画不同步，作为离线增强单独提供。
+        # 具体实现统一在 agent/comfyui_post.py（与 LTX-2.5 共用）。
         images_src = ["11", 0]
-        # 节点 ID 用 30+ 段：20~28 已被 ref_images 的 LoadImage 占用（"2%d" % i），
-        # 复用会导致后处理节点覆盖参考图节点，使 ref_image_i 指向后处理输出并形成依赖环。
-        if self.post_upscale:
-            nodes["30"] = {"class_type": "UpscaleModelLoader",
-                           "inputs": {"model_name": self.post_upscale}}
-            nodes["31"] = {"class_type": "ImageUpscaleWithModel", "inputs": {
-                "images": images_src, "upscale_model": ["30", 0]}}
-            images_src = ["31", 0]
-        if self.post_sharpen > 0:
-            # ImageSharpen 的参数是 sharpen_radius/sigma/alpha（comfy_extras/
-            # nodes_post_processing.py），没有 `sharpen`；强度映射到 alpha。
-            nodes["32"] = {"class_type": "ImageSharpen", "inputs": {
-                "image": images_src, "sharpen_radius": 1, "sigma": 1.0,
-                "alpha": self.post_sharpen}}
-            images_src = ["32", 0]
+        if self.post_upscale or self.post_sharpen > 0:
+            # 节点 ID 固定用 30/31/32：20~28 已被 ref_images 的 LoadImage 占用
+            # （"2%d" % i），复用会覆盖参考图节点、使 ref_image_i 指向后处理输出并形成依赖环。
+            post_ids = {"upscale_loader": "30", "upscale_apply": "31", "sharpen": "32"}
+            images_src = comfyui_post.build_post_nodes(
+                nodes, images_src,
+                upscale=self.post_upscale, sharpen=self.post_sharpen,
+                alloc=lambda name: post_ids[name])
 
         nodes.update({
             "8": {"class_type": "BasicGuider",

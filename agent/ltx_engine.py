@@ -36,6 +36,8 @@ import tempfile
 import zlib
 
 from tools.comfyui_client import ComfyUIClient
+
+from . import comfyui_post
 from .llmutil import log
 
 
@@ -261,57 +263,30 @@ class LTXEngine:
 
         默认只开轻度锐化（post.sharpen>0）；超分需配置 post.upscale_model 模型名。
 
-        只对 images 链路做增强，音频输入保持原样（避免音画不同步）；
-        帧插值(RIFE)会改变帧率故不在此自动接入，作为离线增强单独提供。
-        使用 ComfyUI 内置节点（UpscaleModelLoader / ImageUpscaleWithModel /
-        ImageSharpen），无需额外自定义节点即可启用。
+        实现统一在 agent/comfyui_post.py（与 MiniMax H3 共用），避免两处各写一遍
+        再次出现「节点 ID 冲突 / ImageSharpen 参数名错」这类问题。
         """
-        post = self.ltx.get("post") or {}
-        upscale = (post.get("upscale_model") or "").strip()
-        sharpen = max(0.0, float(post.get("sharpen", 0.0) or 0.0))
+        upscale, sharpen = comfyui_post.read_post_cfg(self.ltx.get("post"))
         if not upscale and sharpen <= 0:
             return wf
-        savers = [nid for nid, n in wf.items()
-                  if isinstance(n, dict)
-                  and n.get("class_type") in
-                  ("VHS_VideoCombine", "SaveAnimatedWEBM", "VHS_SaveImageSequence")]
-        if not savers:
+        sid = comfyui_post.find_video_saver(wf)
+        if not sid:
             log("  [ltx] 未找到视频保存节点，跳过质量后处理")
             return wf
-        sid = savers[0]
-        src = (wf[sid].get("inputs") or {}).get("images")
-        if not isinstance(src, list) or len(src) != 2:
-            return wf
-        cur: list = src
         # 用户工作流的节点 ID 是任意的（如 5508 / 5014_5506），固定 ID 可能撞上真实节点，
         # 故从高位起找空闲 ID。
-        def _free_id(base: int) -> str:
-            n = base
+        bases = {"upscale_loader": 90001, "upscale_apply": 90002, "sharpen": 90003}
+
+        def _alloc(name: str) -> str:
+            n = bases[name]
             while str(n) in wf:
                 n += 1
             return str(n)
 
-        if upscale:
-            u1 = _free_id(90001)
-            wf[u1] = {"class_type": "UpscaleModelLoader",
-                      "inputs": {"model_name": upscale}}
-            u2 = _free_id(90002)
-            wf[u2] = {"class_type": "ImageUpscaleWithModel",
-                      "inputs": {"images": cur, "upscale_model": [u1, 0]}}
-            cur = [u2, 0]
-        if sharpen > 0:
-            # ImageSharpen 的参数是 sharpen_radius / sigma / alpha
-            # （comfy_extras/nodes_post_processing.py），没有 `sharpen`；强度映射到 alpha。
-            s1 = _free_id(90003)
-            wf[s1] = {"class_type": "ImageSharpen", "inputs": {
-                "image": cur, "sharpen_radius": 1, "sigma": 1.0,
-                "alpha": sharpen}}
-            cur = [s1, 0]
-        wf[sid]["inputs"]["images"] = cur
-        log(f"  [ltx] 已接入质量后处理："
-            f"{'超分(' + upscale + ')' if upscale else ''}"
-            f"{'+' if upscale and sharpen > 0 else ''}"
-            f"{'锐化' if sharpen > 0 else ''}")
+        if comfyui_post.apply_post(wf, sid, upscale=upscale, sharpen=sharpen,
+                                  alloc=_alloc) is None:
+            return wf
+        log(f"  [ltx] 已接入质量后处理：{comfyui_post.describe(upscale, sharpen)}")
         return wf
 
     def _make_placeholder_png(self, path: str) -> None:

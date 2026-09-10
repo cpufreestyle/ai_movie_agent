@@ -38,3 +38,10 @@ comfy_run.log
 _*.py
 kill_test.py
 tmp_vae_test.py
+
+# 测试 / 构建缓存
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
