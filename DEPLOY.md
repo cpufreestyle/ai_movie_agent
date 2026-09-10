@@ -55,6 +55,15 @@ docker compose exec ollama ollama pull qwen2.5:3b
   - **MiniMax H3（默认引擎）**：`python download_mmh3_models.py --models-dir <ComfyUI/models 路径>`（int4_convrot pruned unet + qwen3vl_32b 文本编码器 + 音视频 VAE + turbo LoRA，多源续传）。
   - 两条脚本都自动走本地代理 `127.0.0.1:7897`、断连自动重试，在「有 NVIDIA 显卡、已装好 ComfyUI」的机器上跑。
 
+- **想在 ComfyUI 界面里手动出片**：导入 `workflows/mmh3_turbo_4v8a_ui.json`（菜单 `Workflow → Open`，或直接拖到画布）。
+  它由 `python make_mmh3_workflow.py` 生成：以官方 T8 示例为骨架，按 `config.yaml` 填入本机实际权重。
+  > 手搭时最常见的错误是把文本编码器选成 LTX-2.5 的 `gemma4-12b…`(6144 维)，而 H3 的
+  > `condition_proj` 期望 5120 维，会报 `mat1 and mat2 shapes cannot be multiplied (75x6144 and 5120x5376)`。
+  > 正确搭配：`CLIPLoader` = `qwen3vl_32b_minimax_h3_int4_convrot.safetensors`、**type = `minimax`**；
+  > VAE = `minimax_h3_video_vae_fp16` + `minimax_h3_audio_vae_fp32`；且不能用 `KSampler`/`CLIPTextEncode`
+  > 那套通用 SD 节点，必须走 T8 节点链（AudioConditioning → MultiRate/DualClock Sampler →
+  > SamplerCustomAdvanced → AVDecode → VHS_VideoCombine）。
+
 ## 视频引擎增强：性能 / 质量 节点与插件
 - 提速：**SageAttention** 注意力后端（`pip install sageattention` 后 `python launch_comfy.py --sage-attention`，已在脚本内置开关），支持的显卡采样提速且更省显存。
 - 提质：在「解码 → 保存」之间插入**超分 + 锐化**，仅增强图像、不动音频。开关在 `config.yaml` 的 `engine.comfyui_mmH3.post` / `engine.comfyui_ltx.post`：
