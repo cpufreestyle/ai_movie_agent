@@ -346,6 +346,70 @@ def test_ltx_apply_post_rewires_saver():
     assert wf["90003"]["inputs"]["alpha"] == 0.2
 
 
+# ---------- agent/prompting（负向提示词库） ----------
+
+def test_prompting_negative_presets_and_priority():
+    from agent import prompting
+    for name in ("quality", "identity", "anime"):
+        assert prompting.NEGATIVE_PRESETS[name]
+    # 空配置 → 默认 quality 预设
+    assert prompting.resolve_negative({}) == prompting.NEGATIVE_PRESETS["quality"]
+    # config.prompting.negative 写预设名
+    assert prompting.resolve_negative({"prompting": {"negative": "identity"}}) \
+        == prompting.NEGATIVE_PRESETS["identity"]
+    # 写整串（非预设名）→ 按字面处理
+    assert prompting.resolve_negative({"prompting": {"negative": "no hands, no text"}}) \
+        == "no hands, no text"
+    # 引擎级显式配置最具体，优先
+    assert prompting.resolve_negative({"prompting": {"negative": "quality"}},
+                                      engine_negative="explicit one") == "explicit one"
+    # extra 追加且按逗号去重（保序）
+    r = prompting.resolve_negative({"prompting": {"negative": "no text"}},
+                                   extra="no text, extra thing")
+    assert r == "no text, extra thing"
+
+
+def test_prompting_supports_negative():
+    from agent import prompting
+    assert prompting.supports_negative("ltx") is True
+    assert prompting.supports_negative("comfyui_ltx") is True
+    # H3 走 flow matching / shift，BasicGuider 无 negative 端 → 配了也不生效
+    for name in ("mmh3", "comfyui_mmh3", "minimax_h3", "h3"):
+        assert prompting.supports_negative(name) is False
+
+
+def test_ltx_engine_uses_negative_library():
+    from agent.ltx_engine import LTXEngine
+    # 引擎未配 negative → 回落到 quality 预设（不能是空串）
+    eng = LTXEngine({"engine": {"comfyui_ltx": {"api": ""}}})
+    assert eng.negative and "deformed face" in eng.negative
+    # 引擎级显式配置优先
+    eng2 = LTXEngine({"engine": {"comfyui_ltx": {"api": "", "negative": "custom neg"}}})
+    assert eng2.negative == "custom neg"
+
+
+def test_resolve_anchor_auto_and_explicit():
+    import shutil
+    from PIL import Image
+    import run_series as rs
+    assert rs.resolve_anchor("") == ("", "")          # 留空 = 不锚定
+    p, note = rs.resolve_anchor("no/such/anchor.png")
+    assert p == "" and "不存在" in note               # 显式路径不存在 → 给原因
+    # auto：把 ROOT 临时指向一个自制角色卡目录
+    tmp = tempfile.mkdtemp()
+    os.makedirs(os.path.join(tmp, "outputs", "anchor"))
+    card = os.path.join(tmp, "outputs", "anchor", "mira_anchor.png")
+    Image.new("RGB", (8, 8), (0, 0, 0)).save(card)
+    old_root = rs.ROOT
+    try:
+        rs.ROOT = tmp
+        p2, note2 = rs.resolve_anchor("auto")
+        assert p2 == card and "mira_anchor.png" in note2
+    finally:
+        rs.ROOT = old_root
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------- comfyui_client（错误可读性） ----------
 
 # ---------- agent/qa（逐镜质检） ----------

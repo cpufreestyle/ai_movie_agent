@@ -38,6 +38,7 @@ import zlib
 from tools.comfyui_client import ComfyUIClient
 
 from . import comfyui_post
+from . import prompting
 from .llmutil import log
 
 
@@ -69,7 +70,9 @@ class LTXEngine:
                           or "ltx-2.5-video-vae-bf16.safetensors")
         self.audio_vae = (ltx.get("audio_vae")
                           or "ltx-2.5-audio-vae-bf16.safetensors")
-        self.negative = ltx.get("negative") or ""
+        # 负向提示词：引擎级 > config.prompting.negative > 默认 quality 预设
+        self.negative = prompting.resolve_negative(
+            config, engine_negative=ltx.get("negative") or "")
         self.client = ComfyUIClient(self.api)
         self.two_pass = False  # LTX 自带时长/运动控制，不依赖 SkyReels 式两遍续写
 

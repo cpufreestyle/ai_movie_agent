@@ -231,6 +231,41 @@ def _is_char_shot(prompt: str) -> bool:
     return True
 
 
+def resolve_anchor(value: str, anchor_name: str = "mira") -> tuple:
+    """解析 --anchor：'auto' 自动找角色卡；空=不锚定；否则当作路径。
+
+    查找顺序：config.series.character_anchor → outputs/anchor/*anchor*.png
+              → outputs/anchor/<anchor_name>_*.png
+    返回 (路径, 说明)；找不到时路径为空、说明里写原因，由调用方决定怎么处理。
+    """
+    if not value:
+        return "", ""
+    if value.lower() != "auto":
+        p = value if os.path.isabs(value) else os.path.join(ROOT, value)
+        return (p, "指定路径") if os.path.exists(p) else ("", f"锚定图不存在: {p}")
+
+    try:
+        cfg_anchor = ((load_config().get("series") or {}).get("character_anchor") or "").strip()
+    except Exception:                 # noqa: BLE001 - 读不到配置就跳过这级
+        cfg_anchor = ""
+    if cfg_anchor:
+        p = cfg_anchor if os.path.isabs(cfg_anchor) else os.path.join(ROOT, cfg_anchor)
+        if os.path.exists(p):
+            return p, "config.series.character_anchor"
+
+    anc_dir = os.path.join(ROOT, "outputs", "anchor")
+    if os.path.isdir(anc_dir):
+        files = sorted(f for f in os.listdir(anc_dir) if f.lower().endswith(".png"))
+        hit = next((f for f in files if "anchor" in f.lower()), None)
+        if hit:
+            return os.path.join(anc_dir, hit), f"outputs/anchor/{hit}"
+        hit2 = next((f for f in files
+                     if f.lower().startswith(anchor_name.lower() + "_")), None)
+        if hit2:
+            return os.path.join(anc_dir, hit2), f"outputs/anchor/{hit2}"
+    return "", "auto 但未在 outputs/anchor/ 找到角色卡（可先跑 gen_anchor_assets.py）"
+
+
 def _write_qa_report(entries: list) -> None:
     """把逐镜质检结果落盘（含分布汇总，便于回头校准阈值）。"""
     if not entries:
@@ -387,7 +422,9 @@ def main():
                     help="视频引擎：ltx=LTX-2.5，mmh3=MiniMax H3(Turbo 4 步, 自带立体声)")
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "outputs"))
     ap.add_argument("--anchor", default="",
-                    help="角色锚定图路径：含 'woman' 的镜头用它作 I2V 起始帧（锁住同一张脸）")
+                    help="角色锚定图：给含 'woman' 的镜头作 I2V 起始帧（锁住同一张脸）。"
+                         "传 auto 自动查找：config.series.character_anchor"
+                         " → outputs/anchor/*anchor*.png → mira_*.png；留空=不锚定")
     ap.add_argument("--anchor-map", default="",
                     help="JSON 文件：{镜号: 锚定图路径}。逐镜指定锚定图（场景图 / 人物三视图），"
                          "优先级高于 --anchor")
@@ -418,6 +455,20 @@ def main():
                        a.frames or None, a.fps or None, a.engine)
 
     data = load_json(SHOTS_FILE)
+    # 角色卡：--anchor auto 自动查 config / outputs/anchor/，省得每次手填路径
+    anchor, anchor_note = resolve_anchor(a.anchor)
+    if a.anchor and not anchor:
+        print(f"[anchor] {anchor_note}，改用无锚定出片")
+    elif anchor:
+        print(f"[anchor] 角色锚定图: {anchor}（{anchor_note}）")
+    else:
+        anc_dir = os.path.join(ROOT, "outputs", "anchor")
+        n = len([f for f in os.listdir(anc_dir)
+                 if f.lower().endswith(".png")]) if os.path.isdir(anc_dir) else 0
+        if n:
+            print(f"[anchor] 检测到 outputs/anchor/ 有 {n} 张角色卡；需要锁脸可加 "
+                  f"--anchor auto（注意：LTX 的 I2V 起始图权重偏高，可能让各镜画面趋同）")
+
     anchor_map = {}
     if a.anchor_map:
         _p = a.anchor_map if os.path.isabs(a.anchor_map) else os.path.join(ROOT, a.anchor_map)
@@ -478,7 +529,7 @@ def main():
         if not prompts:
             print(f"[fatal] series_shots.json 缺少 ep{ep}")
             return 1
-        if a.anchor:
+        if anchor:
             mode = f"角色锚定({a.anchor_mode})"
         else:
             mode = "I2V 续写" if a.i2v else "T2V 精确场景"
@@ -486,7 +537,7 @@ def main():
         film = os.path.join(a.out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
         prev_frame = run_episode(eng, ep, prompts, style_anchor,
                                  prev_frame, a.out_dir, a.i2v,
-                                 anchor=a.anchor, anchor_mode=a.anchor_mode,
+                                 anchor=anchor, anchor_mode=a.anchor_mode,
                                  only=only, force=a.force, anchor_map=anchor_map,
                                  ref_images=ref_images, qa_policy=qa_policy)
         # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
