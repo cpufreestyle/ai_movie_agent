@@ -41,9 +41,8 @@ MEDIA = {
     "concept_cover": os.path.join(WORKDIR, "scenes", "concept_cover.png"),
     "film": os.path.join(WORKDIR, "film.mp4"),
     "movie_final": os.path.join(WORKDIR, "movie_final.mp4"),
-    # 第一集成片（LTX-2.3 链路）：英文配音+中英双语字幕
+    # 第一集成片（LTX-2.5 链路）：英文配音+中英双语字幕
     "ep1_vo": os.path.join(WORKDIR, "ep1_vo.mp4"),
-    "ltx23_film": os.path.join(WORKDIR, "ltx23_film.mp4"),
 }
 
 # WebUI 编辑分镜/解说后的保存位置；生成脚本检测到它就覆盖内置分镜
@@ -769,7 +768,7 @@ def storyboard_from_bible() -> dict:
     refs = "\n".join(f"- {m['text'][:600]}" for m in material[:3])
     system = (
         "你是资深科幻短片分镜编剧。任务：根据给定概念，产出可直接喂给图生视频模型"
-        "(LTX-2.3，使用英文提示词)的镜头列表，以及一段配套的中文第一人称内心独白解说"
+        "(LTX-2.5，使用英文提示词)的镜头列表，以及一段配套的中文第一人称内心独白解说"
         "(用于配音+字幕)。\n"
         "要求：\n"
         "- shots：恰好 18 条英文镜头描述，每条一句，含 主体+动作+场景+光影/镜头运动+风格，"

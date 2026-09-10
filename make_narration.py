@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 NAR = os.path.join(ROOT, "outputs", "nar")
 os.makedirs(NAR, exist_ok=True)
 
-FILM = os.path.join(ROOT, "outputs", "ltx23_film.mp4")
+FILM = os.path.join(ROOT, "outputs", "ltx25_film.mp4")
 OUT = os.path.join(ROOT, "outputs", "ep1_vo.mp4")
 FONT = r"C\:/Windows/Fonts/simhei.ttf"   # ffmpeg 滤镜里需转义冒号
 FONT_EN = r"C\:/Windows/Fonts/arial.ttf"

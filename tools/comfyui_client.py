@@ -18,7 +18,7 @@ import time
 import requests
 
 # ComfyUI 只跑在本机 127.0.0.1，必须绕过系统代理（HTTP_PROXY/HTTPS_PROXY 指向 7897），
-# 否则 localhost 请求会被错误地发往代理而 5xx/超时。run_ltx23_multishot.py 之所以能跑，
+# 否则 localhost 请求会被错误地发往代理而 5xx/超时。run_ltx25_multishot.py 之所以能跑，
 # 是因为它对 requests.Session 设了 trust_env=False；这里统一在底层客户端处理，
 # 让所有依赖 ComfyUIClient 的引擎（LTX-2.5 等）都不受代理影响。
 _SESSION = requests.Session()
