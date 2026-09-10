@@ -56,6 +56,10 @@ ap.add_argument("--cpu", action="store_true",
 ap.add_argument("--sage-attention", action="store_true",
                 help="加 --use-sage-attention：用 SageAttention 替换默认注意力后端，"
                      "在支持的显卡上显著加速采样并省显存（需先 pip install sageattention）")
+ap.add_argument("--sage3", action="store_true",
+                help="启用 SageAttention3 (FP4) 后端：设置 SA3=1 环境变量，由 comfy/ldm/modules/attention.py "
+                     "在模块加载时把 optimized_attention 设为 attention3_sage。与 --sage-attention(SA2) 互斥，"
+                     "优先级更高。需先装 sageattn3 预编译 wheel（ussoewwin/Sage-Attention-for-Windows）。")
 args = ap.parse_args()
 
 # 0) 定位 ComfyUI 安装目录
@@ -98,8 +102,13 @@ if args.cpu:
     os.environ["OMP_NUM_THREADS"] = cores
     os.environ["MKL_NUM_THREADS"] = cores
     cmd.append("--cpu")
-if args.sage_attention:
-    # SageAttention：支持的显卡上大幅加速采样并省显存；依赖 sageattention 包
+if args.sage3:
+    # SageAttention3 (FP4)：设 SA3=1 环境变量，由 sage3_switch custom node 在子进程内
+    # 把 optimized_attention 替换为 attention3_sage。不设 --use-sage-attention，否则 SA2 会覆盖。
+    os.environ["SA3"] = "1"
+    print("[launch] SageAttention3 (SA3) 模式：sage3_switch custom node 将接管 optimized_attention")
+elif args.sage_attention:
+    # SageAttention2：--use-sage-attention 全局启用
     cmd.append("--use-sage-attention")
 
 log_path = os.path.join(root, "comfy_run.log")
