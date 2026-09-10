@@ -135,7 +135,13 @@ TASKS = [
     ("QuantStack/Wan2.2-TI2V-5B-GGUF", "VAE/Wan2.2_VAE.safetensors",
      "vae/Wan2.2_VAE.safetensors"),
 ]
-DEFAULT_MODELS_DIR = os.environ.get("COMFYUI_MODELS_DIR") or "D:/ComfyUI/models"
+# models 目录统一走 comfy_paths（COMFYUI_MODELS_DIR / COMFYUI_ROOT 均可覆盖）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from comfy_paths import models_dir as _models_dir
+    DEFAULT_MODELS_DIR = _models_dir()
+except Exception:      # 单独拷走使用时退回环境变量/字面兜底
+    DEFAULT_MODELS_DIR = os.environ.get("COMFYUI_MODELS_DIR") or "D:/ComfyUI/models"
 
 
 def main(argv=None) -> int:

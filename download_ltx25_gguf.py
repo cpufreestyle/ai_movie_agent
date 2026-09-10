@@ -17,8 +17,16 @@ if not os.environ.get("HTTPS_PROXY") and not os.environ.get("HTTP_PROXY"):
     os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
 
 MIRROR = "https://hf-mirror.com"
-DIFF = r"D:\ComfyUI\models\diffusion_models"
-TE = r"D:\ComfyUI\models\text_encoders"
+
+# models 目录统一走 comfy_paths（COMFYUI_MODELS_DIR / COMFYUI_ROOT 可覆盖，跨平台）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from comfy_paths import models_dir as _models_dir
+    _MODELS = _models_dir()
+except Exception:      # 单独拷走使用时退回字面兜底
+    _MODELS = os.environ.get("COMFYUI_MODELS_DIR") or r"D:\ComfyUI\models"
+DIFF = os.path.join(_MODELS, "diffusion_models")
+TE = os.path.join(_MODELS, "text_encoders")
 
 # realrebelai 的 GGUF 把 61-key transformer config 写进了 GGUF KV 字段，
 # stock "Unet Loader (GGUF)" 可直接加载；自制/部分社区 GGUF 会缺 config 导致按 LTX-2.3 形状加载而 shape mismatch。

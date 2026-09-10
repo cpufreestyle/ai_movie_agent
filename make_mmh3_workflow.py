@@ -22,10 +22,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_SRC = (
-    r"D:\ComfyUI\custom_nodes\comfyui-minimax-h3-audio-T8"
-    r"\examples\workflows\01-basic-generation\2026-08-06_H3_Turbo_EXP_4V8A.json"
-)
+# 官方示例工作流位置：随 ComfyUI 安装目录解析（COMFYUI_ROOT / COMFYUI_CUSTOM_NODES 可覆盖）
+try:
+    from comfy_paths import custom_nodes_dir as _custom_nodes_dir
+    DEFAULT_SRC = os.path.join(
+        _custom_nodes_dir(), "comfyui-minimax-h3-audio-T8", "examples", "workflows",
+        "01-basic-generation", "2026-08-06_H3_Turbo_EXP_4V8A.json")
+except Exception:      # 单独拷走使用时退回字面兜底
+    DEFAULT_SRC = (
+        r"D:\ComfyUI\custom_nodes\comfyui-minimax-h3-audio-T8"
+        r"\examples\workflows\01-basic-generation\2026-08-06_H3_Turbo_EXP_4V8A.json"
+    )
 DEFAULT_OUT = os.path.join("workflows", "mmh3_turbo_4v8a_ui.json")
 DEFAULT_PROMPT = (
     "Cinematic shot of a young woman with short dark hair in a worn dark trench coat "

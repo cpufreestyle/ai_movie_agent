@@ -52,7 +52,13 @@ def _detect_comfy_url() -> str:
 
 URL = _detect_comfy_url()
 
-OUT_DIR = "D:/ComfyUI/output"          # ComfyUI 输出根目录
+# ComfyUI 输出根目录：COMFYUI_OUTPUT / COMFYUI_ROOT 可覆盖（跨平台，不再写死 D:）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from comfy_paths import output_dir as _output_dir
+    OUT_DIR = _output_dir()
+except Exception:      # 单独拷走使用时退回环境变量/字面兜底
+    OUT_DIR = os.environ.get("COMFYUI_OUTPUT") or "D:/ComfyUI/output"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(ROOT, "outputs", "shots")
 os.makedirs(WORK, exist_ok=True)

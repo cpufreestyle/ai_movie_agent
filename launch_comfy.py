@@ -6,32 +6,9 @@ import time
 
 import requests
 
-# ComfyUI 安装目录：优先 --comfyui-root / 环境变量 COMFYUI_ROOT，否则按候选路径探测。
-# 这样同一脚本在 Windows(D:/ComfyUI)、Linux/macOS(~/ComfyUI、/workspace/ComfyUI) 都能用。
-_CANDIDATES = (
-    os.environ.get("COMFYUI_ROOT") or "",
-    "D:/ComfyUI",
-    os.path.expanduser("~/ComfyUI"),
-    "/workspace/ComfyUI",
-    "./ComfyUI",
-)
-
-
-def _find_root(explicit: str = "") -> str:
-    for c in (explicit,) + _CANDIDATES:
-        if c and os.path.exists(os.path.join(c, "main.py")):
-            return os.path.abspath(c)
-    return ""
-
-
-def _python_exe(root: str) -> str:
-    """优先用 ComfyUI 自带 venv 的解释器，找不到则退回当前解释器。"""
-    for rel in ("venv/Scripts/python.exe", "venv/bin/python",
-                ".venv/Scripts/python.exe", ".venv/bin/python"):
-        p = os.path.join(root, rel)
-        if os.path.exists(p):
-            return p
-    return sys.executable
+# 路径解析统一在 comfy_paths（COMFYUI_ROOT 可覆盖；跨平台探测根目录与解释器）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from comfy_paths import comfyui_root as _find_root, python_exe as _python_exe  # noqa: E402
 
 
 def _kill_existing() -> None:
