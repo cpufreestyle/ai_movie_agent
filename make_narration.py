@@ -216,6 +216,11 @@ FIT_FILM = False   # 旁白整体压缩+顺排以匹配成片时长（用于比�
 FPS = 25           # 输出帧率（H3 成片为 24fps，须传 --fps 24 否则 -shortest 会把音轨截短）
 # FIT 模式专用全局：各段顺排起点、统一变速、压缩后时长
 SEG_STARTS, GLOBAL_TEMPO, COMP_DUR, TEMPOS, BLOCK_SPAN = [], 1.0, [], [], 0.0
+# 强制对齐（--align）：ASR 取真实语音时间戳后收紧字幕窗口；需可选依赖 faster-whisper
+ALIGN = False
+ALIGN_MODEL = "small"
+ALIGN_LANG = None        # None = 自动检测语言
+SPEECH_SPANS = None      # list[dict|None]，与 TTS_LINES 等长；None 表示尚未/无法对齐
 
 
 def seg_start(k: int) -> float:
@@ -373,7 +378,24 @@ def compute_timing() -> None:
     原速（段间留自然空隙）。起点按 slot 整数倍排布，不再因顺序平铺累积漂移。
     """
     global TOTAL, SEG_DUR, AVAIL, SEG_STARTS, GLOBAL_TEMPO, COMP_DUR, TEMPOS, BLOCK_SPAN
+    global SPEECH_SPANS
     n = len(TTS_LINES)
+    # 强制对齐：只对每段旁白 wav 做一次 ASR，取真实语音首/尾时间戳（用于字幕窗口）
+    if ALIGN and SPEECH_SPANS is None:
+        try:
+            from agent import align
+            wavs = [os.path.join(NAR, f"nar_{i:02d}.wav") for i in range(1, n + 1)]
+            SPEECH_SPANS = align.speech_spans(wavs, model_size=ALIGN_MODEL,
+                                              language=ALIGN_LANG)
+            if SPEECH_SPANS is None:
+                print("[align] faster-whisper 不可用，字幕沿用估算时间轴"
+                      "（pip install faster-whisper 可启用）")
+            else:
+                print(f"[align] ASR 完成：{sum(1 for s in SPEECH_SPANS if s)}/{n} "
+                      f"段取到语音时间戳")
+        except Exception as e:        # noqa: BLE001 - ASR 失败只降级，不能中断出片
+            print(f"[align] 初始化失败，沿用估算时间轴: {e}")
+            SPEECH_SPANS = None
     total = film_duration(FILM) if AUTO_DUR else (N_SHOTS * T - (N_SHOTS - 1) * X)
     TOTAL = total
     # 镜头块对齐：N_SHOTS 镜 / n 段，通常 2 镜对应 1 段
@@ -447,14 +469,29 @@ def build_and_render() -> None:
 
     # ---- 视频：逐段烧字幕（文本走 textfile，规避命令行中文编码）----
     # 默认双语：上行英文(Arial) + 下行中文(simhei)
+    # 强制对齐：有真实语音时间戳就用它，否则沿用"段起点 + wav 时长"的估算窗口
+    cues = None
+    if ALIGN and SPEECH_SPANS:
+        try:
+            from agent import align
+            cues = align.cues_for_lines(SPEECH_SPANS, SEG_STARTS, tempo=TEMPOS,
+                                        delay=NARR_DELAY, total=TOTAL)
+            print(f"[align] 字幕按语音时间戳对齐（{len(cues)} 段）")
+        except Exception as e:        # noqa: BLE001
+            print(f"[align] 对齐失败，沿用估算时间轴: {e}")
+            cues = None
+
     vprev, vcur = "0:v", None
     for i in range(1, len(TTS_LINES) + 1):
-        s = seg_start(i) + NARR_DELAY
-        e = s + durs[i - 1] + 0.10
-        if i < n:
-            e = min(e, SEG_STARTS[i] - 0.05)   # 不侵入下一段起点
+        if cues:
+            s, e = cues[i - 1]
         else:
-            e = min(e, TOTAL - 0.05)
+            s = seg_start(i) + NARR_DELAY
+            e = s + durs[i - 1] + 0.10
+            if i < n:
+                e = min(e, SEG_STARTS[i] - 0.05)   # 不侵入下一段起点
+            else:
+                e = min(e, TOTAL - 0.05)
         vcur = f"v{i}"
         filters = []
         if SUBS in ("bilingual", "en"):
@@ -486,11 +523,17 @@ def build_and_render() -> None:
         print("[err] ffmpeg 失败:\n", (r.stderr or "")[-2500:])
         return
     print(f"[OK] -> {OUT}  {os.path.getsize(OUT)/2**20:.2f}MB")
+    if cues:
+        from agent import align
+        p = align.write_srt(cues, TTS_LINES, os.path.splitext(OUT)[0] + ".srt")
+        if p:
+            print(f"[align] SRT 外挂字幕 -> {p}")
 
 
 def main():
     global FILM, OUT, T, X, N_SHOTS, AUTO_DUR, LANG, SUBS, VOICE, TTS_LINES, AMBIENT_VOL
     global FIT_FILM, FPS
+    global ALIGN, ALIGN_MODEL, ALIGN_LANG, SPEECH_SPANS
     ap = argparse.ArgumentParser()
     ap.add_argument("--film", default=FILM, help="输入成片（含原生音轨）")
     ap.add_argument("--out", default=OUT, help="输出带解说+字幕的成片")
@@ -504,6 +547,13 @@ def main():
                          "情况，如 33.5s 的 H3 版）。隐含 --auto-dur。")
     ap.add_argument("--fps", type=int, default=FPS,
                     help="输出帧率（默认 25；H3 成片为 24fps，须传 24 否则音轨被截短）")
+    ap.add_argument("--align", action="store_true",
+                    help="用 ASR(faster-whisper) 取真实语音时间戳来收紧字幕窗口，"
+                         "并导出同名 .srt 外挂字幕；未装该依赖时自动沿用估算时间轴")
+    ap.add_argument("--align-model", default="small",
+                    help="Whisper 模型尺寸（默认 small；越大越准越慢）")
+    ap.add_argument("--align-lang", default="",
+                    help="ASR 语言（如 en / zh）；留空=自动检测")
     ap.add_argument("--lang", choices=["en", "zh"], default=LANG,
                     help="配音语言（默认 en 英文）")
     ap.add_argument("--subs", choices=["bilingual", "en", "zh"], default=SUBS,
@@ -531,6 +581,18 @@ def main():
         N_SHOTS = a.shots
     AUTO_DUR = a.auto_dur or a.fit_film   # --fit-film 隐含 --auto-dur
     FIT_FILM = a.fit_film
+    ALIGN = a.align
+    ALIGN_MODEL = a.align_model
+    ALIGN_LANG = a.align_lang.strip() or None
+    SPEECH_SPANS = None
+    if ALIGN:
+        from agent import align
+        if align.is_available():
+            print(f"[align] 强制对齐开启（model={ALIGN_MODEL}, lang={ALIGN_LANG or 'auto'}）")
+        else:
+            print("[align] 未安装 faster-whisper，字幕沿用估算时间轴；"
+                  "pip install faster-whisper 后重跑即可启用")
+            ALIGN = False
     FPS = a.fps
     LANG = a.lang
     SUBS = a.subs

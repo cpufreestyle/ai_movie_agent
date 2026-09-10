@@ -346,6 +346,55 @@ def test_ltx_apply_post_rewires_saver():
     assert wf["90003"]["inputs"]["alpha"] == 0.2
 
 
+# ---------- agent/align（旁白 / 字幕强制对齐） ----------
+
+def test_align_cues_follow_speech():
+    from agent import align
+    assert isinstance(align.is_available(), bool)   # 没装 faster-whisper 也只是 False
+    # 语音 0.4s 开始、1.8s 结束；段起点 10s、无变速、delay 0.25
+    cues = align.cues_for_lines([{"start": 0.4, "end": 1.8}], [10.0],
+                                delay=0.25, total=20.0)
+    (s, e), = cues
+    assert abs(s - 10.65) < 1e-6              # 10.0 + 0.25 + 0.4
+    assert abs(e - (10.25 + 1.8 + 0.10)) < 1e-6
+
+
+def test_align_cues_compensate_atempo():
+    from agent import align
+    # atempo=2 把语音压缩一半：原 1.0~3.0 的语音在成片里落在 0.5~1.5
+    cues = align.cues_for_lines([{"start": 1.0, "end": 3.0}], [0.0],
+                                tempo=[2.0], delay=0.0, total=10.0)
+    (s, e), = cues
+    assert abs(s - 0.5) < 1e-6
+    assert abs(e - (1.5 + 0.10)) < 1e-6
+
+
+def test_align_cues_fallback_and_clamp():
+    from agent import align
+    # 取不到语音时间戳 → 占满该段槽位，且不得侵入下一段起点
+    cues = align.cues_for_lines([None, None], [0.0, 4.0], total=8.0)
+    assert len(cues) == 2
+    assert cues[0][1] <= 4.0 - 0.05 + 1e-9
+    assert cues[1][1] <= 8.0 - 0.05 + 1e-9
+    assert cues[0][0] < cues[0][1]
+
+
+def test_align_cue_min_duration_and_srt():
+    from agent import align
+    # 极短语音也至少显示 min_dur，避免字幕一闪而过
+    s, e = align.cue(1.0, 1.05, min_dur=0.6)
+    assert e - s >= 0.6 - 1e-9
+    # SRT 时间戳格式
+    assert align._fmt_ts(12.345) == "00:00:12,345"
+    p = os.path.join(TMP, "align.srt")
+    out = align.write_srt([(0.0, 1.0), (1.5, 3.0)], ["first", "second"], p)
+    assert out == p and os.path.exists(p)
+    body = open(p, encoding="utf-8").read()
+    assert "00:00:00,000 --> 00:00:01,000" in body
+    assert "00:00:01,500 --> 00:00:03,000" in body
+    assert body.startswith("1\n") and "second" in body
+
+
 # ---------- agent/prompting（负向提示词库） ----------
 
 def test_prompting_negative_presets_and_priority():
