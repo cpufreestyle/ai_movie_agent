@@ -348,6 +348,69 @@ def test_ltx_apply_post_rewires_saver():
 
 # ---------- comfyui_client（错误可读性） ----------
 
+# ---------- agent/qa（逐镜质检） ----------
+
+def _qa_write_video(path: str, frames: int = 24, size=(128, 72), kind: str = "moving"):
+    """写合成测试视频：moving=有运动且有高频细节；static_black=全黑且完全静止。"""
+    import cv2
+    import numpy as np
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 12.0, size)
+    assert writer.isOpened(), "cv2.VideoWriter 打不开（环境缺 mp4v 编码器）"
+    try:
+        for i in range(frames):
+            if kind == "static_black":
+                frame = np.zeros((size[1], size[0], 3), dtype="uint8")
+            else:
+                frame = np.full((size[1], size[0], 3), 40, dtype="uint8")
+                # 移动的亮块（产生运动）+ 边缘（产生非零拉普拉斯方差）
+                x = 4 + (i * 3) % (size[0] - 20)
+                cv2.rectangle(frame, (x, 12), (x + 14, 40), (240, 240, 240), -1)
+                cv2.line(frame, (0, 60 + (i % 3)), (size[0], 60 - (i % 3)), (200, 60, 60), 1)
+            writer.write(frame)
+    finally:
+        writer.release()
+    return path
+
+
+def test_qa_score_moving_video():
+    from agent import qa
+    p = _qa_write_video(os.path.join(TMP, "qa_moving.mp4"), kind="moving")
+    sc = qa.score_video(p, {"sample_frames": 6})
+    assert sc["frames"] > 0
+    assert sc["motion"] > 0.5      # 确实有运动
+    assert sc["brightness"] > 8    # 不是全黑
+    ok, reasons = qa.evaluate(sc, qa.DEFAULTS)
+    assert ok, reasons
+
+
+def test_qa_detects_black_and_static():
+    from agent import qa
+    p = _qa_write_video(os.path.join(TMP, "qa_black.mp4"), kind="static_black")
+    sc = qa.score_video(p, {"sample_frames": 6})
+    ok, reasons = qa.evaluate(sc, qa.DEFAULTS)
+    assert not ok
+    assert any("全黑" in r or "过暗" in r for r in reasons)
+    assert any("静帧" in r for r in reasons)
+
+
+def test_qa_policy_thresholds_and_summarize():
+    from agent import qa
+    pol = qa.load_policy(None)
+    assert pol["enabled"] is True and pol["max_rerolls"] == 1
+    assert qa.load_policy({"qa": {"enabled": False, "max_rerolls": 3}})["max_rerolls"] == 3
+    # 阈值全设 0 = 各项都不检查 → 明确不判死
+    ok, reasons = qa.evaluate({"sharpness": 0, "motion": 0, "brightness": 0},
+                              {"min_sharpness": 0, "min_motion": 0,
+                               "min_brightness": 0, "max_brightness": 0})
+    assert ok and reasons == []
+    # 超阈值要能准确指出原因（人脸类指标未开启时不参与判定）
+    ok2, r2 = qa.evaluate({"sharpness": 1, "motion": 9, "brightness": 50},
+                          {"min_sharpness": 5, "max_motion": 5, "face_check": False})
+    assert not ok2 and any("偏糊" in x for x in r2) and any("抖动" in x for x in r2)
+    s = qa.summarize([{"sharpness": 10, "motion": 2}, {"sharpness": 30, "motion": 4}])
+    assert s["count"] == 2 and s["sharpness"]["min"] == 10 and s["sharpness"]["max"] == 30
+
+
 def test_comfyui_client_error_messages():
     from tools.comfyui_client import (ComfyUIError, ComfyUITimeout,
                                       _fmt_node_errors, _fmt_status_error)

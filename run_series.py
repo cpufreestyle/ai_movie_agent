@@ -94,13 +94,17 @@ def load_json(path: str) -> dict:
         return json.load(f)
 
 
+def load_config() -> dict:
+    with open(os.path.join(ROOT, "config.yaml"), "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 def build_engine(width=None, height=None, frames=None, fps=None, name="ltx"):
     """按 name 选择视频引擎：ltx=LTX-2.5，mmh3=MiniMax H3(Turbo 4 步, 原生立体声)。
 
     两者接口一致（resolution / num_frames / fps / generate），故上层出片逻辑无需改动。
     """
-    with open(os.path.join(ROOT, "config.yaml"), "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_config()
     if name == "mmh3":
         from agent.mmh3_engine import MMH3Engine
         eng = MMH3Engine(cfg, agent_root=ROOT)
@@ -227,12 +231,36 @@ def _is_char_shot(prompt: str) -> bool:
     return True
 
 
+def _write_qa_report(entries: list) -> None:
+    """把逐镜质检结果落盘（含分布汇总，便于回头校准阈值）。"""
+    if not entries:
+        return
+    path = os.path.join(WORK, "qa_report.json")
+    summary = {}
+    try:
+        from agent import qa as qa_mod
+        summary = qa_mod.summarize(entries)
+    except Exception:                 # noqa: BLE001 - 报告只是附属产物，失败不影响出片
+        pass
+    failed = [e for e in entries if not e.get("ok")]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "total": len(entries), "failed": len(failed),
+                       "summary": summary, "shots": entries},
+                      f, ensure_ascii=False, indent=2)
+        print(f"[qa] 报告 {path}（{len(entries)} 次生成，{len(failed)} 次未达标）")
+    except Exception as e:            # noqa: BLE001
+        print(f"[qa] 写报告失败: {e}")
+
+
 def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                 prev_frame: str | None, out_dir: str, use_i2v: bool,
                 anchor: str = "", anchor_mode: str = "first",
                 only: set | None = None, force: bool = False,
                 anchor_map: dict | None = None,
-                ref_images: list | None = None) -> str | None:
+                ref_images: list | None = None,
+                qa_policy: dict | None = None) -> str | None:
     """出一集。
 
     默认（use_i2v=False）每镜 **T2V**：prompt 语义主导，画面精确匹配该段旁白描写的场景。
@@ -243,6 +271,9 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
       first（默认）每个 Mira 镜都从标准像起 → 一致性最强；
       chain  首镜用标准像、后续接上一个 Mira 镜的尾帧 → 兼顾连贯与自然演变。
     """
+    from agent import qa as qa_mod
+    qa_policy = qa_policy or {}
+    qa_entries: list = []
     man = load_manifest()
     shot_files = []
     mira_prev = None          # chain 模式：上一个 Mira 镜的尾帧
@@ -272,21 +303,50 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                 tag = "I2V/角色锚定"
             elif img is None and use_i2v and prev_frame:
                 img, tag = prev_frame, "I2V"
-            print(f"[{key}] {tag} generate "
-                  f"{eng.resolution} {eng.num_frames}帧@{eng.fps}fps "
-                  f"seed={BASE_SEED + ep * 1000 + idx}")
-            try:
-                produced = eng.generate(prompt, out_path,
-                                        seed=BASE_SEED + ep * 1000 + idx,
-                                        image=img,
-                                        ref_images=ref_images or None)
-            except Exception as e:
-                print(f"[{key}] 生成失败: {e}")
+            # 质检 + 自动重 roll：不达标就换 seed 重出（限次），避免人工盯 54 镜。
+            # 判定只在 config.qa 阈值明确越界时触发（默认很保守，见 agent/qa.py）。
+            qa_on = bool((qa_policy or {}).get("enabled", True))
+            rolls = 1 + (max(0, int(qa_policy.get("max_rerolls") or 0)) if qa_on else 0)
+            is_char = _is_char_shot(base)
+            base_seed = BASE_SEED + ep * 1000 + idx
+            shot = None
+            for attempt in range(rolls):
+                seed = base_seed + attempt * 7919      # 确定性换 seed，便于复现失败样本
+                print(f"[{key}] {tag} generate "
+                      f"{eng.resolution} {eng.num_frames}帧@{eng.fps}fps "
+                      f"seed={seed}"
+                      + (f"（重 roll {attempt}/{rolls - 1}）" if attempt else ""))
+                try:
+                    produced = eng.generate(prompt, out_path, seed=seed,
+                                            image=img,
+                                            ref_images=ref_images or None)
+                except Exception as e:
+                    print(f"[{key}] 生成失败: {e}")
+                    return None
+                if not produced or not os.path.exists(produced):
+                    print(f"[{key}] 未产出文件")
+                    return None
+                if not qa_on:
+                    shot = produced
+                    break
+                sc = qa_mod.score_video(produced, qa_policy,
+                                        is_char_shot=is_char, anchor=anchor)
+                ok, reasons = qa_mod.evaluate(sc, qa_policy, is_char_shot=is_char)
+                entry = dict(sc)
+                entry.update({"key": key, "attempt": attempt, "seed": seed,
+                              "ok": ok, "reasons": reasons})
+                qa_entries.append(entry)
+                if ok:
+                    shot = produced
+                    break
+                if attempt + 1 < rolls:
+                    print(f"[{key}] 质检未过：{'；'.join(reasons)} → 换 seed 重 roll")
+                else:
+                    print(f"[{key}] 质检仍未过（{'；'.join(reasons)}），采用本次结果继续")
+                    shot = produced
+            if not shot:
+                print(f"[{key}] 无可用产出")
                 return None
-            if not produced or not os.path.exists(produced):
-                print(f"[{key}] 未产出文件")
-                return None
-            shot = produced
             man = load_manifest()
             man[key] = shot
             save_manifest(man)
@@ -297,6 +357,8 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
             prev_frame = last_frame(shot, os.path.join(WORK, f"{key}_last.png"))
         if anchor and _is_char_shot(base):
             mira_prev = last_frame(shot, os.path.join(WORK, f"{key}_last.png"))
+
+    _write_qa_report(qa_entries)
 
     if only:
         print(f"[only] 已重出镜号 {sorted(only)}，跳过拼接")
@@ -339,6 +401,12 @@ def main():
     ap.add_argument("--ref-images", default="auto",
                     help="身份参考图：'auto' 自动收集 outputs/anchor/mira_*.png（最多9张）；"
                          "或逗号分隔的显式路径；'none' 关闭。配合首帧锚定走 Hybrid 增强人物一致性（不需白模）")
+    ap.add_argument("--qa", dest="qa", action="store_true", default=None,
+                    help="强制开启逐镜质检（默认取 config.qa.enabled）")
+    ap.add_argument("--no-qa", dest="qa", action="store_false",
+                    help="关闭逐镜质检（不看质检、不重 roll）")
+    ap.add_argument("--qa-rerolls", type=int, default=None,
+                    help="质检不达标时自动换 seed 重出的次数上限（覆盖 config.qa.max_rerolls）")
     a = ap.parse_args()
     only = None
     if a.only.strip():
@@ -373,6 +441,21 @@ def main():
             ref_images = [p.strip() for p in a.ref_images.split(",") if p.strip()]
     print(f"[cfg] {eng.resolution} {eng.num_frames}帧@{eng.fps}fps  style_anchor={'有' if style_anchor else '无'}  ref_images={len(ref_images)}")
 
+    # 逐镜质检策略（config.qa，可被 --qa / --no-qa / --qa-rerolls 覆盖）
+    from agent import qa as qa_mod
+    qa_policy = qa_mod.load_policy(load_config())
+    if a.qa is not None:
+        qa_policy["enabled"] = a.qa
+    if a.qa_rerolls is not None:
+        qa_policy["max_rerolls"] = max(0, a.qa_rerolls)
+    if qa_policy.get("enabled"):
+        print(f"[qa] 逐镜质检开启 max_rerolls={qa_policy.get('max_rerolls')} "
+              f"min_sharpness={qa_policy.get('min_sharpness')} "
+              f"min_motion={qa_policy.get('min_motion')} "
+              f"face_check={bool(qa_policy.get('face_check'))}")
+    else:
+        print("[qa] 逐镜质检已关闭")
+
     if a.concat:
         ep = a.concat
         man = load_manifest()
@@ -405,7 +488,7 @@ def main():
                                  prev_frame, a.out_dir, a.i2v,
                                  anchor=a.anchor, anchor_mode=a.anchor_mode,
                                  only=only, force=a.force, anchor_map=anchor_map,
-                                 ref_images=ref_images)
+                                 ref_images=ref_images, qa_policy=qa_policy)
         # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
         if not (os.path.exists(film) and os.path.getsize(film) > 0):
             print(f"[abort] 第 {ep} 集失败")
