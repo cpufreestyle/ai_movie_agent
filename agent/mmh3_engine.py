@@ -184,10 +184,18 @@ class MMH3Engine:
         w, h = (int(x) for x in self.resolution.split("x"))
         has_img = bool(image and os.path.exists(image))
         has_ref = bool(ref_video and os.path.exists(ref_video))
+        # ref_images 也是「参考媒体」，必须计入 has_refs。否则只传 image+ref_images
+        # 时 task 会被判成 I2VA，而 H3 的 I2VA 禁止携带任何参考媒体
+        # （conditioning.py: resolve_task_type → "I2VA cannot include reference
+        # media; use Auto or Hybrid"），直接抛错。计入后走 Hybrid 即可，
+        # 且无需白模 ref_video（避免参考视频的运动信号压过身份）。
+        has_refimg = bool([p for p in (ref_images or [])
+                           if p and os.path.exists(p)])
+        has_any_ref = has_ref or has_refimg
         # 任务类型：首帧锁形象/场景，参考视频锁走位与镜头运动，同时给走 Hybrid
-        if has_img and has_ref:
+        if has_img and has_any_ref:
             task = "Hybrid"
-        elif has_ref:
+        elif has_any_ref:
             task = "Ref2VA"
         elif has_img:
             task = "I2VA"
