@@ -543,6 +543,44 @@ def test_comfyui_client_error_messages():
     assert "节点 70" in m and "KSampler" in m and "RuntimeError: boom" in m and "p1" in m
 
 
+# ---------- agent/record（生成参数全量落盘，可复现） ----------
+
+class _MMH3LikeEngine:
+    resolution = "768x448"
+    num_frames = 56
+    fps = 24
+    steps = 30
+    lora = "minimax_h3_fl2v_turbo.safetensors"
+    negative = "deformed face, extra limbs"
+    two_pass = False
+    block_cache = True
+
+
+def test_record_collect_and_roundtrip():
+    import tempfile
+    from agent import record
+    eng = _MMH3LikeEngine()
+    p = record.collect(eng, prompt="a shot of the woman", seed=123, attempt=0,
+                       image="c:/x/anchor.png", ref_images=["c:/a/mira_1.png"],
+                       style_anchor="c:/b/style.png",
+                       qa_policy={"enabled": True, "max_rerolls": 1})
+    assert p["engine"] == "mmh3"
+    assert p["resolution"] == "768x448" and p["steps"] == 30
+    assert p["seed"] == 123 and p["attempt"] == 0
+    assert p["image"] == "anchor.png" and p["ref_images"] == ["mira_1.png"]
+    assert p["style_anchor"] == "style.png"
+    assert p["qa"]["enabled"] is True
+    eng.lora = None
+    p2 = record.collect(eng, prompt="x", seed=1, attempt=0)
+    assert "lora" not in p2
+    wd = tempfile.mkdtemp()
+    record.save(wd, "ep1_shot1", p)
+    data = record.load(wd)
+    assert data["ep1_shot1"]["seed"] == 123
+    record.save(wd, "ep1_shot2", p2)
+    assert len(record.load(wd)) == 2
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

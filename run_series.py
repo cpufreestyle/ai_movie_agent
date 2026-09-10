@@ -385,6 +385,12 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
             man = load_manifest()
             man[key] = shot
             save_manifest(man)
+            # 生成参数全量落盘（可复现 / 供 A/B 与回归）：存到同目录 gen_params.json
+            from agent import record
+            record.save(WORK, key, record.collect(
+                eng, prompt=prompt, seed=seed, attempt=attempt,
+                image=img, ref_images=ref_images,
+                style_anchor=style_anchor, qa_policy=qa_policy))
         else:
             print(f"[{key}] 已存在，跳过 -> {shot}")
         shot_files.append(shot)
