@@ -38,15 +38,24 @@
 - **"3–6s 单一动作镜头" = 73 / 90 / 107 / 124 / 141 帧**。
 - 分辨率必须被 **32 整除**，同样会被自动修正。
 
-### 2. 参考视频是官方 2~15s 策略
+### 2. 参考视频是官方 2~15s 策略（实测：按「帧数」判定 48~360 帧）
 
-条件节点输入 `reference_video_policy: "official_2_to_15s"`：
+条件节点输入 `reference_video_policy: "official_2_to_15s"`。**2026-09-11 实测确认约束是帧数**，
+越界时条件节点 `MiniMaxH3AudioConditioningT8` 直接抛错、整镜生成中止：
 
-- 灰模动画 **短于 2s 不满足要求**（没有走位引导，甚至报错）；
-- 项目已做两层保护：
-  - `blender.anim_frames: auto`（默认）→ 自动对齐出片帧数，并强制 ≥ `2s × fps`（24fps 下 = 48 帧）；
-    **写死整数则按原值使用、不做兜底**（尊重显式配置）；
-  - `agent/agent.py` 传 `ref_video` 前用 ffprobe 预检，`<2s` 则**跳过并打印原因**，保证本镜照常出片。
+```
+ValueError: ref_video_1 has 24 frames; official guidance is 48-360 frames at 24fps
+```
+
+→ 即 **48 ~ 360 帧 @24fps = 2.0s ~ 15.0s**（下界含 2.0s，正好 48 帧）。
+> 复现脚本：`_exp_ref_video.py <ref.mp4> --force`（`--force` 绕过时长闸门、探测节点真实反应）。
+
+项目做了两层保护：
+
+- `blender.anim_frames: auto`（默认）→ 自动对齐出片帧数，并强制 ≥ `2s × fps`（24fps 下 = 48 帧）；
+  **写死整数则按原值使用、不做兜底**（尊重显式配置，越界由下一层拦）；
+- `agent/agent.py` 传 `ref_video` 前预检时长，`<2s` 则**跳过并打印原因**，保证本镜照常出片
+  （而不是整个镜头因参考视频被拒而失败）。
 
 ### 3. 参考图上限 9 张，且 Hybrid 下身份会被运动信号压过
 
@@ -136,6 +145,8 @@ SkyReels / LTX 不支持时**自动跳过且不报错**。
 | 人物形态崩坏 | Hybrid 下身份信号被运动压过 | 加 2–3 张同角色 `ref_images`；**别用 negative** |
 | 报错 "I2VA cannot include reference media" | 只给了首帧却带了参考媒体 | 已由 `has_any_ref` 规避；若自造工作流需自行保证 |
 | 帧数/分辨率被"改"了 | 自动吸附到 `17n+5` / 32 整除 | 正常行为，日志会提示吸附后的值 |
+| 日志写 `I2VA`，但明明给了参考素材 | `mmh3_engine.generate` 的提交日志只看 `image` 有无，**不反映真实 task_type** | 以干跑输出里的 `task_type=Hybrid` 为准，别被那行日志误导 |
+| `ValueError: ref_video_1 has 24 frames; official guidance is 48-360 frames` | 参考视频帧数 <48（<2s） | `blender.anim_frames: auto`；或把该镜的 `use_as_ref_video` 关掉 |
 | 单镜时长与预期不符 | 用 `num_frames / fps` 算，注意吸附 | 见 §二 换算表 |
 
 ---

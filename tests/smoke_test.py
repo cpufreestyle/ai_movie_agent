@@ -689,6 +689,29 @@ def test_blocking_anim_frames_auto_aligns_and_floors():
                24).anim_frames == 24      # 显式整数尊重原值（过短由 agent 侧预检拦下）
 
 
+def test_ffmpeg_and_probe_duration_fallbacks():
+    """ffmpeg/ffprobe 不在 PATH 时也要能定位与探测时长。
+
+    本机只有 imageio-ffmpeg 提供的 ffmpeg、没有 ffprobe；若只查 PATH，
+    白模灰模动画会静默跳过（ref_video 永远不可用），时长也会恒为 0。
+    """
+    from agent import editor
+    from agent.blocking import BlockingGenerator
+    ff = BlockingGenerator._ffmpeg()
+    assert ff, "未定位到 ffmpeg（PATH 与 imageio-ffmpeg 均失败）"
+    assert os.path.exists(ff), ff
+
+    # 用该 ffmpeg 造一段 1s 测试片，验证 probe_duration 的兜底解析（无 ffprobe 也能测）
+    p = os.path.join(tempfile.mkdtemp(), "probe.mp4")
+    r = subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi",
+                        "-i", "color=c=black:s=64x64:r=24:d=1",
+                        "-pix_fmt", "yuv420p", "-frames:v", "24", p],
+                       capture_output=True, text=True, errors="replace")
+    if r.returncode != 0 or not os.path.exists(p):
+        return                        # 该 ffmpeg 构建缺 lavfi，跳过时长断言
+    assert abs(editor.Editor().probe_duration(p) - 1.0) < 0.2
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

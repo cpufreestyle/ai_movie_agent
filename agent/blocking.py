@@ -49,6 +49,9 @@ class BlockingError(RuntimeError):
 
 
 class BlockingGenerator:
+    # H3 的 reference_video_policy 是官方 2~15s：灰模动画短于 2s 不满足 ref_video 要求
+    MIN_REF_SECONDS = 2.0
+
     def __init__(self, config: dict, workdir: str):
         self.config = config
         self.cfg = config.get("blender", {}) or {}
@@ -81,7 +84,7 @@ class BlockingGenerator:
         （H3 参考视频是官方 2~15s 策略，低于 2s 不被接受）；也可直接写整数。
         """
         raw = self.cfg.get("anim_frames", "auto")
-        floor = max(1, int(2 * self.fps))          # 2.0s 下限
+        floor = max(1, int(self.MIN_REF_SECONDS * self.fps))   # 2.0s 下限（H3 ref_video 策略）
         if not (isinstance(raw, str) and raw.strip().lower() == "auto"):
             try:
                 return max(int(raw), 1)
@@ -93,6 +96,22 @@ class BlockingGenerator:
         except (TypeError, ValueError):
             nf = 0
         return max(nf, floor) if nf > 0 else max(48, floor)
+
+    @staticmethod
+    def _ffmpeg() -> str | None:
+        """定位 ffmpeg：优先 PATH，其次 imageio-ffmpeg 自带二进制。
+
+        本机 ffmpeg **不在 PATH**（只有 `imageio-ffmpeg` 里带一份）。若只查 PATH，
+        灰模动画合成会静默跳过 → `use_as_ref_video` 永远不可用。
+        """
+        p = shutil.which("ffmpeg")
+        if p:
+            return p
+        try:
+            import imageio_ffmpeg  # type: ignore
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:          # noqa: BLE001 - 没装则视为不可用
+            return None
 
     # ---------- 就绪 ----------
     def is_ready(self) -> bool:
@@ -353,14 +372,15 @@ class BlockingGenerator:
         if not frames:
             return None
         out = os.path.join(anim_dir, "blocking.mp4")
-        ff = shutil.which("ffmpeg")
+        ff = self._ffmpeg()
         if not ff:
             log("  [blocking] 未找到 ffmpeg，跳过灰模动画合成（ref_video 不可用）")
             return None
         dur = len(frames) / float(self.fps)
-        if dur < 2.0:
-            log(f"  [blocking] 灰模动画仅 {dur:.2f}s，低于 H3 参考视频的官方下限 2s；"
-                f"若要用 use_as_ref_video，请把 blender.anim_frames 提到 ≥{int(2 * self.fps) + 1}"
+        if dur < self.MIN_REF_SECONDS:
+            log(f"  [blocking] 灰模动画仅 {dur:.2f}s，低于 H3 参考视频的官方下限 "
+                f"{self.MIN_REF_SECONDS:g}s；若要用 use_as_ref_video，请把 blender.anim_frames "
+                f"设为 auto 或 ≥{int(round(self.MIN_REF_SECONDS * self.fps))}"
                 f"（当前 {len(frames)} 帧 @{self.fps}fps）")
         try:
             subprocess.run([ff, "-y", "-loglevel", "error", "-framerate", str(self.fps),
