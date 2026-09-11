@@ -9,14 +9,22 @@
 前置：本地已安装 Blender + Blender MCP 插件，并在 Blender 内启动 MCP Server（端口 9876）。
 未就绪时 is_ready() 返回 False，调用方降级跳过，不影响现有管线。
 
-本次优化（性能 → 健壮性 → 质量）：
-- 性能：渲染引擎可配（auto 优先 EEVEE(GPU)，失败降级 CYCLES）；previs+depth 合并为一次
-  渲染（省一次整场景渲染）；同一集连续同几何分镜复用已建场景（只更新相机）；采样数可配。
+优化说明（性能 → 健壮性 → 质量，均经真机 Blender 5.2.1 background 实测）：
+- 性能：渲染引擎可配（auto 优先 EEVEE，失败降级 CYCLES）；同集同几何分镜用场景签名复用场景
+  （只更新相机）；采样数可配。
 - 健壮性：生成的 bpy 代码先做语法预检；执行后校验 4 张产物确实存在且非空；失败按
-  「合并+快引擎 → 合并+CYCLES → 逐张+CYCLES」逐级降级重试（次数可配）；仍失败则抛
-  BlockingError，杜绝"返回不存在的图"这种静默失败。
-- 质量：depth 用固定近远平面归一化（动画多帧一致，不再逐帧 Normalize 抖动）；
-  每次渲染前复位白模材质（修复 normal 步骤换材质后污染后续渲染的隐患）。
+  「配置引擎 → CYCLES」降级重试；仍失败抛 BlockingError，杜绝"返回不存在的图"这种静默失败。
+- 质量：补上场景光源（原实现无灯，白模只有 world 环境光 -> 整体偏暗、缺立体感）；
+  freestyle 线框显式开 View Layer 开关并确保 LineSet 存在（否则 line.png 与 previs 完全相同）；
+  depth 用「材质法」(CameraData.View Z Depth + MapRange 固定近远平面) 而非 compositor，
+  跨 Blender 版本可用且动画多帧一致；每次渲染前复位白模材质，修复 depth/normal 换材质后
+  污染后续渲染的隐患；相机距离随角色数补偿，避免角色贴边。
+
+已适配的 Blender 5.x 变更（真机实测踩到）：
+- `scene.node_tree`(compositor) 已移除（改用 compositing_node_group）-> 不用 compositor 出图；
+- `bpy.ops.render.render(scene=...)` 只接受**场景名字符串**，传 Scene 对象会 TypeError -> 用 scn.name；
+- 场景自定义属性是 C int(32 位有符号)，超范围会 OverflowError -> 签名掩到 31 位；
+- `Material/Scene.use_nodes` 会有 DeprecationWarning（5.2 仍可用，6.0 将移除）。
 """
 from __future__ import annotations
 
@@ -62,7 +70,29 @@ class BlockingGenerator:
         os.makedirs(self.out_dir, exist_ok=True)
         self.width = int(self.cfg.get("width", 1280))
         self.height = int(self.cfg.get("height", 720))
-        self.anim_frames = int(self.cfg.get("anim_frames", 24))
+        # 出片帧率（灰模动画时长换算用）与动画帧数解析
+        self.fps = int(((config.get("engine", {}) or {}).get("fps", 24)) or 24)
+        self.anim_frames = self._resolve_anim_frames()
+
+    def _resolve_anim_frames(self) -> int:
+        """解析 blender.anim_frames。
+
+        "auto"（默认）：对齐出片帧数 engine.comfyui_mmH3.num_frames，并按 2s 下限兜底
+        （H3 参考视频是官方 2~15s 策略，低于 2s 不被接受）；也可直接写整数。
+        """
+        raw = self.cfg.get("anim_frames", "auto")
+        floor = max(1, int(2 * self.fps))          # 2.0s 下限
+        if not (isinstance(raw, str) and raw.strip().lower() == "auto"):
+            try:
+                return max(int(raw), 1)
+            except (TypeError, ValueError):
+                pass
+        mmh3 = ((self.config.get("engine", {}) or {}).get("comfyui_mmH3", {}) or {})
+        try:
+            nf = int(mmh3.get("num_frames", 0))
+        except (TypeError, ValueError):
+            nf = 0
+        return max(nf, floor) if nf > 0 else max(48, floor)
 
     # ---------- 就绪 ----------
     def is_ready(self) -> bool:
@@ -125,11 +155,13 @@ class BlockingGenerator:
         """场景几何签名（角色数 + 道具）。相同则可复用已建场景，只更新相机。
 
         用 md5 而非内置 hash：保证跨进程稳定（同一集多次调用/重启 Python 仍能命中复用）。
+        结果必须落在 C int(32 位有符号) 内：Blender 的 IDProperty 存 int 用 C int，
+        超出会抛 OverflowError（真机实测踩到过）。
         """
         n = max(1, int(spec.get("characters", 1)))
         props = [str(p) for p in (spec.get("props", []) or [])]
         key = json.dumps({"c": n, "p": props}, sort_keys=True, ensure_ascii=False)
-        return int(hashlib.md5(key.encode("utf-8")).hexdigest()[:8], 16)
+        return int(hashlib.md5(key.encode("utf-8")).hexdigest()[:8], 16) & 0x7FFFFFFF
 
     def _engine_setup(self, engine: str) -> str:
         """生成注入到 bpy 代码的渲染引擎设置片段（顶层语句，无缩进要求）。"""
@@ -144,7 +176,7 @@ class BlockingGenerator:
                 'except Exception:\n'
                 '    pass\n'
             )
-        # eevee / eevee_next / auto：优先 EEVEE(GPU)，不可用再退 CYCLES
+        # eevee / eevee_next / auto：优先 EEVEE，不可用再退 CYCLES
         return (
             'try:\n'
             '    scn.render.engine="BLENDER_EEVEE_NEXT"\n'
@@ -160,9 +192,14 @@ class BlockingGenerator:
         )
 
     def _plans(self) -> list:
-        """渲染降级链：合并+快引擎 → 合并+CYCLES → 逐张+CYCLES。"""
+        """引擎降级链：配置引擎（auto→EEVEE）→ CYCLES。
+
+        说明：原计划的"previs+depth 合并为一次渲染"依赖 compositor 的 scene.node_tree，
+        而 Blender 5.2 已移除该属性（改用 compositing_node_group），为跨版本可靠，
+        统一采用「4 张分别渲染 + 材质法出 depth/normal」，提速主要来自 EEVEE。
+        """
         fast = self.engine if self.engine != "auto" else "eevee"
-        plans = [("merged", fast), ("merged", "cycles"), ("legacy", "cycles")]
+        plans = [("block", fast), ("block", "cycles")]
         uniq = []
         for p in plans:
             if p not in uniq:
@@ -192,11 +229,12 @@ class BlockingGenerator:
         )
 
     def _build_block_code(self, spec: dict, out_dir: str, mode: str, engine: str) -> str:
+        """mode 参数保留以兼容旧调用（block 渲染路径已统一，不再区分 merged/legacy）。"""
         c = self._common(spec, out_dir)
         c["ENGINE"] = self._engine_setup(engine)
         core = self._fill(_CORE_TEMPLATE, **c)
         cam = self._fill(_CAM_TEMPLATE, **c)
-        tail = self._fill(_TAIL_MERGED if mode == "merged" else _TAIL_LEGACY, **c)
+        tail = self._fill(_TAIL_BLOCK, **c)
         return core + "\n" + cam + "\n" + tail
 
     def _build_anim_code(self, spec: dict, out_dir: str, frames: int, engine: str) -> str:
@@ -255,22 +293,22 @@ class BlockingGenerator:
 
         last_err = ""
         plans = self._plans()
-        for idx, (mode, engine) in enumerate(plans):
-            code = self._build_block_code(spec, out_dir, mode, engine)
+        for idx, (_mode, engine) in enumerate(plans):
+            code = self._build_block_code(spec, out_dir, "block", engine)
             self._check_syntax(code)
             self.client.timeout = self.timeout
             ex = self.client.exec_code_ex(code)
             if not ex["ok"]:
                 last_err = ex["error"] or "Blender 执行失败"
-                log(f"  [blocking] 白模渲染第 {idx+1} 次失败（{mode}/{engine}）: {last_err[:200]}")
+                log(f"  [blocking] 白模渲染第 {idx+1} 次失败（{engine}）: {last_err[:200]}")
                 continue
             miss = self._missing(paths)
             if not miss:
                 if idx > 0:
-                    log(f"  [blocking] 白模渲染在第 {idx+1} 次尝试成功（{mode}/{engine}）")
+                    log(f"  [blocking] 白模渲染在第 {idx+1} 次尝试成功（{engine}）")
                 return paths
             last_err = f"产物缺失: {', '.join(miss)}"
-            log(f"  [blocking] 白模渲染第 {idx+1} 次产物不完整（{mode}/{engine}）: {last_err}")
+            log(f"  [blocking] 白模渲染第 {idx+1} 次产物不完整（{engine}）: {last_err}")
         raise BlockingError(f"白模渲染失败（已尝试 {len(plans)} 次）: {last_err}")
 
     def render_previs(self, spec: dict, out_path: str) -> str:
@@ -319,14 +357,13 @@ class BlockingGenerator:
         if not ff:
             log("  [blocking] 未找到 ffmpeg，跳过灰模动画合成（ref_video 不可用）")
             return None
-        fps = int(((self.config.get("engine", {}) or {}).get("fps", 24)) or 24)
-        dur = len(frames) / float(fps)
+        dur = len(frames) / float(self.fps)
         if dur < 2.0:
             log(f"  [blocking] 灰模动画仅 {dur:.2f}s，低于 H3 参考视频的官方下限 2s；"
-                f"若要用 use_as_ref_video，请把 blender.anim_frames 提到 ≥{int(2 * fps) + 1}"
-                f"（当前 {len(frames)} 帧 @{fps}fps）")
+                f"若要用 use_as_ref_video，请把 blender.anim_frames 提到 ≥{int(2 * self.fps) + 1}"
+                f"（当前 {len(frames)} 帧 @{self.fps}fps）")
         try:
-            subprocess.run([ff, "-y", "-loglevel", "error", "-framerate", str(fps),
+            subprocess.run([ff, "-y", "-loglevel", "error", "-framerate", str(self.fps),
                             "-i", os.path.join(anim_dir, "blocking_%04d.png"),
                             "-c:v", "libx264", "-pix_fmt", "yuv420p", out],
                            check=True, capture_output=True)
@@ -372,7 +409,7 @@ class BlockingGenerator:
 
 
 # ---------- Blender (bpy) 代码模板 ----------
-# 场景几何（地面/角色/道具）。带签名复用：几何不变则只更新相机，不重建场景。
+# 场景几何（地面/角色/道具/灯光）。带签名复用：几何不变则只更新相机，不重建场景。
 _CORE_TEMPLATE = r'''
 import bpy, os, math
 SCN="blocking_tmp"
@@ -409,14 +446,19 @@ if not reuse:
     for p in PROPS:
         bpy.ops.mesh.primitive_cube_add(size=0.8, location=(2.8,-1.2,0.4))
         o=bpy.context.object; o.name=("prop_"+str(p)); wm(o,0.7)
+    # 光源：原实现完全没有灯，白模只有 world 环境光，渲染整体偏暗且缺立体感
+    bpy.ops.object.light_add(type="SUN", location=(0,0,6))
+    sun=bpy.context.object; sun.name="blk_sun"
+    sun.data.energy=3.0
+    sun.rotation_euler=(math.radians(50), 0.0, math.radians(30))
 else:
     try:
         bpy.context.window.scene=scn
     except Exception:
         pass
 scn["blk_sig"]=SIG
-# 复位白模材质：normal 步骤会把材质换成法线材质，必须每次渲染前恢复，
-# 否则复用场景时 previs 会渲染成法线图（原实现的隐患）。
+# 复位白模材质：depth / normal 步骤会把材质换成映射材质，必须每次渲染前恢复，
+# 否则复用场景时 previs 会渲染成 depth/normal 图（原实现的隐患）。
 for o in scn.collection.objects:
     if o.type!="MESH":
         continue
@@ -431,9 +473,9 @@ for o in scn.collection.objects:
         wm(o,0.7)
 '''
 
-# 相机（每镜都更新；场景复用时不重建物体也能改机位）
+# 相机（每镜都更新；场景复用时不重建物体也能改机位）。距离随角色数补偿，避免角色贴边。
 _CAM_TEMPLATE = r'''
-DIST={"wide":9.0,"medium":5.5,"close":3.2}.get({SHOT},5.5)
+DIST={"wide":9.0,"medium":5.5,"close":3.2}.get({SHOT},5.5) + 0.6*(N-1)
 CAMY=-DIST
 CAMZ={"eye":1.6,"low":0.6,"high":4.0}.get({HEIGHT},1.6)
 cam=bpy.data.objects.get("block_cam")
@@ -449,110 +491,65 @@ ct.track_axis="TRACK_NEGATIVE_Z"; ct.up_axis="UP_Y"
 scn.camera=cam
 '''
 
-# 首选：previs+depth 合并为一次渲染（不同通道），line / normal 各一次 → 共 3 次
-_TAIL_MERGED = r'''
+# 4 张控制图（材质法出 depth/normal，不依赖已移除的 scene.node_tree）
+_TAIL_BLOCK = r'''
 W={W}; H={H}
 scn.render.resolution_x=W; scn.render.resolution_y=H; scn.render.resolution_percentage=100
 scn.render.image_settings.file_format="PNG"
-{ENGINE}
-scn.use_nodes=False
 scn.render.use_freestyle=False
-# --- A) previs + depth：一次渲染、两个输出槽（省掉一次整场景渲染）---
-scn.use_nodes=True
-nt=scn.node_tree
-nt.nodes.clear()
-rl=nt.nodes.new("CompositorNodeRLayers")
-fo=nt.nodes.new("CompositorNodeOutputFile")
-fo.base_path={OUTDIR} + "/"
-try:
-    fo.format.file_format="PNG"
-except Exception:
-    pass
-try:
-    fo.file_slots[0].path="previs_"
-    nt.links.new(rl.outputs["Image"], fo.inputs[0])
-except Exception:
-    pass
-mr=nt.nodes.new("CompositorNodeMapRange")
-try:
-    mr.inputs[1].default_value={NEAR}
-    mr.inputs[2].default_value={FAR}
-    mr.inputs[3].default_value=0.0
-    mr.inputs[4].default_value=1.0
-    nt.links.new(rl.outputs["Depth"], mr.inputs[0])
-    fo.file_slots.new("depth_")
-    nt.links.new(mr.outputs[0], fo.inputs[-1])
-except Exception:
-    pass
+{ENGINE}
+# 1) previs 白模（配置引擎，最快）
 scn.render.filepath={PREVIS}
-bpy.ops.render.render(write_still=True, scene=scn)
-# File Output 产物自带帧号（如 previs_0001.png），改名回固定名
-import glob as _glob
-def _grab(pref, dst):
-    c=sorted(_glob.glob(os.path.join({OUTDIR}, pref+"*.png")))
-    if c:
-        try:
-            os.replace(c[-1], dst)
-        except Exception:
-            pass
-_grab("previs_", {PREVIS})
-_grab("depth_", {DEPTH})
-# --- B) line：freestyle 线框（强制 CYCLES，保证 freestyle 生效）---
-scn.use_nodes=False
+bpy.ops.render.render(write_still=True, scene=scn.name)
+# 2) line 线框：freestyle 仅 CYCLES / legacy EEVEE 支持，强制 CYCLES 保证线条生效
 try:
     scn.render.engine="CYCLES"
     scn.cycles.samples={LS}
+    scn.cycles.use_denoising=True
 except Exception:
     pass
+# freestyle 需同时开「场景」与「View Layer」开关，且必须有 LineSet，否则 line.png == previs.png
 scn.render.use_freestyle=True
+try:
+    _vl=scn.view_layers[0]
+    _vl.use_freestyle=True
+    _fs=_vl.freestyle_settings
+    if len(_fs.linesets)==0:
+        _fs.linesets.new("blk")
+    _ls=_fs.linesets[0]
+    _ls.select_silhouette=True
+    _ls.select_crease=True
+    _ls.select_border=True
+    try:
+        _ls.linestyle.color=(0.0,0.0,0.0)
+        _ls.linestyle.thickness=2.0
+    except Exception:
+        pass
+except Exception:
+    pass
 scn.render.filepath={LINE}
-bpy.ops.render.render(write_still=True, scene=scn)
-# --- C) normal：材质法线可视化（渲染后由下次 core 复位材质）---
-def nm_mat():
-    m=bpy.data.materials.new("nm"); m.use_nodes=True; t=m.node_tree; t.nodes.clear()
-    geo=t.nodes.new("ShaderNodeNewGeometry")
-    mul=t.nodes.new("ShaderNodeVectorMath"); mul.operation="MULTIPLY"; mul.inputs[1].default_value=(0.5,0.5,0.5)
-    ad=t.nodes.new("ShaderNodeVectorMath"); ad.operation="ADD"; ad.inputs[1].default_value=(0.5,0.5,0.5)
-    em=t.nodes.new("ShaderNodeEmission"); ou=t.nodes.new("ShaderNodeOutputMaterial")
-    t.links.new(geo.outputs["Normal"], mul.inputs[0]); t.links.new(mul.outputs[0], ad.inputs[0])
-    t.links.new(ad.outputs[0], em.inputs["Color"]); t.links.new(em.outputs[0], ou.inputs[0])
+bpy.ops.render.render(write_still=True, scene=scn.name)
+# 3) depth 深度：材质法（View Z Depth -> 固定范围灰度），多帧一致且跨版本可用
+def dp_mat():
+    m=bpy.data.materials.new("dp"); m.use_nodes=True; t=m.node_tree; t.nodes.clear()
+    cd=t.nodes.new("ShaderNodeCameraData")
+    mr=t.nodes.new("ShaderNodeMapRange")
+    mr.inputs[1].default_value={NEAR}; mr.inputs[2].default_value={FAR}
+    mr.inputs[3].default_value=0.0; mr.inputs[4].default_value=1.0
+    em=t.nodes.new("ShaderNodeEmission")
+    ou=t.nodes.new("ShaderNodeOutputMaterial")
+    t.links.new(cd.outputs["View Z Depth"], mr.inputs[0])
+    t.links.new(mr.outputs[0], em.inputs["Color"])
+    t.links.new(em.outputs[0], ou.inputs[0])
     return m
-_nm=nm_mat()
+_dm=dp_mat()
 for o in scn.collection.objects:
     if o.type=="MESH":
-        o.data.materials.clear(); o.data.materials.append(_nm)
-scn.render.use_freestyle=False
-scn.render.filepath={NORMAL}
-bpy.ops.render.render(write_still=True, scene=scn)
-print("OK_BLOCK", {PREVIS}, {LINE}, {DEPTH}, {NORMAL})
-'''
-
-# 降级：最保守的四张分别渲染（与历史已验证路径等价），仅 depth 改用固定范围
-_TAIL_LEGACY = r'''
-W={W}; H={H}
-scn.render.resolution_x=W; scn.render.resolution_y=H; scn.render.resolution_percentage=100
-scn.render.image_settings.file_format="PNG"
-{ENGINE}
-# 1) previs 白模（无 freestyle）
-scn.render.use_freestyle=False; scn.use_nodes=False
-scn.render.filepath={PREVIS}
-bpy.ops.render.render(write_still=True, scene=scn)
-# 2) line 线框（freestyle）
-scn.render.use_freestyle=True
-scn.render.filepath={LINE}
-bpy.ops.render.render(write_still=True, scene=scn)
-# 3) depth 深度（固定近远平面归一化，保证动画多帧一致）
-scn.use_nodes=True; nt=scn.node_tree; nt.nodes.clear()
-rl=nt.nodes.new("CompositorNodeRLayers")
-mr=nt.nodes.new("CompositorNodeMapRange")
-mr.inputs[1].default_value={NEAR}; mr.inputs[2].default_value={FAR}
-mr.inputs[3].default_value=0.0; mr.inputs[4].default_value=1.0
-co=nt.nodes.new("CompositorNodeComposite")
-nt.links.new(rl.outputs["Depth"], mr.inputs[0]); nt.links.new(mr.outputs[0], co.inputs[0])
+        o.data.materials.clear(); o.data.materials.append(_dm)
 scn.render.use_freestyle=False
 scn.render.filepath={DEPTH}
-bpy.ops.render.render(write_still=True, scene=scn)
-# 4) normal 法线预览（材质法线 -> 颜色）
+bpy.ops.render.render(write_still=True, scene=scn.name)
+# 4) normal 法线：材质法（几何法线 -> 颜色）
 def nm_mat():
     m=bpy.data.materials.new("nm"); m.use_nodes=True; t=m.node_tree; t.nodes.clear()
     geo=t.nodes.new("ShaderNodeNewGeometry")
@@ -566,9 +563,8 @@ _nm=nm_mat()
 for o in scn.collection.objects:
     if o.type=="MESH":
         o.data.materials.clear(); o.data.materials.append(_nm)
-scn.use_nodes=False
 scn.render.filepath={NORMAL}
-bpy.ops.render.render(write_still=True, scene=scn)
+bpy.ops.render.render(write_still=True, scene=scn.name)
 print("OK_BLOCK", {PREVIS}, {LINE}, {DEPTH}, {NORMAL})
 '''
 
@@ -577,9 +573,8 @@ _ANIM_TAIL = r'''
 W={W}; H={H}
 scn.render.resolution_x=W; scn.render.resolution_y=H; scn.render.resolution_percentage=100
 scn.render.image_settings.file_format="PNG"
-{ENGINE}
-scn.use_nodes=False
 scn.render.use_freestyle=False
+{ENGINE}
 MV={CAMERA}; FR={FRAMES}
 scn.frame_start=1; scn.frame_end=FR
 if MV!="static":
@@ -594,6 +589,6 @@ if MV!="static":
             cam.location=(math.cos(a)*DIST, math.sin(a)*DIST, CAMZ); cam.keyframe_insert("location",frame=fr)
 scn.render.filepath={OUTDIR} + "/blocking_"
 scn.frame_step=1
-bpy.ops.render.render(write_still=False, scene=scn, animation=True)
+bpy.ops.render.render(write_still=False, scene=scn.name, animation=True)
 print("OK_ANIM", {OUTDIR})
 '''
