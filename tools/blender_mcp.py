@@ -37,36 +37,76 @@ class BlenderMCP:
             return False
 
     def _send(self, msg: dict) -> Optional[dict]:
+        """发一条命令并取回 JSON 回执。
+
+        健壮性改进（原实现只按'出现换行'判断，遇到无换行/粘包/分片会丢或挂）：
+          - 每收一段就尝试整体解析，能解析即返回（兼容无换行的 fork）；
+          - recv 显式超时，避免对端半开导致无限阻塞；
+          - 连接关闭后仍做最后一次解析兜底。
+        """
         try:
             with socket.create_connection((self.host, self.port), timeout=self.timeout) as s:
+                s.settimeout(self.timeout)
                 s.sendall((json.dumps(msg) + "\n").encode("utf-8"))
                 buf = b""
-                while b"\n" not in buf:
-                    chunk = s.recv(8192)
+                while True:
+                    text = buf.decode("utf-8", "ignore").strip()
+                    if text:
+                        try:
+                            return json.loads(text)
+                        except ValueError:
+                            pass
+                    try:
+                        chunk = s.recv(65536)
+                    except socket.timeout:
+                        break
                     if not chunk:
                         break
                     buf += chunk
-                line = buf.split(b"\n", 1)[0]
-                return json.loads(line.decode("utf-8"))
+                text = buf.decode("utf-8", "ignore").strip()
+                if not text:
+                    return None
+                try:
+                    return json.loads(text)
+                except ValueError:
+                    try:
+                        return json.loads(text.splitlines()[0])
+                    except ValueError as e:
+                        print(f"  [blender-mcp] 响应解析失败: {e}; raw={text[:200]}",
+                              file=sys.stderr)
+                        return None
         except Exception as e:
             print(f"  [blender-mcp] 通信失败: {e}", file=sys.stderr)
             return None
 
+    def exec_code_ex(self, code: str) -> dict:
+        """执行 bpy 代码，返回结构化结果 {"ok", "stdout", "error"}。
+
+        调用方据此判断"到底成没成功"，避免把通信失败当成渲染成功（原实现的静默失败点）。
+        """
+        r = self._send({"type": "execute_code", "params": {"code": code}})
+        if r is None:
+            return {"ok": False, "stdout": "", "error": "无响应/连接失败（Blender MCP 是否在跑？）"}
+        if str(r.get("status", "")).lower() != "success":
+            return {"ok": False, "stdout": "",
+                    "error": str(r.get("message") or r.get("error") or r)}
+        res = r.get("result")
+        if isinstance(res, dict):
+            # 官方 execute_code 把 stdout 放在 result["result"]
+            out = res.get("result") or res.get("message") or ""
+        else:
+            out = res or r.get("message") or ""
+        return {"ok": True, "stdout": str(out), "error": ""}
+
     def exec_code(self, code: str) -> Optional[str]:
-        """在 Blender 内执行一段 bpy 代码，返回回执中的 stdout。
+        """在 Blender 内执行一段 bpy 代码，返回回执中的 stdout（失败返回 None）。
 
         官方 ahujasid/blender-mcp v1.6 协议：
           命令: {"type": "execute_code", "params": {"code": "<python 源码>"}}
           响应: {"status": "success", "result": {"executed": True, "result": "<stdout>"}}
         """
-        r = self._send({"type": "execute_code", "params": {"code": code}})
-        if r is None:
+        ex = self.exec_code_ex(code)
+        if not ex["ok"]:
+            print(f"  [blender-mcp] exec 错误: {ex['error']}", file=sys.stderr)
             return None
-        if r.get("status") != "success":
-            print(f"  [blender-mcp] exec 错误: {r.get('message')}", file=sys.stderr)
-            return None
-        res = r.get("result")
-        if isinstance(res, dict):
-            # 官方 execute_code 把 stdout 放在 result["result"]
-            return res.get("result") or res.get("message") or ""
-        return res or r.get("message") or ""
+        return ex["stdout"]

@@ -76,6 +76,57 @@ engine:
     post:
       upscale_model: ''
       sharpen: 0.2
+    # BlockCache 缓存加速（需自定义节点 comfyui-minimax-h3-blockcache-T8）：
+    #   开启后 H3 在目标音视频都稳定时跳过 Block 1-49，只重算 Block 0。
+    #   近似缓存，不保证同 seed 无损；运动小的镜头加速明显；与 SageAttention 兼容。
+    block_cache:
+      enable: false
+      threshold: 0.12          # 越高越易命中，也越可能改变结果
+      cache_device: cpu        # cpu 省显存 / gpu 少传输但占显存
+    # 学习型 latent 二采放大（需 H3 内置二采节点 + latent upscaler 模型，
+    # 模型放 ComfyUI models/latent_upscale_models/minimax_h3_latent_upscaler_3d_fp16.safetensors）：
+    #   一采低清 → 3D latent 放大 → 二采高清。EXP 路线，单样本不证画质增益；
+    #   开启后一采走 DualClock（非 Turbo 双速率），比单采慢。
+    two_pass:
+      enable: false
+      model_name: minimax_h3_latent_upscaler_3d_fp16.safetensors
+      scale_by: 1.5            # 放大倍数（一采尺寸 × scale_by = 二采尺寸）
+      base_steps: 8            # 一采总步数（= coarse + refine）
+      coarse_steps: 4          # 一采低清段步数
+      refine_steps: 4          # 二采高清段步数
+# 逐镜自动质检（出片后打分；不达标自动换 seed 重出）
+#   阈值默认取「只抓明确崩坏」（全黑/全白/静帧/糊成一团），避免误判浪费 GPU 时间。
+#   先跑几集，看 outputs/series_shots*/qa_report.json 的 summary 分布，再按需收紧。
+#   命令行覆盖：--no-qa 关闭；--qa-rerolls N 改自动重出次数。
+#   单独给视频打分：python -m agent.qa <视频路径> [--char --anchor <锚定图>]
+qa:
+  enabled: true
+  sample_frames: 9        # 每镜抽样帧数
+  max_rerolls: 1          # 不达标时换 seed 重出的次数上限（0 = 只报告不重出）
+  # ---- 风格无关指标（默认启用，只用 opencv+numpy，无额外依赖）----
+  min_sharpness: 5.0      # 拉普拉斯方差下限，低=糊/涂抹；0 = 不检查
+  min_motion: 0.5         # 相邻帧平均差下限，低=静帧/卡死；0 = 不检查
+  max_motion: 0.0         # 上限，高=抖动闪烁；0 = 不检查（普适阈值难定，默认只报告）
+  min_brightness: 8.0     # 灰度均值下限，抓全黑；0 = 不检查
+  max_brightness: 247.0   # 灰度均值上限，抓全白；0 = 不检查
+  # ---- 人脸类指标（需 insightface + 锚定图）----
+  #   注意：opencv 自带 Haar 只认真实人脸，对**动漫脸基本失效**；本项目默认动漫风格，
+  #   故默认关闭，否则会大量误判并白白重 roll GPU。装好 insightface 后再置 true。
+  face_check: false
+  min_face_ratio: 0.34    # 检出人脸的采样帧占比下限
+  min_identity: 0.35      # arcface 余弦：>0.6 同一人，0.35~0.6 偏弱，<0.35 基本换人
+# 提示词默认值（负向提示词库）
+#   negative 可写预设名 quality / identity / anime，也可直接写一整串（非预设名时按字面处理）。
+#   注意 1：引擎级 engine.comfyui_ltx.negative 更具体，写了就以它为准。
+#   注意 2：MiniMax H3 **没有负向提示词输入**（T8 采样器走 flow matching / shift，
+#           BasicGuider 只有 model + conditioning），给它配负向不会生效。
+prompting:
+  negative: quality
+# 系列级配置
+series:
+  # 角色卡（角色锚定图）：--anchor auto 优先用它；文件不存在则回退到
+  # outputs/anchor/*anchor*.png → mira_*.png
+  character_anchor: outputs/anchor/mira_anchor.png
 llm:
   base_url: http://localhost:11434/v1
   api_key: ollama
@@ -220,5 +271,21 @@ blender:
   width: 1280
   height: 720
   anim_frames: 24
-  use_as_i2v_start: false
   use_llm_parse: false
+  # ---- 白模 -> 视频 流程接线：把白模资产喂给视频引擎（原先完全没接，白模只用于概念片配图）----
+  #   use_as_i2v_start: 用白模 previs 图作视频首帧(I2V)，锁构图/站位/机位
+  #   use_as_ref_images: 把白模控制图(depth/normal/line)作参考图(ref_images)喂引擎
+  #   use_as_ref_video:  把白模灰模动画作参考视频(ref_video)喂引擎（锁走位/运镜）
+  #   注意：H3 里 image(首帧) 与参考媒体同时给会走 Hybrid 任务，属正常；单独 image 走 I2VA。
+  use_as_i2v_start: false
+  use_as_ref_images: false
+  use_as_ref_video: false
+  # ---- 渲染性能 / 健壮性（本次优化新增）----
+  engine: auto            # auto=优先 EEVEE(GPU)失败自动降级 CYCLES / eevee / cycles（cycles 最稳但最慢）
+  samples: 24             # 采样数，白模可降到 8~24，越低越快
+  timeout: 180            # 单次静帧渲染 socket 超时(秒)
+  anim_timeout: 900       # 灰模动画渲染 socket 超时(秒)，逐帧渲染耗时更长
+  retries: 2              # 渲染失败重试次数（逐级降级：合并渲染+EEVEE -> CYCLES -> 逐张渲染）
+  reuse_scene: true       # 同集连续同几何分镜复用场景（只更新相机），多镜时显著提速
+  depth_near: 0.1         # depth 图归一化近平面（固定值，保证动画多帧深度一致）
+  depth_far: 100.0        # depth 图归一化远平面

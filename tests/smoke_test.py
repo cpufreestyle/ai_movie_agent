@@ -180,6 +180,38 @@ def test_blocking_parse_spec_rules():
     assert s["shot"] == "wide" and s["camera"] == "pan" and s["height"] == "low"
     s2 = bg.parse_spec("角色特写镜头，环绕")
     assert s2["shot"] == "close" and s2["camera"] == "orbit"
+
+
+def test_blocking_codegen_syntax_and_sig():
+    """模板填充后的 bpy 代码必须是合法 Python（否则只有发到 Blender 才炸）。"""
+    from agent.blocking import BlockingGenerator
+    bg = BlockingGenerator(CFG, tempfile.mkdtemp())
+    spec = {"characters": 2, "props": ["桌"], "shot": "wide",
+            "camera": "dolly", "height": "low"}
+    for mode in ("merged", "legacy"):
+        for eng in ("eevee", "cycles"):
+            compile(bg._build_block_code(spec, bg.out_dir, mode, eng),
+                    "<blocking>", "exec")
+    compile(bg._build_anim_code(spec, bg.out_dir, 12, "eevee"), "<blocking>", "exec")
+    # 场景复用签名：几何相同则稳定，几何变化则变化
+    assert bg._scene_sig(spec) == bg._scene_sig(dict(spec))
+    assert bg._scene_sig(spec) != bg._scene_sig({**spec, "characters": 3})
+
+
+def test_blocking_raises_instead_of_fake_paths():
+    """Blender 不在时 render_block 必须抛 BlockingError，而不是返回不存在的路径。"""
+    from agent.blocking import BlockingGenerator, BlockingError
+    cfg = {**CFG, "blender": {"enabled": True, "retries": 0,
+                              "timeout": 0.2, "port": 59999}}
+    bg = BlockingGenerator(cfg, tempfile.mkdtemp())
+    if bg.client.is_ready():
+        return  # 本机 Blender MCP 恰在运行，跳过（本用例针对未就绪行为）
+    try:
+        bg.render_block({"characters": 1, "props": [], "shot": "medium",
+                         "camera": "static", "height": "eye"}, bg.out_dir)
+        raise AssertionError("Blender 未就绪时不应返回路径")
+    except BlockingError:
+        pass
     assert not bg.is_ready()  # blender.enabled=false
 
 

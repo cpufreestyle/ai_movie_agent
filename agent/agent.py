@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
@@ -58,6 +59,9 @@ class MovieAgent:
         self.keyframe_gen = KeyframeGenerator(for_stage(config, "D"), workdir)
         # Blender 白模分镜（远程重构新增，未就绪自动跳过）
         self.blocking = BlockingGenerator(config, workdir)
+        # 白模资产缓存（出片时接入引擎：控制图 -> ref_images / 灰模动画 -> ref_video）
+        self.blocking_control: list = []
+        self.blocking_anim: list = []
         self.image_prompts: list[str] = []
         self.keyframe_images: list[str] = []
 
@@ -115,10 +119,36 @@ class MovieAgent:
             log("[agent] 视频引擎未就绪，停止创作（请安装对应后端或检查 engine.backend 配置）。")
             return None
         prev = self.film if (n > 0 and os.path.exists(self.film)) else None
+        # ---- 白模 -> 视频 流程闭环：控制图/灰模动画接入引擎 ----
+        #   控制图(depth/normal/line) -> ref_images；灰模运镜 mp4 -> ref_video
+        #   仅当引擎签名支持对应参数时才传（SkyReels/LTX 不支持则自动跳过，不报错）
+        bcfg = self.config.get("blender", {}) or {}
+        ref_images = None
+        ref_video = None
+        if bcfg.get("use_as_ref_images"):
+            ctrl = self.blocking_control[n] if n < len(self.blocking_control) else None
+            if isinstance(ctrl, dict):
+                cands = [ctrl.get(k) for k in ("depth", "normal", "line")]
+                ref_images = [p for p in cands if p and os.path.exists(p)] or None
+        if bcfg.get("use_as_ref_video"):
+            anim = self.blocking_anim[n] if n < len(self.blocking_anim) else None
+            if anim and str(anim).lower().endswith(".mp4") and os.path.exists(anim):
+                ref_video = anim
+        extra = {}
+        try:
+            params = inspect.signature(self.engine.generate).parameters
+            if ref_images and "ref_images" in params:
+                extra["ref_images"] = ref_images
+            if ref_video and "ref_video" in params:
+                extra["ref_video"] = ref_video
+        except (TypeError, ValueError):
+            pass
+        if extra:
+            log("  [agent] 白模条件已接入引擎: " + ", ".join(sorted(extra)))
         # 先生成到临时片段，再作为续写结果替换 film
         tmp = os.path.join(self.scenes_dir, f"scene_{n+1:03d}.mp4")
         self.engine.generate(prompt, tmp, prev_clip=prev, seed=seed,
-                              image=keyframe, two_pass=self.engine.two_pass)
+                              image=keyframe, two_pass=self.engine.two_pass, **extra)
 
         # 备份当前长片，并把新片段设为影片（续写后的完整片）
         if n > 0 and os.path.exists(self.film):
@@ -157,10 +187,16 @@ class MovieAgent:
             # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
             if self.blocking.is_ready():
                 log("[agent] 生成 Blender 白模分镜资产 ...")
-                blk = self.blocking.render_assets(self.image_prompts)
+                try:
+                    blk = self.blocking.render_assets(self.image_prompts)
+                except Exception as e:
+                    log(f"[agent] 白模渲染异常，跳过（不影响出片）: {e}")
+                    blk = {"previews": [], "controls": [], "anims": []}
                 self.state["blocking_previs"] = blk["previews"]
                 self.state["blocking_control"] = blk["controls"]
                 self.state["blocking_anim"] = blk["anims"]
+                self.blocking_control = blk["controls"]
+                self.blocking_anim = blk["anims"]
                 if self.config.get("blender", {}).get("use_as_i2v_start") and blk["previews"]:
                     merged = list(self.keyframe_images)
                     for i, p in enumerate(blk["previews"]):
