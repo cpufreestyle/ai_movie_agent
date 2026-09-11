@@ -132,11 +132,12 @@ def main() -> int:
     # 按 config 现状决定是否一并喂白模控制图（与真实管线保持一致）
     bcfg = (rs.load_config().get("blender", {}) or {})
     ctrl = []
-    if bcfg.get("use_as_ref_images"):
+    if bcfg.get("use_as_ref_images") and "--no-ref-images" not in sys.argv:
         ctrl = [p for p in (os.path.join(ROOT, "outputs", "blocking", n)
                             for n in ("depth.png", "normal.png", "line.png"))
                 if os.path.exists(p)]
-    print(f"[cfg] use_as_ref_images={bool(bcfg.get('use_as_ref_images'))} "
+    print(f"[cfg] use_as_ref_images={bool(bcfg.get('use_as_ref_images'))}"
+          f"{'（被 --no-ref-images 覆盖）' if '--no-ref-images' in sys.argv else ''} "
           f"ref_images={[os.path.basename(p) for p in ctrl]}", flush=True)
 
     eng = rs.build_engine(W, H, FRAMES, FPS, "mmh3")
@@ -153,21 +154,23 @@ def main() -> int:
             print(f"[dry] 条件节点 {nid} ({node.get('class_type')}) "
                   f"task_type={ins['task_type']} first_frame={'first_frame' in ins} "
                   f"ref_keys={ref_keys}", flush=True)
-            if ins["task_type"] != "Hybrid":
-                print("[dry] !! 期望 Hybrid（首帧 + 参考媒体），接线有问题", flush=True)
+            expect = "Hybrid" if (use_ref or ctrl) else "I2VA"
+            if ins["task_type"] != expect:
+                print(f"[dry] !! 期望 {expect}，实际 {ins['task_type']}，接线有问题", flush=True)
                 return 3
             if use_ref and "ref_videos.ref_video_0" not in ins:
                 print("[dry] !! ref_videos 键名不对，节点会丢弃该输入", flush=True)
                 return 3
-            if not use_ref and [k for k in ins if k.startswith("ref_images.")] == []:
-                print("[dry] !! 对照组丢掉了 ref_images", flush=True)
+            if ctrl and not [k for k in ins if k.startswith("ref_images.")]:
+                print("[dry] !! ref_images 键名不对，节点会丢弃该输入", flush=True)
                 return 3
     if "--dry" in sys.argv:
         print("[dry] 接线检查通过（未生成）", flush=True)
         return 0
 
     # ---- 真跑 ----
-    out = os.path.join(OUT, f"hybrid_shot{SHOT}{'' if use_ref else '_noref'}.mp4")
+    tag = ("" if use_ref else "_norv") + ("" if ctrl else "_nori")
+    out = os.path.join(OUT, f"hybrid_shot{SHOT}{tag}.mp4")
     seed = 20260907 + 1000 + SHOT
     t0 = time.time()
     try:
@@ -183,19 +186,21 @@ def main() -> int:
     # ---- 客观指标：出片运镜是否跟随参考视频（有 A/B 对照才可下结论） ----
     mo = motion_profile(out)
     print(f"[motion] out  dx={mo['dx']:+.4f} dy={mo['dy']:+.4f} mag={mo['mag']:.4f}", flush=True)
-    other = os.path.join(OUT, f"hybrid_shot{SHOT}_noref.mp4" if use_ref
-                         else f"hybrid_shot{SHOT}.mp4")
     if use_ref:
         mr = motion_profile(ref)
         print(f"[motion] ref  dx={mr['dx']:+.4f} dy={mr['dy']:+.4f} mag={mr['mag']:.4f}", flush=True)
         same = (mr["dx"] * mo["dx"] >= 0) and (mr["dy"] * mo["dy"] >= 0)
         print(f"[motion] 与参考视频方向{'一致' if same else '不一致'}（dx/dy 同号=同向）", flush=True)
-    if os.path.exists(other):
-        mb = motion_profile(other)
-        label = "无 ref_video 对照" if use_ref else "带 ref_video"
-        print(f"[motion] {label}: dx={mb['dx']:+.4f} dy={mb['dy']:+.4f} mag={mb['mag']:.4f}", flush=True)
-        print(f"[motion] 本组 mag={mo['mag']:.4f} vs 对照 mag={mb['mag']:.4f}"
-              f"（差异显著才说明 ref_video 起了作用）", flush=True)
+    # 所有组的横向汇总（A/B 只有横向对比才有意义）
+    print("[ab] 各组 motion 汇总（rv=带 ref_video, ri=带 ref_images）：", flush=True)
+    for name in (f"hybrid_shot{SHOT}.mp4", f"hybrid_shot{SHOT}_norv.mp4",
+                 f"hybrid_shot{SHOT}_noref.mp4", f"hybrid_shot{SHOT}_nori.mp4",
+                 f"hybrid_shot{SHOT}_norv_nori.mp4"):
+        p = os.path.join(OUT, name)
+        if os.path.exists(p):
+            m = motion_profile(p)
+            print(f"[ab]   {name:32s} dx={m['dx']:+.4f} dy={m['dy']:+.4f} "
+                  f"mag={m['mag']:.4f}", flush=True)
 
     from agent import record
     record.save(OUT, f"hybrid_shot{SHOT}", record.collect(
