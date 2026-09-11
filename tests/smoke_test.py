@@ -594,12 +594,14 @@ def test_record_collect_and_roundtrip():
     eng = _MMH3LikeEngine()
     p = record.collect(eng, prompt="a shot of the woman", seed=123, attempt=0,
                        image="c:/x/anchor.png", ref_images=["c:/a/mira_1.png"],
+                       ref_video="c:/v/blocking.mp4",
                        style_anchor="c:/b/style.png",
                        qa_policy={"enabled": True, "max_rerolls": 1})
     assert p["engine"] == "mmh3"
     assert p["resolution"] == "768x448" and p["steps"] == 30
     assert p["seed"] == 123 and p["attempt"] == 0
     assert p["image"] == "anchor.png" and p["ref_images"] == ["mira_1.png"]
+    assert p["ref_video"] == "blocking.mp4"          # 白模走位参考视频也要可复现
     assert p["style_anchor"] == "style.png"
     assert p["qa"]["enabled"] is True
     eng.lora = None
@@ -662,6 +664,29 @@ def test_ab_compare_runs_and_seed_from_name():
     assert ab._seed_from_name("ep1_shot1_s77") == 77    # 变体文件名含 seed 可解析
     assert ab._seed_from_name("ep1_shot1") is None
     assert "ep1_shot1" in ab.render_runs(rows)          # 渲染不崩
+
+
+# ---------- 白模 -> 视频：灰模动画帧数对齐 ----------
+
+def test_blocking_anim_frames_auto_aligns_and_floors():
+    """灰模动画帧数：auto 对齐出片帧数，并按 H3 参考视频 2s 下限兜底；显式整数尊重原值。"""
+    from agent.blocking import BlockingGenerator
+
+    def _mk(eng: dict, frames):
+        c = {**CFG, "engine": {**CFG["engine"], **eng}}
+        return BlockingGenerator({**c, "blender": {"enabled": True,
+                                                   "anim_frames": frames}},
+                                 tempfile.mkdtemp())
+
+    bg = _mk({"fps": 24, "backend": "comfyui_mmH3", "comfyui_mmH3": {"num_frames": 56}},
+             "auto")
+    assert bg.fps == 24
+    assert bg.anim_frames == 56          # 对齐出片 56 帧（2.33s）
+    assert _mk({"fps": 24, "comfyui_mmH3": {"num_frames": 22}},
+               "auto").anim_frames == 48  # 出片仅 0.92s → 被 2s 下限抬到 48
+    assert _mk({"fps": 24}, "auto").anim_frames == 48   # 拿不到出片帧数 → 兜底 2s
+    assert _mk({"fps": 24, "comfyui_mmH3": {"num_frames": 56}},
+               24).anim_frames == 24      # 显式整数尊重原值（过短由 agent 侧预检拦下）
 
 
 def main():

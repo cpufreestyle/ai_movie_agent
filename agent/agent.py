@@ -133,7 +133,16 @@ class MovieAgent:
         if bcfg.get("use_as_ref_video"):
             anim = self.blocking_anim[n] if n < len(self.blocking_anim) else None
             if anim and str(anim).lower().endswith(".mp4") and os.path.exists(anim):
-                ref_video = anim
+                # H3 参考视频走官方 2~15s 策略：过短的灰模动画喂不进去（运动引导无效或直接
+                # 报错）。这里预检后不传，保证本镜照常出片；把 blender.anim_frames 设为 auto
+                # 即可自动对齐出片帧数并兜底 2s。
+                dur = self.editor.probe_duration(anim)
+                floor = float(getattr(self.blocking, "MIN_REF_SECONDS", 2.0) or 2.0)
+                if 0 < dur < floor:
+                    log(f"  [agent] 跳过 ref_video：灰模动画 {dur:.2f}s 低于 {floor:g}s 下限"
+                        f"（把 blender.anim_frames 设为 auto 可修）")
+                else:
+                    ref_video = anim
         extra = {}
         try:
             params = inspect.signature(self.engine.generate).parameters
@@ -158,6 +167,14 @@ class MovieAgent:
             except Exception:
                 pass
         shutil.move(tmp, self.film)
+
+        # 生成参数落盘（可复现 / 供 A/B 与回归）：含白模参考素材 ref_images / ref_video
+        from . import record
+        record.save(self.workdir, f"scene_{n+1:03d}", record.collect(
+            self.engine, prompt=prompt,
+            seed=seed if seed is not None else getattr(self.engine, "seed", None),
+            attempt=0, image=keyframe, ref_images=extra.get("ref_images"),
+            ref_video=extra.get("ref_video")))
 
         self.state["beats"].append(beat)
         self.state["scene_count"] = n + 1

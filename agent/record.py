@@ -47,7 +47,7 @@ def collect(eng, *, prompt: str, seed: int, attempt: int,
         "attempt": attempt,
         "image": os.path.basename(image) if image else None,
         "ref_images": [os.path.basename(r) for r in (ref_images or [])],
-        # 白模走位参考视频：原先漏记，导致走 ref_video 时"参考素材可复现"不完整
+        # 白模灰模动画（ref_video）也要落盘：否则这一镜的参考素材无法完整复现
         "ref_video": os.path.basename(ref_video) if ref_video else None,
         "style_anchor": os.path.basename(style_anchor) if style_anchor else None,
         "prompt": prompt,
