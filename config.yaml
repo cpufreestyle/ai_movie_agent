@@ -282,8 +282,14 @@ blender:
   #   use_as_ref_video:  把白模灰模动画作参考视频(ref_video)喂引擎（锁走位/运镜）
   #   注意：H3 里 image(首帧) 与参考媒体同时给会走 Hybrid 任务，属正常；单独 image 走 I2VA。
   use_as_i2v_start: false      # 首帧用白模 previs 图（画面会变成白模，谨慎开启）
-  use_as_ref_images: true      # 【已开启】控制图 depth/normal/line -> ref_images
-  use_as_ref_video: true       # 【已开启】灰模运镜 mp4 -> ref_video（锁走位/运镜）
+  use_as_ref_images: true      # 【已开启】控制图 depth/normal/line -> ref_images（A/B 表现良好）
+  # 【默认关闭】灰模运镜 mp4 -> ref_video。2026-09-11 A/B 实测（同 seed、同首帧+同 3 张控制图）：
+  #   开：motion mag 0.123 / 耗时 365s / 人脸生硬、构图漂移；
+  #   关：motion mag 0.299 / 耗时  67s / 画面自然、接近原角色。
+  #   结论：白模 ref_video 既没把运镜"锁"过去（参考 +dx 右移，出片 ≈0 甚至反向），
+  #   反而压制运镜、拉低画质一致性，且耗时 5.4 倍。要再试时置 true，
+  #   并用 `python _exp_ref_video.py [<灰模.mp4>]` 与 `--no-ref-video` 做同 seed 对照。
+  use_as_ref_video: false
   # ---- 渲染性能 / 健壮性（本次优化新增）----
   engine: auto            # auto=优先 EEVEE(GPU)失败自动降级 CYCLES / eevee / cycles（cycles 最稳但最慢）
   samples: 24             # 采样数，白模可降到 8~24，越低越快

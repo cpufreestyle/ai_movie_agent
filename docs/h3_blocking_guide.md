@@ -13,7 +13,7 @@
 | 任务 | H3 用白模的表现预期 | 本项目的建议做法 |
 |---|---|---|
 | 人物走、跑、转身、跳跃、舞蹈 | **较好**。白模提供清晰的动作轨迹与重心变化 | 白模需有完整肢体轮廓、避免自遮挡。控制图（depth/normal/line）走 `use_as_ref_images` |
-| 镜头环绕、推拉、跟拍 | **较好**，特别适合做运镜参考 | 先在白模里做出目标镜头路径，再用灰模 mp4 走 `use_as_ref_video`；机位 `static` 的镜头不产生灰模动画 |
+| 镜头环绕、推拉、跟拍 | **实测不成立（见 §七）**：H3 未跟随白模运镜，画质反而变差 | 目前**不要开** `use_as_ref_video`；运镜仍靠提示词，或走 3D 控制层路线（`docs/3d_control_pipeline_plan.md`） |
 | 二次元角色动画 / OC PV | **好**。图锁角色 + 视频锁动作 | 角色设定图（`--anchor` / `ref_images`）+ 白模动作视频一起喂。注意 **H3 没有负向提示词**，"负向强化"对它无效，压崩坏只能靠多加参考图 |
 | 产品展示、UI/UX、游戏界面动效 | **很适合** | 需把"产品不变、结构不变"写进提示词；静态结构优先用 `ref_images`（比 `ref_video` 更稳） |
 | 复杂武打、多人交互、道具接触 | **可尝试，失败率较高** | 拆成 3–6s 的单一动作镜头再后期拼接。见 §二 帧数换算 |
@@ -148,6 +148,39 @@ SkyReels / LTX 不支持时**自动跳过且不报错**。
 | 日志写 `I2VA`，但明明给了参考素材 | `mmh3_engine.generate` 的提交日志只看 `image` 有无，**不反映真实 task_type** | 以干跑输出里的 `task_type=Hybrid` 为准，别被那行日志误导 |
 | `ValueError: ref_video_1 has 24 frames; official guidance is 48-360 frames` | 参考视频帧数 <48（<2s） | `blender.anim_frames: auto`；或把该镜的 `use_as_ref_video` 关掉 |
 | 单镜时长与预期不符 | 用 `num_frames / fps` 算，注意吸附 | 见 §二 换算表 |
+
+---
+
+## 七、实测结论：白模 ref_video 目前是负作用（2026-09-11）
+
+同 seed、同首帧、同 3 张控制图（depth/normal/line），只切换 `use_as_ref_video`：
+
+| 组 | 耗时 | 平均光流 dx / dy | mag | 画面 |
+|---|---|---|---|---|
+| **带** ref_video（真灰模 `anim_track`） | **365s** | -0.0089 / +0.0306 | **0.123** | 人脸生硬、构图漂移 |
+| **无** ref_video（对照） | **67s** | -0.0669 / +0.0003 | **0.299** | 自然、接近原角色 |
+| 灰模参考视频自身 | — | +0.0366 / -0.0014 | 0.261 | 纯几何白模（圆柱+球）、无光照、1280×720 |
+
+**结论**：
+
+1. **接线没问题**——Hybrid 生效，`ref_videos.ref_video_0` 与 `ref_images.ref_image_0..2` 全部进入条件节点。
+2. **但"锁走位"不成立**：参考视频是 +dx（右移），出片 ≈0 甚至反向；
+3. **反而有害**：运镜被压制（mag 0.123 vs 对照 0.299）、人脸/构图一致性变差、耗时 5.4 倍。
+4. 因此 `config.yaml` 的 `use_as_ref_video` **默认关闭**（含 A/B 数据注释）。
+
+**推断原因（未证实）**：1280×720 无光照的抽象几何与写实场景语义冲突，H3 折中成"弱运镜 + 差画面"；
+H3 的 `ref_videos` 更像内容/结构参考，而非运镜迁移。
+
+**要再试怎么办**（必须做同 seed 对照，别只看单条片子）：
+
+```bash
+python _exp_ref_video.py outputs/blocking/anim_track/blocking.mp4   # 带 ref_video
+python _exp_ref_video.py --no-ref-video                             # 同 seed 对照
+# 脚本会打印两组 motion 指标（cv2 Farneback 平均光流）与抽帧对照
+```
+
+> 改进方向：想让白模真正锁住运镜，走 `docs/3d_control_pipeline_plan.md` 的 **3D 控制层 + ControlNet**
+> 路线（控制信号是逐帧姿态/深度，而不是"参考视频"这种弱约束）。
 
 ---
 
