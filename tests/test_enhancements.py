@@ -109,12 +109,29 @@ def test_character_card_build_and_generate():
 
 
 # ---------- #8 WebUI 时间轴 ----------
-def test_timeline_build_returns_shots_shape():
-    try:
-        from webui import _build_timeline
-    except Exception:
-        return  # flask 未装时跳过（CI 应已装）
-    d = _build_timeline()
+def test_timeline_build_and_shape():
+    from agent import timeline as _tl
+    d = _tl.build_timeline()
     assert isinstance(d, dict) and "shots" in d
     for s in d["shots"]:
         assert {"key", "enabled", "in_point", "out_point", "order"} <= set(s.keys())
+
+
+def test_timeline_concat_export():
+    from agent import timeline as _tl
+    d = tempfile.mkdtemp()
+    s1 = os.path.join(d, "s1.mp4"); open(s1, "wb").close()
+    s2 = os.path.join(d, "s2.mp4"); open(s2, "wb").close()
+    json.dump({"s1": s1, "s2": s2},
+              open(os.path.join(d, "series_manifest.json"), "w", encoding="utf-8"))
+    tl = _tl.build_timeline(d)
+    tl["shots"][1]["enabled"] = False      # s2 禁用
+    tl["shots"][0]["in_point"] = 1.5        # s1 裁剪入点
+    out = os.path.join(d, "movie.mp4")
+    cmd = _tl.export_concat(tl, d, out)
+    assert "ffmpeg" in cmd and "concat" in cmd
+    txt = out + ".concat.txt"
+    assert os.path.exists(txt)
+    content = open(txt, encoding="utf-8").read()
+    assert "s1.mp4" in content and "inpoint 1.5" in content
+    assert "s2.mp4" not in content          # 禁用镜头不进拼接

@@ -465,7 +465,7 @@ class Publisher:
                         title: str | None = None, desc: str | None = None,
                         tags: list[str] | None = None, submit: bool = False,
                         source: str = "local", xfade: float = 0.4,
-                        bgm=None) -> str:
+                        auto_bgm: bool = True, bgm=None) -> str:
         """把 C 阶段创意/规划渲染成视频 demo，并在 biliup 就绪时投稿到 B 站。
 
         无 ffmpeg/imageio 时也能产出 PNG 序列作为投稿素材；真正投稿需先安装
@@ -489,6 +489,17 @@ class Publisher:
 
         # 白模分镜预视图（Blender 生成，可选）：优先用于分镜卡与视觉参考
         blocking_previs = (state or {}).get("blocking_previs") or None
+        # 自动配乐（#7）：未显式给 bgm 时自动选曲并混入（ffmpeg/BGM 缺失则跳过）
+        if bgm is None and auto_bgm:
+            try:
+                from agent import audio_mix as _am
+                if _am.is_ready():
+                    sel = _am.select_bgm(self.workdir)
+                    if sel:
+                        bgm = sel
+                        log(f"  [publish] 自动配乐：{os.path.basename(bgm)}")
+            except Exception as e:
+                log(f"  [publish] 自动配乐跳过: {e}")
         video = render_concept_video(concept, keyframes, out_path,
                                      xfade=xfade, bgm=bgm,
                                      blocking_images=blocking_previs)

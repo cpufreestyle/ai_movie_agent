@@ -58,7 +58,7 @@ def main():
     p_run.add_argument("--seed", type=int, default=None)
     p_run.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
 
-    p_pipe = sub.add_parser("pipeline", help="跑完整 A–H 流水线（采集→发布）")
+    p_pipe = sub.add_parser("pipeline", help="跑完整 A-H 流水线（采集->发布）")
     p_pipe.add_argument("--topic", default=None, help="主题；留空用 config.project.theme")
     p_pipe.add_argument("--continuous", action="store_true", help="持续创作直到 Ctrl-C（默认）")
     p_pipe.add_argument("--no-continuous", dest="continuous", action="store_false",
@@ -191,6 +191,8 @@ def main():
     p_tl.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
     p_tl.add_argument("--build", action="store_true", help="从 series_manifest 重建时间轴")
     p_tl.add_argument("--export", default=None, metavar="OUT.json")
+    p_tl.add_argument("--concat", default=None, metavar="OUT.mp4",
+                      help="按时间轴顺序导出 ffmpeg 拼接命令（含裁剪）")
     p_tl.add_argument("--print", dest="do_print", action="store_true", help="打印当前时间轴")
 
     args = ap.parse_args()
@@ -238,7 +240,7 @@ def main():
         if not agent.blocking.is_ready():
             print("[blender] 未就绪：请先安装 Blender + Blender MCP 插件，"
                   "并在 Blender 内启动 MCP Server（端口 9876）。")
-            print("  插件：https://github.com/ahujasid/blender-mcp  安装后侧栏 N → BlenderMCP → Start MCP Server")
+            print("  插件：https://github.com/ahujasid/blender-mcp  安装后侧栏 N -> BlenderMCP -> Start MCP Server")
             sys.exit(1)
         spec = agent.blocking.parse_spec(args.beat)
         print(f"[blender] 解析 spec: {spec}")
@@ -414,36 +416,32 @@ def main():
                 print(f"[charcard] 引擎初始化失败（仅出 JSON）: {e}")
                 engine = None
         res = cc.generate(bible, args.workdir, style=args.style, engine=engine)
-        print(f"[charcard] 角色卡 {len(res['cards'])} 张 → {res['manifest']}")
+        print(f"[charcard] 角色卡 {len(res['cards'])} 张 -> {res['manifest']}")
         for c in res["cards"]:
             print(f"  · {c['name']}（{c['role'] or '—'}）"
-                  f"{' ✅肖像' if c['ref_image'] else ''}")
+                  f"{' [肖像]' if c['ref_image'] else ''}")
     elif args.cmd == "timeline":
-        tl_path = os.path.join(args.workdir, "timeline.json")
-        if args.build or not os.path.exists(tl_path):
-            man = {}
-            mp = os.path.join(args.workdir, "series_manifest.json")
-            if os.path.exists(mp):
-                try:
-                    man = json.load(open(mp, encoding="utf-8"))
-                except Exception:
-                    man = {}
-            shots = [{"key": k, "label": k, "enabled": True,
-                      "in_point": None, "out_point": None, "order": i}
-                     for i, k in enumerate(man.keys())]
-            data = {"shots": shots, "updated": None}
-            with open(tl_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"[timeline] 已重建 {len(shots)} 个镜头 → {tl_path}")
+        from agent import timeline as _tl
+        if args.build or not os.path.exists(_tl.timeline_path(args.workdir)):
+            data = _tl.build_timeline(args.workdir)
+            _tl.save_timeline(args.workdir, data)
+            print(f"[timeline] 已重建 {len(data['shots'])} 个镜头 -> {_tl.timeline_path(args.workdir)}")
         else:
-            data = json.load(open(tl_path, encoding="utf-8"))
+            data = _tl.load_timeline(args.workdir)
         if args.export:
             json.dump(data, open(args.export, "w", encoding="utf-8"),
                       ensure_ascii=False, indent=2)
             print(f"[timeline] 已导出: {args.export}")
-        if args.do_print or not args.export:
-            for s in sorted(data.get("shots", []), key=lambda x: x.get("order", 0)):
-                flag = "✔" if s.get("enabled") else "✘"
+        if args.concat:
+            try:
+                cmd = _tl.export_concat(data, args.workdir, args.concat)
+                print(f"[timeline] 拼接命令（已写出 {args.concat}.concat.txt）：\n  {cmd}")
+            except Exception as e:
+                print(f"[timeline] 拼接导出失败: {e}")
+                sys.exit(1)
+        if args.do_print or not (args.export or args.concat):
+            for s in _tl.ordered_shots(data):
+                flag = "+" if s.get("enabled") else "-"
                 print(f"  [{flag}] #{s.get('order')} {s['key']}"
                       f"  ({s.get('in_point')}-{s.get('out_point')})")
     elif args.cmd in ("publish", "publish-concept"):
