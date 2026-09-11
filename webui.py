@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import yaml
 import requests
@@ -47,6 +48,9 @@ MEDIA = {
 
 # WebUI 编辑分镜/解说后的保存位置；生成脚本检测到它就覆盖内置分镜
 STORYBOARD_PATH = os.path.join(WORKDIR, "storyboard.json")
+
+# 时间轴编辑（WebUI 时间轴页 + cli timeline 共用）：镜头顺序/启停/裁剪
+TIMELINE_PATH = os.path.join(WORKDIR, "timeline.json")
 
 # 三集剧集标题（series_script.json 缺失时的兜底）
 EP_TITLES = {1: "进城", 2: "觉醒", 3: "对抗"}
@@ -202,6 +206,69 @@ def index():
     html_path = os.path.join(HERE, "webui", "pipeline.html")
     with open(html_path, "r", encoding="utf-8") as f:
         return Response(f.read(), mimetype="text/html")
+
+
+# ---------------- 时间轴 ----------------
+@app.route("/timeline")
+def timeline_page():
+    html_path = os.path.join(HERE, "webui", "timeline.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        return Response(f.read(), mimetype="text/html")
+
+
+def _build_timeline():
+    """从 series_manifest.json 镜头清单构造初始时间轴（全部启用、未裁剪）。
+
+    没有 manifest 时回退到 storyboard.json 的镜头数；都没有则空时间轴。
+    """
+    man_path = os.path.join(WORKDIR, "series_manifest.json")
+    keys = []
+    if os.path.exists(man_path):
+        try:
+            keys = list(json.load(open(man_path, encoding="utf-8")).keys())
+        except Exception:
+            keys = []
+    if not keys:
+        keys = [f"shot{i + 1}" for i in range(len(load_storyboard().get("shots", [])))]
+    shots = [{"key": k, "label": k, "enabled": True,
+              "in_point": None, "out_point": None, "order": i}
+             for i, k in enumerate(keys)]
+    return {"shots": shots, "updated": None}
+
+
+@app.route("/api/timeline", methods=["GET"])
+def api_timeline_get():
+    if os.path.exists(TIMELINE_PATH):
+        try:
+            return json_resp(json.load(open(TIMELINE_PATH, encoding="utf-8")))
+        except Exception as e:  # noqa: BLE001
+            return json_resp({"error": str(e)}, status=500)
+    return json_resp(_build_timeline())
+
+
+@app.route("/api/timeline", methods=["POST"])
+def api_timeline_post():
+    body = request.get_json(force=True, silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("shots"), list):
+        return json_resp({"ok": False, "error": "body 需含 shots 数组"}, status=400)
+    body["updated"] = int(time.time())
+    try:
+        with open(TIMELINE_PATH, "w", encoding="utf-8") as f:
+            json.dump(body, f, ensure_ascii=False, indent=2)
+        return json_resp({"ok": True, "shots": len(body["shots"])})
+    except Exception as e:  # noqa: BLE001
+        return json_resp({"ok": False, "error": str(e)}, status=500)
+
+
+@app.route("/api/timeline/build", methods=["POST"])
+def api_timeline_build():
+    try:
+        data = _build_timeline()
+        with open(TIMELINE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return json_resp({"ok": True, "shots": len(data["shots"])})
+    except Exception as e:  # noqa: BLE001
+        return json_resp({"ok": False, "error": str(e)}, status=500)
 
 
 # ---------------- 概览 / 配置 ----------------

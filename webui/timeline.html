@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>时间轴 · AI 电影 Agent</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
+  header { padding: 14px 20px; background: #171a21; border-bottom: 1px solid #2a2f3a; display: flex; gap: 12px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0; }
+  .bar { padding: 10px 20px; display: flex; gap: 8px; flex-wrap: wrap; background: #12151b; }
+  button { background: #2b6cff; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+  button.sec { background: #2a2f3a; }
+  button:active { transform: translateY(1px); }
+  .wrap { padding: 16px 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #232831; }
+  th { color: #8b93a3; font-weight: 600; }
+  input[type=text], input[type=number] { background: #0c0e12; color: #e6e6e6; border: 1px solid #2a2f3a; border-radius: 4px; padding: 4px 6px; width: 96%; box-sizing: border-box; }
+  .row-enabled { color: #4ade80; }
+  .row-disabled { color: #f87171; }
+  .status { margin-left: auto; font-size: 12px; color: #8b93a3; }
+  .nav { display: flex; gap: 4px; }
+  .nav button { padding: 3px 8px; font-size: 12px; }
+  .empty { color: #8b93a3; padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎞 时间轴</h1>
+  <span class="status" id="status">加载中…</span>
+</header>
+<div class="bar">
+  <button id="build">从 manifest 重建</button>
+  <button class="sec" id="save">保存</button>
+  <button class="sec" id="add">新增镜头</button>
+  <button class="sec" id="export">导出 JSON</button>
+  <button class="sec" id="reload">刷新</button>
+</div>
+<div class="wrap">
+  <table>
+    <thead>
+      <tr><th>#</th><th>镜头 key</th><th>标签</th><th>启用</th><th>入点(s)</th><th>出点(s)</th><th>操作</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" style="display:none">暂无镜头，点「从 manifest 重建」。</div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let TL = { shots: [] };
+
+async function load() {
+  const r = await fetch("/api/timeline");
+  TL = await r.json();
+  if (!TL.shots) TL.shots = [];
+  render();
+}
+function render() {
+  const tb = $("rows");
+  tb.innerHTML = "";
+  const shots = [...TL.shots].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  $("empty").style.display = shots.length ? "none" : "block";
+  shots.forEach((s, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td><input type="text" value="${esc(s.key ?? "")}" data-f="key"></td>
+      <td><input type="text" value="${esc(s.label ?? "")}" data-f="label"></td>
+      <td class="${s.enabled ? "row-enabled" : "row-disabled"}">
+        <input type="checkbox" data-f="enabled" ${s.enabled ? "checked" : ""}></td>
+      <td><input type="number" value="${s.in_point ?? ""}" data-f="in_point" placeholder="0"></td>
+      <td><input type="number" value="${s.out_point ?? ""}" data-f="out_point" placeholder="结尾"></td>
+      <td><div class="nav">
+        <button data-act="up">↑</button><button data-act="down">↓</button>
+        <button data-act="del">删</button></div></td>`;
+    const idx = TL.shots.indexOf(s);
+    tr.querySelectorAll("[data-f]").forEach((el) => {
+      el.addEventListener("change", () => {
+        const f = el.dataset.f;
+        TL.shots[idx][f] = el.type === "checkbox" ? el.checked
+          : (el.type === "number" ? (el.value === "" ? null : Number(el.value)) : el.value);
+        renumber();
+      });
+    });
+    tr.querySelectorAll("[data-act]").forEach((el) => {
+      el.addEventListener("click", () => act(el.dataset.act, idx));
+    });
+    tb.appendChild(tr);
+  });
+  $("status").textContent = `${TL.shots.length} 个镜头` +
+    (TL.updated ? ` · 更新于 ${new Date(TL.updated * 1000).toLocaleString()}` : "");
+}
+function renumber() {
+  [...TL.shots].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .forEach((s, i) => { s.order = i; });
+}
+function act(a, idx) {
+  if (a === "del") { TL.shots.splice(idx, 1); renumber(); render(); return; }
+  const sorted = [...TL.shots].sort((x, y) => (x.order ?? 0) - (y.order ?? 0));
+  const pos = sorted.indexOf(TL.shots[idx]);
+  if (a === "up" && pos > 0) [sorted[pos - 1], sorted[pos]] = [sorted[pos], sorted[pos - 1]];
+  if (a === "down" && pos < sorted.length - 1) [sorted[pos + 1], sorted[pos]] = [sorted[pos], sorted[pos + 1]];
+  renumber(); render();
+}
+function esc(s) { return String(s).replace(/[&"<>`]/g, (c) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;", "`": "&#96;" }[c])); }
+
+$("build").onclick = async () => {
+  const r = await fetch("/api/timeline/build", { method: "POST" });
+  const j = await r.json();
+  $("status").textContent = j.ok ? `已重建 ${j.shots} 个镜头` : `失败: ${j.error}`;
+  load();
+};
+$("save").onclick = async () => {
+  renumber();
+  const r = await fetch("/api/timeline", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(TL) });
+  const j = await r.json();
+  $("status").textContent = j.ok ? "已保存" : `保存失败: ${j.error}`;
+};
+$("add").onclick = () => { TL.shots.push({ key: "shot" + (TL.shots.length + 1), label: "", enabled: true, in_point: null, out_point: null, order: TL.shots.length }); render(); };
+$("export").onclick = () => {
+  const blob = new Blob([JSON.stringify(TL, null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = "timeline.json"; a.click();
+};
+$("reload").onclick = load;
+load();
+</script>
+</body>
+</html>

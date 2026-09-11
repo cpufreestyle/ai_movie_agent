@@ -150,6 +150,49 @@ def main():
     p_ab.add_argument("--grid", default=None, metavar="OUT.png",
                       help="把聚焦镜的变体视频拼成联系表(contact sheet)")
 
+    p_pf = sub.add_parser("preflight", help="投稿前体检：B 站元数据/封面/时长静态校验")
+    p_pf.add_argument("--video", default=None)
+    p_pf.add_argument("--title", default=None)
+    p_pf.add_argument("--tags", default=None, help="逗号分隔标签")
+    p_pf.add_argument("--cover", default=None)
+    p_pf.add_argument("--dynamic", default=None)
+    p_pf.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
+    p_pf.add_argument("--json", action="store_true", help="输出 JSON")
+
+    p_st = sub.add_parser("style", help="风格预设库：列出/查看/应用视觉风格预设")
+    p_st.add_argument("--list", action="store_true", help="列出全部预设")
+    p_st.add_argument("--show", default=None, metavar="NAME", help="查看某预设")
+    p_st.add_argument("--apply", default=None, metavar="NAME", help="应用某预设")
+    p_st.add_argument("--base", default="", help="基础提示词前缀")
+    p_st.add_argument("--out", default=None, help="把拼接后提示词写到文件")
+
+    p_mx = sub.add_parser("mix", help="自动配乐 + 旁白 ducking（需 ffmpeg）")
+    p_mx.add_argument("--video", required=True)
+    p_mx.add_argument("--bgm-dir", default=os.path.join(HERE, "assets", "bgm"))
+    p_mx.add_argument("--narration", default=None, help="旁白音轨（做侧链避让）")
+    p_mx.add_argument("--out", required=True)
+    p_mx.add_argument("--bgm-gain", type=int, default=-20)
+    p_mx.add_argument("--mood", default=None, help="按文件名含该词筛选 BGM")
+
+    p_tts = sub.add_parser("tts", help="本地 TTS 稳定音色：合成旁白")
+    p_tts.add_argument("--text", required=True)
+    p_tts.add_argument("--out", required=True)
+    p_tts.add_argument("--voice", default=None)
+    p_tts.add_argument("--backend", default=None, help="piper/edge-tts/coqui（缺省自动选）")
+    p_tts.add_argument("--save-voice", action="store_true", help="把本次 voice/backend 存为默认音色")
+
+    p_cc = sub.add_parser("charcard", help="角色卡自动生成（series_bible 驱动）")
+    p_cc.add_argument("--bible", default=None, help="bible/state.json 路径（缺省读 outputs/state.json）")
+    p_cc.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
+    p_cc.add_argument("--style", default="anime")
+    p_cc.add_argument("--engine", default=None, help="skyreels/ltx/mmh3（缺省只出 JSON）")
+
+    p_tl = sub.add_parser("timeline", help="WebUI 时间轴：查看/重建/导出镜头时间轴")
+    p_tl.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
+    p_tl.add_argument("--build", action="store_true", help="从 series_manifest 重建时间轴")
+    p_tl.add_argument("--export", default=None, metavar="OUT.json")
+    p_tl.add_argument("--print", dest="do_print", action="store_true", help="打印当前时间轴")
+
     args = ap.parse_args()
     config = load_config(args.config)
 
@@ -276,6 +319,133 @@ def main():
             else:
                 print(ab_mod.render_markdown(rows) if args.markdown
                       else ab_mod.render_single(rows))
+    elif args.cmd == "preflight":
+        from agent import preflight as pf
+        res = pf.check_from_outputs(args.workdir, video=args.video,
+                                    title=args.title, tags=args.tags,
+                                    cover=args.cover, dynamic=args.dynamic)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            print(f"投稿前体检：{'通过' if res['ok'] else '未通过'}")
+            for e in res["errors"]:
+                print(f"  [错误] {e}")
+            for w in res["warnings"]:
+                print(f"  [提醒] {w}")
+            if not res["errors"] and not res["warnings"]:
+                print("  无问题。")
+        sys.exit(0 if res["ok"] else 1)
+    elif args.cmd == "style":
+        from agent import style_presets as sp
+        if args.list:
+            for name in sp.list_presets():
+                print(f"  {name:12s} {sp.get(name)['label']}")
+            print(f"\n共 {len(sp.list_presets())} 个预设")
+        elif args.show:
+            p = sp.get(args.show)
+            if not p:
+                print(f"[style] 未知预设: {args.show}")
+                sys.exit(1)
+            print(f"== {args.show} · {p['label']} ==")
+            print(f"prompt:   {p['prompt']}")
+            print(f"negative: {p['negative']}")
+            print(f"notes:    {p['notes']}")
+        elif args.apply:
+            r = sp.apply(args.apply, base=args.base, out=args.out)
+            print(f"== 应用 {args.apply} · {r['label']} ==")
+            if args.out:
+                print(f"  已写出: {args.out}")
+            print(f"prompt:   {r['prompt']}")
+            print(f"negative: {r['negative']}")
+        else:
+            print("[style] 用 --list / --show NAME / --apply NAME [--base ...]")
+    elif args.cmd == "mix":
+        from agent import audio_mix as am
+        if not am.is_ready():
+            print("[mix] 未找到 ffmpeg，请先安装 ffmpeg。")
+            sys.exit(1)
+        bgm = am.select_bgm(args.bgm_dir, mood=args.mood)
+        if not bgm:
+            print(f"[mix] 未找到 BGM（{args.bgm_dir} 下无音频）")
+            sys.exit(1)
+        print(f"[mix] 自动选曲: {os.path.basename(bgm)}")
+        res = am.duck_mix(args.video, bgm, args.out,
+                          narration=args.narration, bgm_gain=args.bgm_gain)
+        if res.get("ok"):
+            print(f"[mix] 已混音: {res['out']}")
+        else:
+            print(f"[mix] 失败: {res.get('error')}")
+            sys.exit(1)
+    elif args.cmd == "tts":
+        from agent import tts as tts_mod
+        res = tts_mod.tts(args.text, args.out, voice=args.voice,
+                          backend=args.backend)
+        if res.get("ok"):
+            if args.save_voice:
+                tts_mod.save_voice_config(args.voice or "", res["backend"])
+                print(f"[tts] 已存默认音色: {res['backend']}")
+            print(f"[tts] 已合成: {res['out']}（{res['backend']}）")
+        else:
+            print(f"[tts] 失败: {res.get('error')}")
+            sys.exit(1)
+    elif args.cmd == "charcard":
+        from agent import character_card as cc
+        bible = {}
+        bp = args.bible or os.path.join(args.workdir, "state.json")
+        if os.path.exists(bp):
+            try:
+                raw = json.load(open(bp, encoding="utf-8"))
+                bible = raw.get("bible", raw) if isinstance(raw, dict) else {}
+            except Exception:
+                bible = {}
+        engine = None
+        if args.engine:
+            try:
+                if args.engine == "ltx":
+                    from agent.ltx_engine import LTXEngine
+                    engine = LTXEngine(config, agent_root=HERE)
+                elif args.engine == "mmh3":
+                    from agent.mmh3_engine import MMH3Engine
+                    engine = MMH3Engine(config, agent_root=HERE)
+                else:
+                    from agent.agent import MovieAgent
+                    engine = MovieAgent(config, args.workdir).engine
+            except Exception as e:
+                print(f"[charcard] 引擎初始化失败（仅出 JSON）: {e}")
+                engine = None
+        res = cc.generate(bible, args.workdir, style=args.style, engine=engine)
+        print(f"[charcard] 角色卡 {len(res['cards'])} 张 → {res['manifest']}")
+        for c in res["cards"]:
+            print(f"  · {c['name']}（{c['role'] or '—'}）"
+                  f"{' ✅肖像' if c['ref_image'] else ''}")
+    elif args.cmd == "timeline":
+        tl_path = os.path.join(args.workdir, "timeline.json")
+        if args.build or not os.path.exists(tl_path):
+            man = {}
+            mp = os.path.join(args.workdir, "series_manifest.json")
+            if os.path.exists(mp):
+                try:
+                    man = json.load(open(mp, encoding="utf-8"))
+                except Exception:
+                    man = {}
+            shots = [{"key": k, "label": k, "enabled": True,
+                      "in_point": None, "out_point": None, "order": i}
+                     for i, k in enumerate(man.keys())]
+            data = {"shots": shots, "updated": None}
+            with open(tl_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"[timeline] 已重建 {len(shots)} 个镜头 → {tl_path}")
+        else:
+            data = json.load(open(tl_path, encoding="utf-8"))
+        if args.export:
+            json.dump(data, open(args.export, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=2)
+            print(f"[timeline] 已导出: {args.export}")
+        if args.do_print or not args.export:
+            for s in sorted(data.get("shots", []), key=lambda x: x.get("order", 0)):
+                flag = "✔" if s.get("enabled") else "✘"
+                print(f"  [{flag}] #{s.get('order')} {s['key']}"
+                      f"  ({s.get('in_point')}-{s.get('out_point')})")
     elif args.cmd in ("publish", "publish-concept"):
         ensure(config.get("publish", {}).get("enabled", False), "未启用发布(publish.enabled)")
         agent = MovieAgent(config, args.workdir)
