@@ -43,6 +43,11 @@ if _ROOT not in sys.path:
 from tools.blender_mcp import BlenderMCP
 from agent.llmutil import make_client, chat, extract_json, log
 
+try:                       # 统一 ffmpeg 定位（PATH 上通常没有，靠 imageio-ffmpeg 自带）
+    from comfy_paths import ffmpeg_exe as _ffmpeg_exe
+except Exception:          # 单独拷走 blocking.py 时也能降级
+    _ffmpeg_exe = None
+
 
 class BlockingError(RuntimeError):
     """白模渲染失败（已重试仍无有效产物）。"""
@@ -99,11 +104,15 @@ class BlockingGenerator:
 
     @staticmethod
     def _ffmpeg() -> str | None:
-        """定位 ffmpeg：优先 PATH，其次 imageio-ffmpeg 自带二进制。
+        """定位 ffmpeg：统一走 comfy_paths（FFMPEG env > PATH > imageio-ffmpeg 自带）。
 
         本机 ffmpeg **不在 PATH**（只有 `imageio-ffmpeg` 里带一份）。若只查 PATH，
         灰模动画合成会静默跳过 → `use_as_ref_video` 永远不可用。
         """
+        if _ffmpeg_exe:
+            p = _ffmpeg_exe()
+            if p:
+                return p
         p = shutil.which("ffmpeg")
         if p:
             return p

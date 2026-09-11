@@ -712,6 +712,48 @@ def test_ffmpeg_and_probe_duration_fallbacks():
     assert abs(editor.Editor().probe_duration(p) - 1.0) < 0.2
 
 
+def test_agent_passes_blocking_assets_to_engine():
+    """开启 blender.use_as_ref_* 时，generate_one_scene 应把白模控制图/运镜传给引擎。"""
+    from agent.agent import MovieAgent
+
+    cfg = {**CFG, "blender": {"enabled": False, "use_as_ref_images": True,
+                              "use_as_ref_video": True}}
+    work = tempfile.mkdtemp()
+    agent = MovieAgent(cfg, work)
+
+    class _Eng:
+        two_pass = False
+
+        def is_ready(self):
+            return True
+
+        def generate(self, prompt, out_path, prev_clip=None, seed=None, image=None,
+                     two_pass=None, ref_images=None, ref_video=None):
+            self.got = {"ref_images": ref_images, "ref_video": ref_video}
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("stub")
+            return out_path
+
+    eng = _Eng()
+    agent.engine = eng
+    ctrl = {}
+    for k in ("depth", "normal", "line"):
+        p = os.path.join(work, k + ".png")
+        open(p, "w", encoding="utf-8").close()
+        ctrl[k] = p
+    anim = os.path.join(work, "anim.mp4")
+    open(anim, "w", encoding="utf-8").close()
+    agent.blocking_control = [ctrl]
+    agent.blocking_anim = [anim]
+    agent.image_prompts = ["一个角色的中景"]
+    agent.keyframe_images = [None]
+
+    agent.generate_one_scene()
+
+    assert eng.got["ref_images"] == [ctrl["depth"], ctrl["normal"], ctrl["line"]]
+    assert eng.got["ref_video"] == anim
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

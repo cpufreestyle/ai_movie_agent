@@ -82,3 +82,25 @@ def ensure_repo_on_path() -> None:
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
+
+
+def ffmpeg_exe(explicit: str = "") -> str:
+    """定位 ffmpeg 可执行文件；找不到返回空串。
+
+    本机实测：ffmpeg **不在 PATH 上**（只有 `imageio-ffmpeg` 包内自带一份二进制，
+    `agent/editor.py` 里也留了同样的踩坑注释）。只查 PATH 会时好时坏 —— 表现为
+    灰模动画 mp4 合成"偶发静默跳过"。故按下列顺序找：
+        显式参数 > FFMPEG / FFMPEG_EXE 环境变量 > PATH > imageio-ffmpeg 自带
+    """
+    import shutil as _shutil
+    for c in (explicit, os.environ.get("FFMPEG") or "", os.environ.get("FFMPEG_EXE") or ""):
+        if c and os.path.exists(c):
+            return os.path.abspath(c)
+    p = _shutil.which("ffmpeg")
+    if p:
+        return p
+    try:
+        import imageio_ffmpeg  # type: ignore
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return ""

@@ -281,9 +281,9 @@ blender:
   #   use_as_ref_images: 把白模控制图(depth/normal/line)作参考图(ref_images)喂引擎
   #   use_as_ref_video:  把白模灰模动画作参考视频(ref_video)喂引擎（锁走位/运镜）
   #   注意：H3 里 image(首帧) 与参考媒体同时给会走 Hybrid 任务，属正常；单独 image 走 I2VA。
-  use_as_i2v_start: false
-  use_as_ref_images: false
-  use_as_ref_video: false
+  use_as_i2v_start: false      # 首帧用白模 previs 图（画面会变成白模，谨慎开启）
+  use_as_ref_images: true      # 【已开启】控制图 depth/normal/line -> ref_images
+  use_as_ref_video: true       # 【已开启】灰模运镜 mp4 -> ref_video（锁走位/运镜）
   # ---- 渲染性能 / 健壮性（本次优化新增）----
   engine: auto            # auto=优先 EEVEE(GPU)失败自动降级 CYCLES / eevee / cycles（cycles 最稳但最慢）
   samples: 24             # 采样数，白模可降到 8~24，越低越快
