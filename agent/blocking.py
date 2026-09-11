@@ -320,6 +320,11 @@ class BlockingGenerator:
             log("  [blocking] 未找到 ffmpeg，跳过灰模动画合成（ref_video 不可用）")
             return None
         fps = int(((self.config.get("engine", {}) or {}).get("fps", 24)) or 24)
+        dur = len(frames) / float(fps)
+        if dur < 2.0:
+            log(f"  [blocking] 灰模动画仅 {dur:.2f}s，低于 H3 参考视频的官方下限 2s；"
+                f"若要用 use_as_ref_video，请把 blender.anim_frames 提到 ≥{int(2 * fps) + 1}"
+                f"（当前 {len(frames)} 帧 @{fps}fps）")
         try:
             subprocess.run([ff, "-y", "-loglevel", "error", "-framerate", str(fps),
                             "-i", os.path.join(anim_dir, "blocking_%04d.png"),

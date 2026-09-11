@@ -27,7 +27,7 @@ def _engine_name(eng) -> str:
 
 
 def collect(eng, *, prompt: str, seed: int, attempt: int,
-            image=None, ref_images=None, style_anchor=None,
+            image=None, ref_images=None, ref_video=None, style_anchor=None,
             qa_policy: dict | None = None) -> dict:
     """从引擎与调用上下文收集本次生成的全量参数。"""
     def _attr(name, default=None):
@@ -47,6 +47,8 @@ def collect(eng, *, prompt: str, seed: int, attempt: int,
         "attempt": attempt,
         "image": os.path.basename(image) if image else None,
         "ref_images": [os.path.basename(r) for r in (ref_images or [])],
+        # 白模走位参考视频：原先漏记，导致走 ref_video 时"参考素材可复现"不完整
+        "ref_video": os.path.basename(ref_video) if ref_video else None,
         "style_anchor": os.path.basename(style_anchor) if style_anchor else None,
         "prompt": prompt,
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),

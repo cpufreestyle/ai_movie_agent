@@ -270,7 +270,10 @@ blender:
   port: 9876
   width: 1280
   height: 720
-  anim_frames: 24
+  # 灰模动画帧数。@24fps 换算：24帧=1.0s、48帧=2.0s。
+  # H3 的 reference_video_policy 是官方 2~15s，低于 2s 不满足 ref_video 要求，
+  # 故默认 48（2.0s）；开启 use_as_ref_video 时不要低于 48。
+  anim_frames: 48
   use_llm_parse: false
   # ---- 白模 -> 视频 流程接线：把白模资产喂给视频引擎（原先完全没接，白模只用于概念片配图）----
   #   use_as_i2v_start: 用白模 previs 图作视频首帧(I2V)，锁构图/站位/机位
