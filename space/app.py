@@ -102,27 +102,38 @@ def run_agent(topic: str, max_scenes: int):
     style = project.get("style", "")
     log_lines = []
 
-    # 1) 尝试真实 Agent 流水线
-    try:
-        cmd = [
-            sys.executable, "cli.py", "pipeline",
-            "--topic", topic or project.get("theme", ""),
-            "--max-scenes", str(int(max_scenes)),
-            "--no-research",
-        ]
-        proc = subprocess.run(
-            cmd, cwd=HERE, capture_output=True, text=True, timeout=600,
+    # 1) 真实 Agent 流水线：仅在显式配置视频引擎时尝试。
+    #    创空间默认是轻量 CPU 环境（无 torch / 无引擎），cli.py 会缺依赖且最多
+    #    卡满 600s 才失败——直接尝试既看不到产出也拖慢体验，故改为显式开关。
+    if os.environ.get("COMFYUI_API"):
+        log_lines.append(
+            "[模式] 检测到 COMFYUI_API，尝试真实 Agent 流水线（A→H，最长 10 分钟）。"
         )
-        log_lines.append(proc.stdout)
-        log_lines.append(proc.stderr)
-        if proc.returncode == 0:
-            bible, beats = _read_real_outputs()
-            if beats:
-                return "\n".join(log_lines), _beats_to_md(
-                    bible or json.dumps(project, ensure_ascii=False, indent=2), beats
-                ) + "\n\n> 由真实 Agent 流水线生成（含视频导演阶段，需 COMFYUI_API 可达）。"
-    except Exception as e:  # 超时 / 导入失败 / 无 ComfyUI 等
-        log_lines.append(f"[降级] 真实流水线不可用：{e}")
+        try:
+            cmd = [
+                sys.executable, "cli.py", "pipeline",
+                "--topic", topic or project.get("theme", ""),
+                "--max-scenes", str(int(max_scenes)),
+                "--no-research",
+            ]
+            proc = subprocess.run(
+                cmd, cwd=HERE, capture_output=True, text=True, timeout=600,
+            )
+            log_lines.append(proc.stdout)
+            log_lines.append(proc.stderr)
+            if proc.returncode == 0:
+                bible, beats = _read_real_outputs()
+                if beats:
+                    return "\n".join(log_lines), _beats_to_md(
+                        bible or json.dumps(project, ensure_ascii=False, indent=2), beats
+                    ) + "\n\n> 由真实 Agent 流水线生成（含视频导演阶段，需 COMFYUI_API 可达）。"
+                log_lines.append("[降级] 流水线未产出分镜文件，回退内置模板。")
+        except Exception as e:  # 超时 / 导入失败 / 无 ComfyUI 等
+            log_lines.append(f"[降级] 真实流水线不可用：{e}")
+    else:
+        log_lines.append(
+            "[模式] 未配置 COMFYUI_API，直接使用内置模板企划 Demo（纯 CPU，秒级返回）。"
+        )
 
     # 2) 降级：内置模板企划 Demo（纯 CPU，必然可跑）
     bible, beats = _template_plan(topic or project.get("theme", ""), style, int(max_scenes))
