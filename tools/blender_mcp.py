@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import socket
 import sys
+import time
 from typing import Optional
 
 
@@ -42,42 +43,53 @@ class BlenderMCP:
         健壮性改进（原实现只按'出现换行'判断，遇到无换行/粘包/分片会丢或挂）：
           - 每收一段就尝试整体解析，能解析即返回（兼容无换行的 fork）；
           - recv 显式超时，避免对端半开导致无限阻塞；
-          - 连接关闭后仍做最后一次解析兜底。
+          - 连接关闭后仍做最后一次解析兜底；
+          - 连接/超时类瞬时故障自动重连一次（0.5s 退避），降低偶发掉线误判。
         """
-        try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout) as s:
-                s.settimeout(self.timeout)
-                s.sendall((json.dumps(msg) + "\n").encode("utf-8"))
-                buf = b""
-                while True:
-                    text = buf.decode("utf-8", "ignore").strip()
-                    if text:
+        payload = (json.dumps(msg) + "\n").encode("utf-8")
+        for attempt in range(2):
+            try:
+                with socket.create_connection((self.host, self.port),
+                                               timeout=self.timeout) as s:
+                    s.settimeout(self.timeout)
+                    s.sendall(payload)
+                    buf = b""
+                    while True:
+                        text = buf.decode("utf-8", "ignore").strip()
+                        if text:
+                            try:
+                                return json.loads(text)
+                            except ValueError:
+                                pass
                         try:
-                            return json.loads(text)
-                        except ValueError:
-                            pass
-                    try:
-                        chunk = s.recv(65536)
-                    except socket.timeout:
-                        break
-                    if not chunk:
-                        break
-                    buf += chunk
-                text = buf.decode("utf-8", "ignore").strip()
-                if not text:
-                    return None
-                try:
-                    return json.loads(text)
-                except ValueError:
-                    try:
-                        return json.loads(text.splitlines()[0])
-                    except ValueError as e:
-                        print(f"  [blender-mcp] 响应解析失败: {e}; raw={text[:200]}",
-                              file=sys.stderr)
+                            chunk = s.recv(65536)
+                        except socket.timeout:
+                            break
+                        if not chunk:
+                            break
+                        buf += chunk
+                    text = buf.decode("utf-8", "ignore").strip()
+                    if not text:
                         return None
-        except Exception as e:
-            print(f"  [blender-mcp] 通信失败: {e}", file=sys.stderr)
-            return None
+                    try:
+                        return json.loads(text)
+                    except ValueError:
+                        try:
+                            return json.loads(text.splitlines()[0])
+                        except ValueError as e:
+                            print(f"  [blender-mcp] 响应解析失败: {e}; raw={text[:200]}",
+                                  file=sys.stderr)
+                            return None
+            except (OSError, socket.timeout) as e:
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                print(f"  [blender-mcp] 通信失败: {e}", file=sys.stderr)
+                return None
+            except Exception as e:
+                print(f"  [blender-mcp] 通信失败: {e}", file=sys.stderr)
+                return None
+        return None
 
     def exec_code_ex(self, code: str) -> dict:
         """执行 bpy 代码，返回结构化结果 {"ok", "stdout", "error"}。

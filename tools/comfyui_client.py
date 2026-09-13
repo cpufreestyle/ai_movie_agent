@@ -97,6 +97,7 @@ class ComfyUIClient:
         """api: ComfyUI 服务地址，如 http://127.0.0.1:8188。"""
         self.api = (api or "").rstrip("/")
         self.timeout = int(timeout)
+        self.last_prompt_id = None   # run_workflow 提交的任务 id，供 cancel() 使用
 
     # ---------- HTTP 基础（GET 带有限重试退避）----------
     def _get(self, path: str, *, timeout: int, retries: int = 2, **kw) -> requests.Response:
@@ -117,14 +118,40 @@ class ComfyUIClient:
             time.sleep(_RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)])
         raise ComfyUIError(f"请求 {url} 多次重试仍失败: {last}")
 
+    def _post(self, path: str, *, json=None, retries: int = 2,
+              timeout: int = 30) -> requests.Response:
+        """POST 带有限重试退避（与 _get 同策略），供 cancel 等控制类请求复用。"""
+        url = self.api + path
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                r = _SESSION.post(url, json=json, timeout=timeout)
+                if r.status_code in _RETRY_STATUS and attempt < retries:
+                    last = ComfyUIError(f"HTTP {r.status_code}")
+                else:
+                    r.raise_for_status()
+                    return r
+            except requests.RequestException as e:
+                last = e
+                if attempt >= retries:
+                    raise ComfyUIError(f"请求 {url} 失败: {e}") from e
+            time.sleep(_RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)])
+        raise ComfyUIError(f"请求 {url} 多次重试仍失败: {last}")
+
     # ---------- 就绪探测 ----------
     def is_ready(self) -> bool:
         if not self.api:
             return False
-        try:
-            return _SESSION.get(self.api + "/", timeout=5).status_code == 200
-        except Exception:
-            return False
+        # 两次探测 + 短退避：避免 ComfyUI 瞬时繁忙/刚启动时的假"未就绪"
+        # （否则上层 is_ready() 直接 False，引擎误报"ComfyUI 未就绪"退出）。
+        for _ in range(2):
+            try:
+                if _SESSION.get(self.api + "/", timeout=5).status_code == 200:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return False
 
     # ---------- 提交 / 轮询 ----------
     def queue_prompt(self, workflow: dict) -> str | None:
@@ -152,22 +179,80 @@ class ComfyUIClient:
         r = self._get("/history/" + prompt_id, timeout=30)
         return r.json().get(prompt_id, {})
 
+    def _queue_phase(self, prompt_id: str) -> tuple[str, int]:
+        """返回 (phase, queue_pos)：phase ∈ {queued, running, done}。
+
+        done 表示已不在队列（可能已完成或已被取消）；真实完成由 wait() 的
+        /history 判定。这里仅用于进度回调告知"还在排队 / 执行中"。
+        """
+        try:
+            q = self._get("/queue", timeout=15).json()
+        except Exception:
+            return ("running", 0)
+        running = [x[1] if isinstance(x, (list, tuple)) and len(x) > 1 else x
+                   for x in (q.get("queue_running") or [])]
+        if prompt_id in running:
+            return ("running", 0)
+        for i, x in enumerate(q.get("queue_pending") or []):
+            pid = x[1] if isinstance(x, (list, tuple)) and len(x) > 1 else x
+            if pid == prompt_id:
+                return ("queued", i + 1)
+        return ("done", 0)
+
+    def cancel(self, prompt_id: str | None = None) -> bool:
+        """取消一个任务（best-effort，不抛异常，返回是否成功发起取消）。
+
+        - 还在排队/已不在队列：POST /queue {"delete":[pid]} 移出队列（已完成的删除无害）；
+        - 正在执行：POST /interrupt 中断"当前正在执行的"任务（ComfyUI 全局，
+          无法只断某个 pid，故仅当本任务确实在跑时才调用，避免误伤其它任务）。
+        prompt_id 缺省时用 self.last_prompt_id（run_workflow 提交的任务）。
+        """
+        pid = prompt_id or self.last_prompt_id
+        if not pid:
+            return False
+        ok = True
+        try:
+            # 无论排队中还是已完成，尝试从队列删除都安全
+            self._post("/queue", json={"delete": [pid]}, retries=1, timeout=15)
+        except Exception:
+            ok = False
+        if self._queue_phase(pid)[0] == "running":
+            try:
+                self._post("/interrupt", retries=1, timeout=15)
+            except Exception:
+                ok = False
+        return ok
+
     def wait(self, prompt_id: str, timeout: int | None = None,
-             *, raise_on_timeout: bool = False, poll: float = 2.0) -> dict | None:
+             *, raise_on_timeout: bool = False, poll: float = 2.0,
+             on_progress=None) -> dict | None:
         """轮询直到该 prompt 产出 / 报错 / 超时。
 
         返回 history 中该 prompt 的记录；超时按 raise_on_timeout 决定是
         抛 ComfyUITimeout 还是返回 None（默认 None，保持既有调用方行为）。
         执行报错时抛 ComfyUIError，消息里带节点号与异常类型。
+
+        on_progress: 可选回调，签名 (info: dict)，在阶段切换时收到
+            {"prompt_id", "phase": "queued"|"running"|"done", "queue_pos": int}，
+            用于上层打印进度（如 G 阶段 UI 进度条）。无实时百分比时至少能区分
+            "排队中 / 执行中 / 完成"。
         """
         timeout = timeout or self.timeout
         deadline = time.time() + timeout
+        last_phase: str | None = None
         while time.time() < deadline:
             h = self.get_history(prompt_id)
             if h.get("status", {}).get("status_str") == "error":
                 raise ComfyUIError(_fmt_status_error(h))
             if h.get("outputs"):
+                if on_progress is not None:
+                    on_progress({"prompt_id": prompt_id, "phase": "done", "queue_pos": 0})
                 return h
+            if on_progress is not None:
+                phase, pos = self._queue_phase(prompt_id)
+                if phase != last_phase:
+                    on_progress({"prompt_id": prompt_id, "phase": phase, "queue_pos": pos})
+                    last_phase = phase
             time.sleep(poll)
         if raise_on_timeout:
             raise ComfyUITimeout(
@@ -186,17 +271,25 @@ class ComfyUIClient:
         return r.json()
 
     def download_file(self, meta: dict, dest_dir: str) -> str | None:
-        """根据输出元数据下载单个文件到 dest_dir，返回本地路径。"""
+        """根据输出元数据下载单个文件到 dest_dir，返回本地路径。
+
+        流式分块写入（1MB/块）：视频文件较大，整段读进内存既占 RAM 又易在
+        弱网下因一次性接收超时被截断；分块写更省内存也更稳。
+        """
         params = {
             "filename": meta.get("filename") or meta.get("name"),
             "subfolder": meta.get("subfolder", ""),
             "type": meta.get("type", "output"),
         }
-        r = self._get("/view", timeout=120, params=params)
+        if not params["filename"]:
+            return None
+        r = self._get("/view", timeout=120, params=params, stream=True)
         os.makedirs(dest_dir, exist_ok=True)
         path = os.path.join(dest_dir, params["filename"])
         with open(path, "wb") as f:
-            f.write(r.content)
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    f.write(chunk)
         return path
 
     def download_outputs(self, history_item: dict, dest_dir: str) -> list[str]:
@@ -216,15 +309,19 @@ class ComfyUIClient:
 
     # ---------- 一站式 ----------
     def run_workflow(self, workflow: dict, dest_dir: str,
-                     timeout: int | None = None) -> list[str]:
+                     timeout: int | None = None,
+                     on_progress=None) -> list[str]:
         """提交 workflow 并等待下载全部输出，返回本地文件路径列表。
 
         超时抛 ComfyUITimeout（而不是返回空列表让上层误报"未产出视频"）。
+        on_progress: 可选进度回调，透传给 wait()（见其文档）。
+        提交的任务 id 记在 self.last_prompt_id，便于事后 cancel()。
         """
         pid = self.queue_prompt(workflow)
+        self.last_prompt_id = pid
         if not pid:
             return []
-        item = self.wait(pid, timeout, raise_on_timeout=True)
+        item = self.wait(pid, timeout, raise_on_timeout=True, on_progress=on_progress)
         if not item:
             return []
         return self.download_outputs(item, dest_dir)

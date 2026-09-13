@@ -575,6 +575,45 @@ def test_comfyui_client_error_messages():
     assert "节点 70" in m and "KSampler" in m and "RuntimeError: boom" in m and "p1" in m
 
 
+def test_comfyui_client_cancel_and_progress():
+    from unittest.mock import MagicMock
+    from tools.comfyui_client import ComfyUIClient
+
+    c = ComfyUIClient("http://127.0.0.1:8188")
+    calls: list = []
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+    def fake_post(path, *, json=None, **kw):
+        calls.append((path, json))
+        return _Resp()
+
+    # 1) 任务还在排队 -> 只从队列删除，不中断（避免误伤别的任务）
+    c._post = fake_post
+    c._queue_phase = lambda pid: ("queued", 2)
+    assert c.cancel("p1") is True
+    assert ("/queue", {"delete": ["p1"]}) in calls
+    assert not any(p == "/interrupt" for p, _ in calls)
+
+    # 2) 任务正在执行 -> 删除队列 + 中断当前执行
+    calls.clear()
+    c._queue_phase = lambda pid: ("running", 0)
+    assert c.cancel("p2") is True
+    assert ("/interrupt", None) in calls
+
+    # 3) 无 pid 且无 last_prompt_id -> 直接 False
+    c._queue_phase = lambda pid: ("done", 0)
+    assert c.cancel() is False
+
+    # 4) last_prompt_id 兜底
+    c.last_prompt_id = "p3"
+    assert c.cancel() is True
+
+
 # ---------- agent/record（生成参数全量落盘，可复现） ----------
 
 class _MMH3LikeEngine:

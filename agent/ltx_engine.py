@@ -119,6 +119,11 @@ class LTXEngine:
         return out_path
 
     # ---------- workflow 构建 / 注入 ----------
+    @staticmethod
+    def _snap_dim(v: int) -> int:
+        """把维度向下吸附到 32 的倍数（最小 32），LTX-2.5 的硬性要求。"""
+        return max(32, (max(int(v), 32) // 32) * 32)
+
     def _build_workflow(self, prompt: str, seed: int | None, image: str | None) -> dict:
         with open(self.workflow_path, encoding="utf-8") as f:
             wf = json.load(f)
@@ -221,12 +226,17 @@ class LTXEngine:
         # 随机种子
         set_in(get_node("seed", "RandomNoise"), "noise_seed", seed)
 
-        # 分辨率
+        # 分辨率：LTX-2.5 要求宽高被 32 整除，非法值会到 ComfyUI 才报错；
+        # 这里先吸附并提示，避免"提交成功但出片尺寸不对"的隐蔽问题。
         try:
             rw, rh = (int(x) for x in self.resolution.lower().split("x"))
         except Exception:
             rw = rh = None
         if rw and rh:
+            srw, srh = self._snap_dim(rw), self._snap_dim(rh)
+            if (srw, srh) != (rw, rh):
+                log(f"  [ltx] 分辨率 {rw}x{rh} 非 32 整除，已吸附为 {srw}x{srh}")
+            rw, rh = srw, srh
             set_in(get_node("latent", "EmptyLTXVLatentVideo"), "width", rw)
             set_in(get_node("latent", "EmptyLTXVLatentVideo"), "height", rh)
 

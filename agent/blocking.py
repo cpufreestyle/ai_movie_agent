@@ -48,6 +48,30 @@ try:                       # 统一 ffmpeg 定位（PATH 上通常没有，靠 i
 except Exception:          # 单独拷走 blocking.py 时也能降级
     _ffmpeg_exe = None
 
+# ffmpeg 定位较重（可能 import imageio_ffmpeg / 查 PATH），批量动画合成时反复调用，
+# 故缓存解析结果：False=未初始化；None=查无；str=绝对路径。
+_ffmpeg_path: object = False
+
+
+def _resolve_ffmpeg() -> str | None:
+    """定位 ffmpeg（FFMPEG env > PATH > imageio-ffmpeg 自带），结果缓存复用。"""
+    global _ffmpeg_path
+    if _ffmpeg_path is not False:
+        return _ffmpeg_path  # type: ignore[return-value]
+    p: str | None = None
+    if _ffmpeg_exe:
+        p = _ffmpeg_exe()
+    if not p:
+        p = shutil.which("ffmpeg")
+    if not p:
+        try:
+            import imageio_ffmpeg  # type: ignore
+            p = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:          # noqa: BLE001 - 没装则视为不可用
+            p = None
+    _ffmpeg_path = p
+    return p
+
 
 class BlockingError(RuntimeError):
     """白模渲染失败（已重试仍无有效产物）。"""
@@ -108,19 +132,9 @@ class BlockingGenerator:
 
         本机 ffmpeg **不在 PATH**（只有 `imageio-ffmpeg` 里带一份）。若只查 PATH，
         灰模动画合成会静默跳过 → `use_as_ref_video` 永远不可用。
+        结果按 _resolve_ffmpeg() 缓存，避免批量合成时反复查找。
         """
-        if _ffmpeg_exe:
-            p = _ffmpeg_exe()
-            if p:
-                return p
-        p = shutil.which("ffmpeg")
-        if p:
-            return p
-        try:
-            import imageio_ffmpeg  # type: ignore
-            return imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:          # noqa: BLE001 - 没装则视为不可用
-            return None
+        return _resolve_ffmpeg()
 
     # ---------- 就绪 ----------
     def is_ready(self) -> bool:

@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import wave
+import textwrap
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 NAR = os.path.join(ROOT, "outputs", "nar")
@@ -47,11 +48,20 @@ TTS_ENGINE = "edge"
 # 想回中文版：--lang zh --subs zh
 LANG = "en"          # en=英文配音, zh=中文配音
 SUBS = "bilingual"   # bilingual=中英双行, en=仅英文, zh=仅中文
-VOICE_EN = "en-US-AndrewMultilingualNeural"   # noir 质感英文男声
+VOICE_EN = "en-GB-SoniaNeural"               # 英式知性女声：成熟、有电影旁白质感，贴合剧情独白
 VOICE_ZH = "zh-CN-XiaoxiaoNeural"             # 小晓神经语音，中文最自然之一
 VOICE = VOICE_EN if LANG == "en" else VOICE_ZH
-TTS_RATE = "-4%"                    # 略慢更旁白感；短句前提下仍落进段落预算，无需加速
+TTS_RATE = "-2%"                    # 略慢更旁白感，避免念稿腔
 TTS_STYLE = "narration-relaxed"     # 松弛旁白风格，避免念稿腔（仅中文语音支持）
+
+# ---- 分段情感曲线 (rate, pitch)：逐段起伏，贴合剧情 ----
+# 实测 Edge 端点仅接受 rate/volume/pitch；任何额外 SSML（mstts:express-as / <break>）
+# 都会导致 NoAudioReceived，故靠逐段 rate+pitch 变化制造抑扬顿挫，避免整片平铺直叙。
+EMO = [
+    ("-2%", "+0Hz"), ("-3%", "-1Hz"), ("-2%", "+2Hz"),
+    ("-4%", "-2Hz"), ("-3%", "-1Hz"), ("-1%", "+1Hz"),
+    ("-5%", "+1Hz"), ("-2%", "+0Hz"), ("-5%", "-2Hz"),
+]
 
 # ---- 时间轴参数（18 镜 / 9 段解说，均可被 storyboard.json 覆盖）----
 T = 3.88          # 单镜时长
@@ -246,17 +256,53 @@ def _trim_silence() -> None:
     print("[trim] 去首尾静音完成")
 
 
+def _probe_wh(path):
+    """探测视频宽高，字幕字号/排版据此自适应。"""
+    try:
+        import cv2
+        v = cv2.VideoCapture(path)
+        w = int(v.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(v.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        v.release()
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    return 1024, 576
+
+
+def _wrap_zh(text, n):
+    """中文按字符数硬换行（避免单行超出画面宽度）。"""
+    text = (text or "").strip()
+    if not text:
+        return [""]
+    return [text[k:k + n] for k in range(0, len(text), n)]
+
+
+def _sub_sizes(w):
+    """按视频宽度算自适应字号与每行最大字符数（英文字号偏小以保证多为一行）。"""
+    en_fs = min(32, max(20, round(w * 0.022)))
+    zh_fs = min(38, max(24, round(w * 0.030)))
+    en_max = max(24, int(w * 0.95 / (en_fs * 0.55)))
+    zh_max = max(12, int(w * 0.96 / (zh_fs * 1.02)))
+    return en_fs, zh_fs, en_max, zh_max
+
+
 def write_line_files() -> None:
-    """写字幕文本。中文行 line_zh_XX.txt、英文行 line_en_XX.txt（ffmpeg textfile 读取）。"""
+    """写字幕文本（长行按画面宽度自动换行，避免超出屏幕）。"""
+    w, _ = _probe_wh(FILM)
+    _, _, EN_MAX, ZH_MAX = _sub_sizes(w)
     for i, t in enumerate(LINES, 1):
+        zh = _wrap_zh(t, ZH_MAX)
         with open(os.path.join(NAR, f"line_zh_{i:02d}.txt"), "w", encoding="utf-8") as f:
-            f.write(t)
+            f.write("\n".join(zh))
         # 兼容旧引用：line_XX.txt 始终指向中文行
         with open(os.path.join(NAR, f"line_{i:02d}.txt"), "w", encoding="utf-8") as f:
-            f.write(t)
+            f.write("\n".join(zh))
     for i, t in enumerate(LINES_EN, 1):
+        en = textwrap.wrap(t, EN_MAX) or [t]
         with open(os.path.join(NAR, f"line_en_{i:02d}.txt"), "w", encoding="utf-8") as f:
-            f.write(t)
+            f.write("\n".join(en))
 
 
 def write_ps1() -> str:
@@ -309,9 +355,9 @@ def synth_edge() -> None:
     async def gen(i: int, text: str) -> None:
         mp3 = os.path.join(NAR, f"nar_{i:02d}.mp3")
         wav = os.path.join(NAR, f"nar_{i:02d}.wav")
-        # 纯文本+语速：自然语速下每段解说约 4~6s，刚好落进段落预算，无需加速失真。
-        # （narration-relaxed 等情绪风格会把语速拖到 ~10s/句，迫使 1.5x 加速反而更机械，故不用。）
-        comm = edge_tts.Communicate(text, VOICE, rate=TTS_RATE)
+        # 逐段情感曲线：rate/pitch 随剧情起伏（Edge 仅认这三项 prosody）。
+        rate, pitch = EMO[(i - 1) % len(EMO)]
+        comm = edge_tts.Communicate(text, VOICE, rate=rate, pitch=pitch)
         await comm.save(mp3)
         subprocess.run([ff, "-y", "-i", mp3, "-ar", "48000", "-ac", "2",
                         "-c:a", "pcm_s16le", wav],
@@ -408,8 +454,10 @@ def compute_timing() -> None:
         for i in range(1, n + 1):
             nat = wav_duration(os.path.join(NAR, f"nar_{i:02d}.wav"))
             if nat > slot:
-                tempo.append(nat / slot)
-                comp.append(slot)
+                # 限速：旁白最高加速到 1.15x，避免被压成"念稿腔"
+                t = min(nat / slot, 1.15)
+                tempo.append(t)
+                comp.append(nat / t)
             else:
                 tempo.append(1.0)
                 comp.append(nat)
@@ -482,6 +530,10 @@ def build_and_render() -> None:
             cues = None
 
     vprev, vcur = "0:v", None
+    Wv, Hv = _probe_wh(FILM)
+    EN_FS, ZH_FS, _EN_MAX, _ZH_MAX = _sub_sizes(Wv)
+    ZH_MARGIN = max(16, int(Hv * 0.05))       # 中文距底
+    EN_MARGIN = max(64, int(Hv * 0.15))       # 英文距底：底部锁定，多行向上生长，永不压到中文
     for i in range(1, len(TTS_LINES) + 1):
         if cues:
             s, e = cues[i - 1]
@@ -497,14 +549,14 @@ def build_and_render() -> None:
         if SUBS in ("bilingual", "en"):
             filters.append(
                 f"drawtext=fontfile='{FONT_EN}':textfile=line_en_{i:02d}.txt:"
-                f"x=(w-tw)/2:y=h-th-66:fontsize=20:fontcolor=white:"
-                f"borderw=2:bordercolor=black@0.9:"
+                f"x=(w-tw)/2:y=h-th-{EN_MARGIN}:fontsize={EN_FS}:fontcolor=white:"
+                f"borderw=3:bordercolor=black@0.9:"
                 f"enable='between(t,{s:.3f},{e:.3f})'")
         if SUBS in ("bilingual", "zh"):
             filters.append(
                 f"drawtext=fontfile='{FONT}':textfile=line_zh_{i:02d}.txt:"
-                f"x=(w-tw)/2:y=h-th-38:fontsize=23:fontcolor=white:"
-                f"borderw=2:bordercolor=black@0.9:"
+                f"x=(w-tw)/2:y=h-th-{ZH_MARGIN}:fontsize={ZH_FS}:fontcolor=white:"
+                f"borderw=3:bordercolor=black@0.9:"
                 f"enable='between(t,{s:.3f},{e:.3f})'")
         parts.append(f"[{vprev}]" + ",".join(filters) + f"[{vcur}]")
         vprev = vcur
@@ -514,7 +566,7 @@ def build_and_render() -> None:
            "-map", f"[{vcur}]", "-map", "[aout]",
            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
            "-pix_fmt", "yuv420p", "-r", str(FPS),
-           "-c:a", "aac", "-b:a", "192k", "-shortest", OUT]
+           "-c:a", "aac", "-b:a", "192k", OUT]
 
     print("[render] 合成中（字幕+解说+环境音）...")
     # cwd 设为字幕文本目录，滤镜里才能用相对文件名，规避 Windows 路径转义

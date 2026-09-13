@@ -1,0 +1,23 @@
+buvid3: A73BED1A-FACC-A728-822A-4A48BAF9381B75513infoc
+
+=== EP2 《看见未来之前》第二集 ===
+preupload...
+upload_id=cd651e03-8553-4e7f-9283-9b6784e28c81 size=16199416 chunks=10485760
+  chunk 1/2 ok
+  chunk 2/2 ok
+uploaded filename=n260913a2j3rk12b1k2wi29ofucfma8l cid=41842114808
+cover...
+submit...
+SUBMIT RESULT: {"code": 0, "message": "OK", "ttl": 1, "data": {"aid": 117260979013611, "bvid": "BV1y5YZ69EwS"}}
+EP2 OK bvid=BV1y5YZ69EwS
+
+=== EP3 《看见未来之前》第三集 ===
+preupload...
+upload_id=7c68e33e-9d69-4a36-9d7e-0a36d930b217 size=16305537 chunks=10485760
+  chunk 1/2 ok
+  chunk 2/2 ok
+uploaded filename=n260913a23e7qvpcfsl2ja22dq4sb03q cid=41842114909
+cover...
+submit...
+SUBMIT RESULT: {"code": 0, "message": "OK", "ttl": 1, "data": {"aid": 117260979013614, "bvid": "BV1y5YZ69EwR"}}
+EP3 OK bvid=BV1y5YZ69EwR
