@@ -36,7 +36,8 @@
 
 规格：1024x576 / 24fps / 59s，英文旁白 + 中英双语字幕，分区 tid=172（短片）。
 本地文件：`outputs/videos/epN_vo_film_mmh3.mp4`；预览拼图：`outputs/preview/_preview_epN_film.png`。
-上传小红书备选成片：`outputs/ep1_up_mmh3.mp4`（617MB）、`outputs/ep1_vo_up_mmh3.mp4`（538MB）。
+上传小红书成片：**优先用 `outputs/videos/epN_vo_film_mmh3.mp4`**（三集成片，分区 tid=172）。
+> 注：先前的高码率超分版 `outputs/ep1_up_mmh3.mp4`(617MB)、`outputs/ep1_vo_up_mmh3.mp4`(538MB) 已在仓库清理中删除；若需更高码率备选版，可经 `python upscale_video.py outputs/videos/ep1_vo_film_mmh3.mp4 outputs/ep1_vo_up_mmh3.mp4` 重生成。
 
 > 备选（如需自录）：选项 B 直接用本地 pipeline 再出一段；选项 C 用静态分镜拼剪 / WebUI 录屏。
 
