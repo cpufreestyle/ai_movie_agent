@@ -36,6 +36,8 @@ comfy_run.log
 
 # one-off dev scripts (underscore prefix)
 _*.py
+_*.ps1
+_*.bat
 kill_test.py
 tmp_vae_test.py
 

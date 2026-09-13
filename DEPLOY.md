@@ -130,8 +130,24 @@ AMD 上把 `.env` 的 `GPU_BACKEND=amd`，Agent 会自动把 LTX 精度注入改
 | `OLLAMA_URL` | LLM 地址（自动补 `/v1`） |
 | `LLM_MODEL` | LLM 模型名 |
 | `LLM_API_KEY` | LLM key（Ollama 默认 `ollama`） |
-| `COMFYUI_API` | 视频服务地址 |
-| `ENGINE_BACKEND` | `comfyui_mmH3` / `comfyui_ltx` |
+| `COMFYUI_API` | 视频服务地址（ComfyUI 引擎） |
+| `SOL_H3_API` | Sol-H3 服务地址（sol_h3 引擎，如 http://<DGX-IP>:8000） |
+| `ENGINE_BACKEND` | `comfyui_mmH3` / `comfyui_ltx` / `sol_h3` |
+
+## 视频引擎四：Sol-H3-Spark（DGX Spark 远程）
+
+NVIDIA 官方 [Sol-H3-Spark](https://nvlabs.github.io/Sana/Sol-Engine/Sol-H3-Spark/)：单台 DGX Spark
+（GB10 Blackwell）上跑的端到端视频生成（H3 草图 + LTX-2.5 细化），输出 1344×768 / 121 帧 / 24fps
+带音频 MP4。项目把它封装成**常驻 HTTP 服务**跑在 DGX Spark 上，本机 agent 经 `engine.backend: sol_h3`
+远程调用（与「远程 ComfyUI」同一解耦思路，本机无需显卡）。
+
+- 部署 DGX 端：`deploy/sol_h3_spark/deploy_sol_h3_spark.sh`（克隆 Sana sol-engine → 建三环境 →
+  `prepare.py` 生成 `paths*.json` → `cache_builder` → `download_checkpoints.py` 下权重 →
+  后台启动 `sol_h3_server.py`）。详见 `deploy/sol_h3_spark/README.md`。
+- 本机接入：`config.yaml` 设 `engine.backend: sol_h3` 且 `engine.sol_h3.api: http://<DGX-IP>:8000`；
+  或用 `ENGINE_BACKEND=sol_h3` + `SOL_H3_API=...`。`python deploy.py` 会打印对应的远程部署步骤。
+- 注意：官方声明 "clean installation not validated"，aarch64 编译 CUDA 扩展可能需排错；
+  本机只跑 agent，视频全在 DGX Spark 出。
 
 ## 给别人交付的最小清单
 1. 整个项目目录（含 `config.yaml` / `workflows` / `requirements.txt` / `Dockerfile` / `docker-compose.yml` / 脚本）。

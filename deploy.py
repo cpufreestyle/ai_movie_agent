@@ -171,6 +171,7 @@ def resolve_scheme(cfg: dict, args) -> dict:
         "GPU_BACKEND": gpu if gpu != "none" else "nvidia",
         "COMFYUI_IMAGE": "your-registry/comfyui-ltx-mmh3:latest",
         "COMFYUI_IMAGE_ROCM": "your-registry/comfyui-rocm:latest",
+        "SOL_H3_API": api if engine == "sol_h3" else "",
     }
     return {
         "os": detect_os(),
@@ -201,18 +202,30 @@ def build_steps(sch: dict, args) -> list:
         "manual": "（deploy 自动写入 .env，内容见上方「.env 内容」）",
     })
 
+    if engine == "sol_h3":
+        steps.append({
+            "title": "在 DGX Spark 部署 Sol-H3（远程视频引擎）",
+            "cmds": [],
+            "runnable": False,
+            "manual": "把 deploy/sol_h3_spark/ 整个目录拷到 DGX Spark，SSH 上去执行：\n"
+                      "  cd deploy/sol_h3_spark && bash deploy_sol_h3_spark.sh\n"
+                      "按提示填 HF_TOKEN / 三环境解释器路径。服务起在 0.0.0.0:8000，"
+                      "把 config.yaml 的 engine.sol_h3.api 指向 http://<DGX-IP>:8000，"
+                      "并把 engine.backend 设为 sol_h3（或 stage_profiles.G.engine=sol_h3）。",
+        })
+
     if method == "docker":
         # docker compose up 命令
         up = ["docker", "compose", "up", "-d"]
         amd = gpu == "amd"
-        if comfyui_local and gpu != "none":
+        if comfyui_local and gpu != "none" and engine != "sol_h3":
             if amd:
                 up = ["docker", "compose", "-f", "docker-compose.yml",
                       "-f", "docker-compose.amd.yml", "--profile", "gpu", "up", "-d"]
             else:
                 up = ["docker", "compose", "--profile", "gpu", "up", "-d"]
         steps.append({
-            "title": "启动容器（agent + ollama" + (" + comfyui" if (comfyui_local and gpu != "none") else "") + "）",
+            "title": "启动容器（agent + ollama" + (" + comfyui" if (comfyui_local and gpu != "none" and engine != "sol_h3") else "") + "）",
             "cmds": [("docker compose up", up)],
             "runnable": True,
             "manual": "",
@@ -265,7 +278,16 @@ def build_steps(sch: dict, args) -> list:
     })
 
     # 视频权重下载（需授权）
-    if comfyui_local and gpu != "none":
+    if engine == "sol_h3":
+        steps.append({
+            "title": "视频权重（DGX Spark 远程 Sol-H3）",
+            "cmds": [],
+            "runnable": False,
+            "manual": "权重在 DGX Spark 本地，由 deploy/sol_h3_spark/deploy_sol_h3_spark.sh "
+                      "在其上执行 download_checkpoints.py。本机只跑 agent，"
+                      f"通过 engine.sol_h3.api 指向 DGX 上的 sol_h3_server.py（{sch['api']}）。",
+        })
+    elif comfyui_local and gpu != "none":
         dl_script = "download_mmh3_models.py" if engine == "comfyui_mmH3" else "download_ltx_models.py"
         models_dir = args.models_dir or default_models_dir(sch["os"])
         dl = ["python", dl_script, "--gpu", gpu, "--models-dir", models_dir]
@@ -322,7 +344,8 @@ def print_plan(sch: dict, steps: list):
     print(f"  Docker      : {'有' if sch['docker'] else '无'}  → 采用方式: {sch['method']}")
     print(f"  GPU 探测    : {sch['env_gpu']}  → 显卡后端: {sch['gpu']}")
     print(f"  视频引擎    : {sch['engine']}")
-    print(f"  ComfyUI     : {'本机 ' if sch['comfyui_local'] else '远程 '}{sch['api']}")
+    svc_label = "Sol-H3 服务" if sch["engine"] == "sol_h3" else "ComfyUI"
+    print(f"  {svc_label:<12}: {'本机 ' if sch['comfyui_local'] else '远程 '}{sch['api']}")
     print(f"  Blender 白模: {'启用' if sch['blender'] else '关闭'}")
     print()
     print("## .env 内容（apply 时写入）")
@@ -379,7 +402,7 @@ def main():
     p.add_argument("--config", default=os.path.join(REPO, "config.yaml"))
     p.add_argument("--method", choices=["docker", "native", "auto"], default="auto")
     p.add_argument("--gpu", choices=["nvidia", "amd", "none", "auto"], default="auto")
-    p.add_argument("--engine", choices=["comfyui_mmH3", "comfyui_ltx"], default=None)
+    p.add_argument("--engine", choices=["comfyui_mmH3", "comfyui_ltx", "sol_h3"], default=None)
     p.add_argument("--models-dir", default=None, help="视频权重目录（--with-weights 时需要）")
     p.add_argument("--apply", action="store_true", help="执行安全部分（venv/依赖/.env/compose up）")
     p.add_argument("--with-weights", action="store_true", help="授权下载视频权重（需同时 --apply）")

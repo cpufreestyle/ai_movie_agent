@@ -1,0 +1,9 @@
+# 魔搭创空间 (ModelScope Space) 运行时依赖
+# 说明：本 Space 默认走「内置模板企划 Demo」，仅需下面轻量依赖即可在 CPU 环境跑通。
+# 若要启用真实视频生成流水线（A–H 全链路），请将项目根目录 requirements.txt 一并安装
+# （含 torch / skyreels 等），并在创空间环境变量配置 COMFYUI_API / ENGINE_BACKEND / LLM_MODEL。
+gradio
+requests
+pyyaml
+openai
+numpy

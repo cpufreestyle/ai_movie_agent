@@ -131,15 +131,15 @@ def _run_all():
 
     # 强制重绘三集（denoise 由 REDRAW_DENOISE 控制，默认 0.70 实测 0% 检出）
     for ep in (2, 1, 3):
-        src = f"outputs/ep{ep}_series_film_mmh3.mp4"
-        dst = f"outputs/ep{ep}_anime_mmh3.mp4"
+        src = f"outputs/videos/ep{ep}_series_film_mmh3.mp4"
+        dst = f"outputs/videos/ep{ep}_anime_mmh3.mp4"
         log(f"重绘 ep{ep} denoise={DENOISE} -> {dst}")
         run(["anime_redraw.py", src, dst, "--denoise", DENOISE, "--steps", "20"])
         ensure_mux(dst, src)
 
     for ep in (1, 2, 3):
-        src = f"outputs/ep{ep}_anime_mmh3.mp4"
-        dst = f"outputs/ep{ep}_vo_anime_mmh3.mp4"
+        src = f"outputs/videos/ep{ep}_anime_mmh3.mp4"
+        dst = f"outputs/videos/ep{ep}_vo_anime_mmh3.mp4"
         if os.path.exists(src) and not os.path.exists(dst):
             run(["make_narration.py", "--film", src, "--out", dst,
                  "--fit-film", "--fps", "24",
@@ -147,8 +147,8 @@ def _run_all():
                  "--ep", str(ep), "--shots", "18"])
 
     for ep in (1, 2, 3):
-        faststart(f"outputs/ep{ep}_anime_mmh3.mp4")
-        faststart(f"outputs/ep{ep}_vo_anime_mmh3.mp4")
+        faststart(f"outputs/videos/ep{ep}_anime_mmh3.mp4")
+        faststart(f"outputs/videos/ep{ep}_vo_anime_mmh3.mp4")
     log("ALL DONE")
 
 

@@ -10,6 +10,37 @@
 
 > 跨平台一键部署（Docker / 原生脚本，**NVIDIA + AMD 均可**）：见 [DEPLOY.md](DEPLOY.md)。
 
+## 已完成作品：《看见未来之前》（AI 连续短片 · 三集）
+
+用本仓库的 **mmh3 引擎链路**出片（`run_series.py --engine mmh3` 逐镜生成 → 拼接成片 →
+`make_narration.py` 加英文旁白与中英双语字幕），已在 B 站发布：
+
+| 集 | 标题 | 链接 |
+|----|------|------|
+| EP1 | 第一集 · 进城 | https://www.bilibili.com/video/BV17uYi6UEPx |
+| EP2 | 第二集 · 觉醒 | https://www.bilibili.com/video/BV1ouYi6mE8Z |
+| EP3 | 第三集 · 对抗 | https://www.bilibili.com/video/BV1ouYi6mEwL |
+
+三集均为 **1024x576 / 24fps / 59s**，英文旁白（Edge TTS）+ 中英双语烧录字幕，投稿分区
+**tid=172（短片）**。复现命令：
+
+```bash
+# 1) 逐镜生成 + 拼接（mmh3 需独立环境，例如 Windows 的 c:\venv_h3）
+python run_series.py --engine mmh3 --ep 1 --frames 90 --width 1024 --height 576 --force
+
+# 2) 加旁白 + 双语字幕（--fit-film 让旁白填满整片时长）
+python make_narration.py --film outputs/ep1_series_film_mmh3.mp4 \
+  --out outputs/ep1_vo_mmh3.mp4 --fit-film --fps 24 \
+  --series-script outputs/series_script.json --ep 1 --shots 18
+```
+
+产物统一放 `outputs/videos/`（成片 `epN_vo_film_mmh3.mp4`、原始源片
+`epN_series_film_mmh3.mp4`）；预览拼图放 `outputs/preview/`。
+
+> 取舍记录：本片最终**直接用 mmh3 原始出片**，未做动漫化重绘。实测 `anime_redraw.py`
+> （含 ControlNet-Canny）会锁死五官轮廓、把真人脸检出率从 ~2% 抬到 30%~57%，并让复杂运动
+> 镜头崩成抽象色块，故不用于交付。
+
 ## 它能做什么
 - **持续创作 / 无限时长**：用 SkyReels 的 Diffusion Forcing 续写能力，每次在当前影片
   末尾追加一段新镜头，影片无缝变长，Agent 可一直创作到手动停止。

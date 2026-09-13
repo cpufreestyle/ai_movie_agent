@@ -13,6 +13,9 @@
                  自动把 LTX 精度降为 bf16（视频权重需改用 bf16/GGUF/INT8 变体，见下载脚本）
 """
 import os
+import sys
+import subprocess
+import platform
 
 
 def apply_env_overrides(cfg: dict) -> dict:
@@ -46,4 +49,194 @@ def apply_env_overrides(cfg: dict) -> dict:
     # 显卡后端：amd 时 NVFP4 不支持，把 LTX 精度降为 bf16（bf16 权重跑 ROCm 更稳）
     if os.environ.get("GPU_BACKEND") == "amd":
         cfg.setdefault("engine", {}).setdefault("comfyui_ltx", {})["precision"] = "bf16"
+    cfg = apply_hw_overrides(cfg)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# 硬件自适应：根据 detected 显存(VRAM) / 内存(RAM) 自动选择配置档位
+# 无额外依赖（标准库 + nvidia-smi / rocm-smi / WMI / /proc/meminfo）。
+# 触发方式（任一即可，否则保持原配置，向后兼容）：
+#   AUTO_HW=1                      自动检测本机硬件选档
+#   HW_TIER=high|mid|low|cpu       强制指定（远程显卡规格已知时最准）
+#   config.auto_hardware: true     同上，写进 config.yaml
+#   config.hw_tier: <档>           同上，写进 config.yaml
+# ---------------------------------------------------------------------------
+def detect_hardware() -> dict:
+    """跨平台检测 GPU 厂商 / 显存 / 内存，无需额外依赖。"""
+    info = {"vendor": None, "gpu_name": None, "vram_gb": 0.0, "ram_gb": 0.0}
+    # ---- RAM ----
+    try:
+        if sys.platform.startswith("win"):
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
+                capture_output=True, text=True, timeout=20)
+            if out.returncode == 0 and out.stdout.strip():
+                info["ram_gb"] = int(out.stdout.strip()) / (1024 ** 3)
+        elif sys.platform.startswith("linux"):
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        info["ram_gb"] = int(line.split()[1]) / 1024 / 1024
+                        break
+        elif sys.platform == "darwin":
+            out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                 capture_output=True, text=True, timeout=10)
+            info["ram_gb"] = int(out.stdout.strip()) / (1024 ** 3)
+    except Exception:
+        pass
+    # ---- GPU: NVIDIA (nvidia-smi) ----
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            lines = [l for l in out.stdout.strip().splitlines() if l.strip()]
+            if lines:
+                parts = [p.strip() for p in lines[0].split(",")]
+                info["vendor"] = "NVIDIA"
+                info["gpu_name"] = parts[0]
+                try:
+                    # nvidia-smi --format=nounits 的 memory.total 单位为 MiB
+                    info["vram_gb"] = float(parts[1]) / 1024.0
+                except (ValueError, IndexError):
+                    pass
+                return info
+    except Exception:
+        pass
+    # ---- GPU: AMD / 其它（Windows WMI）----
+    if sys.platform.startswith("win"):
+        try:
+            ps = ("Get-CimInstance Win32_VideoController | "
+                  "Where-Object {$_.AdapterRAM} | "
+                  "Select-Object Name,AdapterRAM | ConvertTo-Json")
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                 capture_output=True, text=True, timeout=20)
+            if out.returncode == 0 and out.stdout.strip():
+                import json as _json
+                arr = _json.loads(out.stdout)
+                if isinstance(arr, dict):
+                    arr = [arr]
+                for dev in arr:
+                    name = (dev.get("Name") or "").upper()
+                    ram = (dev.get("AdapterRAM") or 0) / (1024 ** 3)
+                    if "AMD" in name or "RADEON" in name:
+                        info["vendor"] = "AMD"
+                    elif info["vendor"] is None and ("NVIDIA" in name or "INTEL" in name):
+                        info["vendor"] = "OTHER"
+                    if ram > info["vram_gb"]:
+                        info["vram_gb"] = ram
+                        info["gpu_name"] = dev.get("Name")
+        except Exception:
+            pass
+    # ---- GPU: AMD / NVIDIA（Linux lspci）----
+    elif sys.platform.startswith("linux"):
+        try:
+            out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=10)
+            for line in out.stdout.splitlines():
+                if "VGA" in line or "3D" in line:
+                    if "AMD" in line or "ATI" in line:
+                        info["vendor"] = "AMD"
+                    elif "NVIDIA" in line:
+                        info["vendor"] = "NVIDIA"
+                    if info["vendor"]:
+                        info["gpu_name"] = line.split(":")[-1].strip()
+                        break
+        except Exception:
+            pass
+    return info
+
+
+def pick_tier(hw: dict) -> str:
+    vram = hw.get("vram_gb") or 0
+    ram = hw.get("ram_gb") or 0
+    if not hw.get("vendor") or vram < 6:
+        return "cpu"
+    if vram >= 24 and ram >= 48:
+        return "high"
+    if vram >= 12 and ram >= 24:
+        return "mid"
+    return "low"
+
+
+# 各档位的覆盖项（点路径 -> 值）。只在对应档位写入，其余保留 config 默认。
+HW_TIER_PROFILES = {
+    "high": {
+        "engine.comfyui_mmH3.resolution": "1024x576",
+        "engine.comfyui_mmH3.num_frames": 90,
+        "engine.offload": False,
+        "llm.model": "qwen2.5:7b",
+        "engine.comfyui_mmH3.block_cache.enable": True,
+        "engine.comfyui_mmH3.two_pass.enable": False,
+        "qa.max_rerolls": 2,
+        "blender.samples": 48,
+    },
+    "mid": {
+        "engine.comfyui_mmH3.resolution": "768x448",
+        "engine.comfyui_mmH3.num_frames": 56,
+        "llm.model": "qwen2.5:3b",
+        "engine.comfyui_mmH3.block_cache.enable": False,
+        "qa.max_rerolls": 1,
+        "blender.samples": 24,
+    },
+    "low": {
+        "engine.comfyui_mmH3.resolution": "512x288",
+        "engine.comfyui_mmH3.num_frames": 17,
+        "engine.offload": True,
+        "llm.model": "qwen2.5:1.5b",
+        "engine.comfyui_mmH3.block_cache.enable": False,
+        "engine.comfyui_mmH3.two_pass.enable": False,
+        "qa.max_rerolls": 0,
+        "blender.samples": 12,
+    },
+    "cpu": {
+        "llm.model": "qwen2.5:1.5b",
+        "llm.disabled": False,
+        "qa.max_rerolls": 0,
+        "blender.enabled": False,
+        "engine.comfyui_mmH3.block_cache.enable": False,
+        "engine.comfyui_mmH3.two_pass.enable": False,
+    },
+}
+
+
+def _deep_set(cfg: dict, dotted: str, val):
+    keys = dotted.split(".")
+    d = cfg
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+        if not isinstance(d, dict):
+            return
+    d[keys[-1]] = val
+
+
+def _apply_tier(cfg: dict, tier: str, vendor=None):
+    overrides = dict(HW_TIER_PROFILES.get(tier, {}))
+    if vendor == "AMD":
+        overrides["engine.comfyui_ltx.precision"] = "bf16"
+    for path, val in overrides.items():
+        _deep_set(cfg, path, val)
+
+
+def apply_hw_overrides(cfg: dict) -> dict:
+    """根据 AUTO_HW / HW_TIER 环境变量或 config.auto_hardware / config.hw_tier，
+    自动套用硬件档位覆盖。默认不改动（向后兼容）。"""
+    tier = os.environ.get("HW_TIER")
+    if tier:
+        tier = tier.strip().lower()
+    elif isinstance(cfg.get("hw_tier"), str) and cfg["hw_tier"].strip():
+        tier = cfg["hw_tier"].strip().lower()
+    if tier:
+        if tier in HW_TIER_PROFILES:
+            _apply_tier(cfg, tier, os.environ.get("GPU_BACKEND"))
+        return cfg
+    auto = os.environ.get("AUTO_HW") or ("true" if cfg.get("auto_hardware") is True else "")
+    if str(auto).lower() in ("1", "true", "yes", "on"):
+        try:
+            hw = detect_hardware()
+            _apply_tier(cfg, pick_tier(hw), hw.get("vendor"))
+        except Exception:
+            pass
     return cfg

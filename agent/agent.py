@@ -18,6 +18,7 @@ from .director import Director
 from .engine import SkyReelsEngine
 from .ltx_engine import LTXEngine
 from .mmh3_engine import MMH3Engine
+from .sol_h3_engine import SolH3Engine
 from .editor import Editor
 from .publisher import Publisher
 from .collector import Collector
@@ -46,6 +47,9 @@ class MovieAgent:
         elif backend == "comfyui_mmH3":
             # MiniMax H3（Turbo 4 步，原生立体声）
             self.engine = MMH3Engine(eng_cfg, agent_root=agent_root)
+        elif backend == "sol_h3":
+            # 远程 DGX Spark 上的 Sol-H3-Spark（HTTP 服务封装）
+            self.engine = SolH3Engine(eng_cfg, agent_root=agent_root)
         else:
             self.engine = SkyReelsEngine(eng_cfg, agent_root=agent_root)
         self.editor = Editor(fps=int(for_stage(config, "G").get("engine", {}).get("fps", 24)))
