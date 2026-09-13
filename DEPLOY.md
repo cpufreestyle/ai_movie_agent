@@ -23,6 +23,23 @@
 
 > 结论：给别人用、图省事 → **Docker**；自己开发、要频繁改代码 → **原生脚本**。两者视频出片能力完全一致。
 
+## 方式零：统一部署入口 `deploy.py`（推荐，按配置自动选方案）
+
+不想手动判断 Docker / 原生、NVIDIA / AMD、MiniMax H3 / LTX-2.5？用统一入口：它读 `config.yaml`
+（`engine.backend`、`blender.enabled`、ComfyUI 地址等）+ 探测本机（OS / Docker / GPU），自动算出该用哪套方案。
+
+```bash
+python deploy.py                 # 只打印方案（不改动任何东西）
+python deploy.py --apply         # 执行安全部分：建 venv、装依赖、写 .env、docker compose up
+python deploy.py --apply --with-weights --models-dir D:/ComfyUI/models   # 额外授权下载视频权重
+# 也可手动覆盖探测结果：
+python deploy.py --method docker --gpu amd --engine comfyui_ltx
+```
+
+- 视频权重大下载需显式 `--with-weights`（用户授权）才执行；Blender 不自动安装（见下方白模节）。
+- 跨平台：Windows / Linux / macOS 同一脚本；读配置不依赖 PyYAML（内置 mini 解析兜底，venv 前的系统 Python 也能跑）。
+- 下方「方式一 / 方式二」仍可手动使用；`deploy.py` 本质上帮你选了其中一条，并补上 `.env` 与权重下载脚本。
+
 ## 方式一：Docker Compose（推荐，跨平台）
 Linux / Windows(Docker Desktop) / macOS 都适用，一条命令起。
 
