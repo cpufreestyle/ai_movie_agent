@@ -357,3 +357,19 @@ blender:
   reuse_scene: true       # 同集连续同几何分镜复用场景（只更新相机），多镜时显著提速
   depth_near: 0.1         # depth 图归一化近平面（固定值，保证动画多帧深度一致）
   depth_far: 100.0        # depth 图归一化远平面
+  # ---- 4 张控制图的引擎分工（2026-09-14 真机实测 Blender 5.2.1 @1280x720）----
+  #   原先模板只在 line pass 前设一次 CYCLES，depth/normal 紧随其后没有任何回切，
+  #   于是两个纯 emission 材质的控制图也一直白跑 CYCLES。
+  #   单镜 4 图实测：旧 ~9.75s -> 新默认 ~5.78s（1.7x）-> 再开 line_engine=eevee ~1.24s（7.9x）
+  fast_control_passes: true
+  #   true（默认）：depth/normal 回切快速引擎（EEVEE）。产物与 CYCLES 版逐像素比对
+  #     仅在**轮廓抗锯齿**上有差（1280x720：depth 0.08% 像素、normal 0.43% 像素，
+  #     且几乎全在边缘；内部差异 depth 2 px、normal 49 px / 230k），控制图语义不变。
+  #   false：完全回到旧行为（depth/normal 继承 CYCLES），慢约 4s/镜。
+  line_engine: cycles
+  #   line 线框 pass 用哪个引擎出 freestyle：
+  #     cycles（默认）：与历史基线逐像素一致，单镜约 4.9s。
+  #     eevee：实测也能出 freestyle 线（暗像素 0.84% vs Cycles 0.70%，线条掩膜 IoU 72.9%），
+  #            单镜 4.9s -> 0.39s（12x）。line.png 是喂视频引擎的控制图，与已做过的 A/B
+  #            基线不完全同源，故默认不开；要做提速 A/B 时再置 eevee。
+  #   注：BLENDER_WORKBENCH 更快但会忽略材质节点（depth/normal 材质法失效），已排除。

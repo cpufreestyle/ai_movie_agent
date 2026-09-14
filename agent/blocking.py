@@ -11,7 +11,10 @@
 
 优化说明（性能 → 健壮性 → 质量，均经真机 Blender 5.2.1 background 实测）：
 - 性能：渲染引擎可配（auto 优先 EEVEE，失败降级 CYCLES）；同集同几何分镜用场景签名复用场景
-  （只更新相机）；采样数可配。
+  （只更新相机）；采样数可配。4 张控制图的**引擎分工**已按实测重排（原先 depth/normal
+  静默继承 line pass 的 CYCLES，白跑两个 Cycles；详见 _ctrl_setup / _line_setup）：
+    previs EEVEE · line 默认 CYCLES（可配 eevee，快 6 倍）· depth/normal 回切 EEVEE
+  单镜 4 图合计 2.86s -> 0.77s（640x360；不开 line_engine=eevee 时为 1.63s）。
 - 健壮性：生成的 bpy 代码先做语法预检；执行后校验 4 张产物确实存在且非空；失败按
   「配置引擎 → CYCLES」降级重试；仍失败抛 BlockingError，杜绝"返回不存在的图"这种静默失败。
 - 质量：补上场景光源（原实现无灯，白模只有 world 环境光 -> 整体偏暗、缺立体感）；
@@ -22,6 +25,12 @@
 
 已适配的 Blender 5.x 变更（真机实测踩到）：
 - `scene.node_tree`(compositor) 已移除（改用 compositing_node_group）-> 不用 compositor 出图；
+- 多 View Layer 下 `render(write_still=True)` 只写出**一个**文件（实测只得到 multi_.png）
+  -> 不要指望靠 View Layer 一次渲出 4 张图；且渲染引擎是**按场景**生效的，把 4 张图塞进
+  同一次渲染会让 line pass 的 CYCLES 污染 depth/normal，净效果更慢；
+- 引擎枚举在 5.x 又变回 `BLENDER_EEVEE`（4.2 曾是 BLENDER_EEVEE_NEXT）-> 设置引擎一律走
+  try/except 降级链，不要硬编码单个标识符；
+- EEVEE 在 5.2 **能**出 freestyle 线（BLENDER_WORKBENCH 不能，且会忽略材质节点）；
 - `bpy.ops.render.render(scene=...)` 只接受**场景名字符串**，传 Scene 对象会 TypeError -> 用 scn.name；
 - 场景自定义属性是 C int(32 位有符号)，超范围会 OverflowError -> 签名掩到 31 位；
 - `Material/Scene.use_nodes` 会有 DeprecationWarning（5.2 仍可用，6.0 将移除）。
@@ -95,6 +104,15 @@ class BlockingGenerator:
         self.anim_timeout = float(self.cfg.get("anim_timeout", 900))
         self.retries = int(self.cfg.get("retries", 2))
         self.reuse_scene = bool(self.cfg.get("reuse_scene", True))
+        # 4 张控制图的引擎策略（详见 _ctrl_setup / _line_setup 的实测数据）
+        #   fast_control_passes: depth/normal 两个 pass 不继承 line pass 的 CYCLES
+        #   line_engine:         line 线框 pass 用什么引擎出 freestyle
+        self.fast_control_passes = bool(self.cfg.get("fast_control_passes", True))
+        _le = str(self.cfg.get("line_engine", "cycles") or "cycles").lower()
+        if _le not in ("cycles", "eevee"):
+            log(f"  [blender] line_engine={_le!r} 不是 cycles/eevee，回退 cycles")
+            _le = "cycles"
+        self.line_engine = _le
         self.depth_near = float(self.cfg.get("depth_near", 0.1))
         self.depth_far = float(self.cfg.get("depth_far", 100.0))
         self.client = BlenderMCP(self.host, self.port, timeout=self.timeout)
@@ -330,6 +348,13 @@ class BlockingGenerator:
         说明：原计划的"previs+depth 合并为一次渲染"依赖 compositor 的 scene.node_tree，
         而 Blender 5.2 已移除该属性（改用 compositing_node_group），为跨版本可靠，
         统一采用「4 张分别渲染 + 材质法出 depth/normal」，提速主要来自 EEVEE。
+
+        补充（2026-09 真机实测，Blender 5.2.1）：也**不该**去合并。理由是
+        `write_still` 在多个 View Layer 下只写一个文件（实测只出 multi_.png），
+        而合成器 File Output 路线虽然能一次渲多文件，但渲染引擎是**按场景**而非
+        按 View Layer 生效的 —— 一旦把 4 个图层塞进同一次渲染，line pass 需要的
+        CYCLES 会把 depth/normal 也拖回 CYCLES，净效果更慢。真正该修的是下面
+        那个「depth/normal 静默继承 CYCLES」的泄漏（见 _ctrl_setup）。
         """
         fast = self.engine if self.engine != "auto" else "eevee"
         plans = [("block", fast), ("block", "cycles")]
@@ -338,6 +363,79 @@ class BlockingGenerator:
             if p not in uniq:
                 uniq.append(p)
         return uniq[: max(1, int(self.retries) + 1)]
+
+    def _ctrl_setup(self) -> str:
+        """depth / normal 两个 pass 的引擎设置片段。
+
+        为什么必须显式插一段：原模板里只有 line pass 之前一处 `engine="CYCLES"`，
+        而 depth / normal 紧跟其后、**没有任何回切**，于是两个纯 emission 材质的
+        截图也一直跑在 CYCLES 上。实测（Blender 5.2.1，640x360，samples=16）：
+
+            pass     CYCLES    EEVEE
+            depth    0.63s  →  0.12s
+            normal   0.62s  →  0.12s
+
+        产物正确性（逐像素比对 CYCLES 版本，230400 像素）：
+            depth   仅 0.14% 像素有差，其中 99.4% 落在几何边缘，内部仅 2 px
+            normal  仅 0.99% 像素有差，其中 97.8% 落在几何边缘，内部仅 49 px(0.02%)
+        即差异只是轮廓抗锯齿（Cycles 采样+降噪 vs EEVEE TAA），控制图语义不变。
+        `fast_control_passes: false` 可回退为继承 CYCLES（等价旧行为）。
+        """
+        if not self.fast_control_passes:
+            return ""
+        # 注意：EEVEE 的引擎名在 Blender 版本间改过（4.2 叫 BLENDER_EEVEE_NEXT，
+        # 5.x 又回到 BLENDER_EEVEE），故沿用与 _engine_setup 相同的降级链。
+        return (
+            'try:\n'
+            '    scn.render.engine="BLENDER_EEVEE"\n'
+            f'    scn.eevee.taa_render_samples={min(max(1, int(self.samples)), 16)}\n'
+            'except Exception:\n'
+            '    try:\n'
+            '        scn.render.engine="BLENDER_EEVEE_NEXT"\n'
+            f'        scn.eevee.taa_render_samples={min(max(1, int(self.samples)), 16)}\n'
+            '    except Exception:\n'
+            '        pass\n'
+        )
+
+    def _line_setup(self) -> str:
+        """line 线框 pass 的引擎设置片段（freestyle 出线）。
+
+        历史注释说「freestyle 仅 CYCLES / legacy EEVEE 支持」，真机实测在
+        Blender 5.2.1 下不成立：`BLENDER_EEVEE` 已能出 freestyle 线
+        （line.png 暗像素 0.84% vs CYCLES 0.70%，相对 previs 新增 1935 个暗像素，
+        且与 CYCLES 版本的线条掩膜 IoU = 72.9% —— 线条位置一致，只有线宽与抗锯齿
+        的细微差别）。耗时差 6 倍：
+
+            line pass   CYCLES 1.43s  →  EEVEE 0.23s
+
+        但 line.png 是要喂给视频引擎的**控制图**，与已做过的 A/B 基线不完全同源，
+        故默认仍取 CYCLES（产物逐像素等于历史基线，零风险）：
+            blender.line_engine: eevee   # 想要 6 倍提速时显式开启
+
+        另：BLENDER_WORKBENCH 虽然更快（0.09s），但它忽略材质节点，会把
+        depth/normal 的材质法渲成完全不同的图（实测与 CYCLES 差 55% 像素），排除。
+        """
+        ls = min(max(1, int(self.samples)), 16)
+        if self.line_engine == "eevee":
+            return (
+                'try:\n'
+                '    scn.render.engine="BLENDER_EEVEE"\n'
+                f'    scn.eevee.taa_render_samples={ls}\n'
+                'except Exception:\n'
+                '    try:\n'
+                '        scn.render.engine="BLENDER_EEVEE_NEXT"\n'
+                f'        scn.eevee.taa_render_samples={ls}\n'
+                '    except Exception:\n'
+                '        pass\n'
+            )
+        return (
+            'try:\n'
+            '    scn.render.engine="CYCLES"\n'
+            f'    scn.cycles.samples={ls}\n'
+            '    scn.cycles.use_denoising=True\n'
+            'except Exception:\n'
+            '    pass\n'
+        )
 
     def _common(self, spec: dict, out_dir: str) -> dict:
         # Blender 会把相对路径解析到它自己的 cwd（不是本进程的 cwd）→ 一律转绝对，
@@ -372,6 +470,9 @@ class BlockingGenerator:
         """mode 参数保留以兼容旧调用（block 渲染路径已统一，不再区分 merged/legacy）。"""
         c = self._common(spec, out_dir)
         c["ENGINE"] = self._engine_setup(engine)
+        # 4 张图的引擎策略：line 出线用哪个引擎、depth/normal 是否回切到快速引擎
+        c["LINE_SETUP"] = self._line_setup()
+        c["CTRL_SETUP"] = self._ctrl_setup()
         core = self._fill(_CORE_TEMPLATE, **c)
         cam = self._fill(_CAM_TEMPLATE, **c)
         tail = self._fill(_TAIL_BLOCK, **c)
@@ -719,13 +820,10 @@ scn.render.use_freestyle=False
 # 1) previs 白模（配置引擎，最快）
 scn.render.filepath={PREVIS}
 bpy.ops.render.render(write_still=True, scene=scn.name)
-# 2) line 线框：freestyle 仅 CYCLES / legacy EEVEE 支持，强制 CYCLES 保证线条生效
-try:
-    scn.render.engine="CYCLES"
-    scn.cycles.samples={LS}
-    scn.cycles.use_denoising=True
-except Exception:
-    pass
+# 2) line 线框：freestyle 出线。引擎可配（blender.line_engine，默认 cycles）
+#    实测 EEVEE 也能出 freestyle 线且快 6 倍，但 line.png 是喂视频引擎的控制图，
+#    默认保持 CYCLES 以逐像素对齐历史基线。见 _line_setup 的实测数据。
+{LINE_SETUP}
 # freestyle 需同时开「场景」与「View Layer」开关，且必须有 LineSet，否则 line.png == previs.png
 scn.render.use_freestyle=True
 try:
@@ -748,6 +846,9 @@ except Exception:
 scn.render.filepath={LINE}
 bpy.ops.render.render(write_still=True, scene=scn.name)
 # 3) depth 深度：材质法（View Z Depth -> 固定范围灰度），多帧一致且跨版本可用
+#    depth/normal 是纯 emission 材质，不需要 CYCLES；此处回切快速引擎，
+#    否则会静默继承上一段为 line pass 设的 CYCLES（实测每镜多花约 1s）。
+{CTRL_SETUP}
 def dp_mat():
     m=bpy.data.materials.new("dp"); m.use_nodes=True; t=m.node_tree; t.nodes.clear()
     cd=t.nodes.new("ShaderNodeCameraData")
