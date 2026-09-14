@@ -46,3 +46,7 @@
 
 ## 其他
 - WebUI `python webui.py`(:8000)。AMD395(128GB) 须 BF16/FP8 (NVFP4 不兼容)。
+- **Lint 基线(2026-09-15)**：仓库根目录 `ruff.toml`（首次固化），只开 `E9/F63/F7/F82 + F`，exclude 含 legacy/outputs；CI 直接 `ruff check .`。
+  暂不开 E4/E7（E402 与「惰性 import 重依赖」设计冲突）。⚠️ `tools/blender_server.py` 的 `import bpy` 必须保留（exec 全局依赖），删了会让远端脚本拿不到 bpy。
+- **git 推送(2026-09-15)**：本机 `127.0.0.1:7897` 代理已不通 GitHub（curl 走代理 000 / 直连 200）。
+  push/ls-remote 用 `git -c http.proxy= -c https.proxy= push origin main`（勿改 git config）。PowerShell 的 `curl` 是别名，用 `curl.exe`。

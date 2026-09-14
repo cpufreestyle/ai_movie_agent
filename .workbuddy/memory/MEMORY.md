@@ -22,14 +22,21 @@
 ## 环境守卫 / 工具坑
 - SAFE_DELETE：Python 删除 API turn 级批量拦截(阈值 50)。绕过用 os.system("del /q")（项目惯例见 gen_blocking.py）。
 - Bash shim 损坏：cd/dirname/ls 不可用(Exit 127)。绝对路径调 D:/Program/python.exe；脚本用 __file__ 自定位 ROOT，不依赖 cwd。
+- **`python -c "…\n…"` 里的 `\n` 会被 shim 变成字面 `/n`** → 含换行的脚本一律 Write 成文件再执行。
 - 预览：沙箱 loopback 不可用于预览 running Flask；用 Bash run_in_background 起 webui.py(:8000)。改 .py 需重启服务，HTML 即时生效。
 - 偶发 Edit 报成功但未落盘：改完必须 grep/read 复核。
+
+## Lint / 测试门槛（ruff.toml 已入库）
+- 根目录 `ruff.toml`：line-length 100、target py310、select = E9,F63,F7,F82 + **F 全类**（暂不开 E4/E7：E402 与项目「刻意延迟 import 重依赖」的设计冲突）。CI 跑 `ruff check .`，无 continue-on-error。
+- 复杂度热点用 `ruff check . --select C901` 查；已治理：cli.main 74→<10、anime_stable.main 30→<10、agent.generate_one_scene 26→<10、agent.run 18→<10。
+- 重构等价性验证法：`git show HEAD:<file>` 存到**仓库内**临时文件（放仓库外会因同目录 import 失败产生假差异），与新版同 argv 跑，stdout/stderr/rc 折叠空白后逐字比对。
 
 ## Git 同步（仓库 / 凭据 / 行尾）
 - 仓库实际路径：`C:\Users\michael\CodeBuddy\ai_movie_agent` 是 Junction → `D:\ai sheare\repo\ai_movie_agent`（show-toplevel 落在 D:）。
 - 远端：GitHub `cpufreestyle/ai_movie_agent`（origin，https）；本地 main 跟踪 origin/main。
-- **推送必须禁用 helper 并内嵌 token**（否则 HTTP 401）：
-  `git -c credential.helper= push https://cpufreestyle:<TOKEN>@github.com/cpufreestyle/ai_movie_agent.git main`
+- **推送走代理 127.0.0.1:11268**（全局 `http.proxy=7897` 已不通，会 schannel 握手失败）：
+  `git -c http.proxy=http://127.0.0.1:11268 -c https.proxy=http://127.0.0.1:11268 push origin main`
+  备选：禁用 helper 并内嵌 token：`git -c credential.helper= push https://cpufreestyle:<TOKEN>@github.com/cpufreestyle/ai_movie_agent.git main`
   只读操作(fetch/ls-remote)匿名即可。
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
