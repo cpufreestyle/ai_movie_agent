@@ -128,12 +128,20 @@ def api_run_full():
              size_mb=round(os.path.getsize(MEDIA["movie_final"]) / 2 ** 20, 2))
 
         if (load_config().get("publish", {}) or {}).get("enabled"):
-            try:
-                agent.publish_only(MEDIA["movie_final"])
-                done("H 投稿 B 站")
-            except Exception as e:  # 投稿失败不推翻已生成的成片
-                print(f"[warn] 投稿失败：{e}")
-                result["steps"].append({"step": "H 投稿失败", "error": str(e)})
+            # 投稿前体检门禁（P2-⑬）：配置开启自动投稿时，体检未通过就不投。
+            # 成片已在上一路 copy 到 movie_final.mp4，拦截不会丢产物。
+            allow, _pf = agent.publish_guard(MEDIA["movie_final"])
+            if not allow:
+                print("[warn] 投稿前体检未通过，已跳过自动投稿（成片已保留）")
+                result["steps"].append({"step": "H 投稿跳过",
+                                        "reason": "preflight 未通过"})
+            else:
+                try:
+                    agent.publish_only(MEDIA["movie_final"])
+                    done("H 投稿 B 站")
+                except Exception as e:  # 投稿失败不推翻已生成的成片
+                    print(f"[warn] 投稿失败：{e}")
+                    result["steps"].append({"step": "H 投稿失败", "error": str(e)})
 
         result["file"] = "movie_final.mp4"
         print("\n=== 全自动流程全部完成 ===")

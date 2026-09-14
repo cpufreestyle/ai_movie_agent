@@ -32,6 +32,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -236,6 +237,36 @@ def summarize(scores: list) -> dict:
                         "max": round(float(arr.max()), 3),
                         "mean": round(float(arr.mean()), 3)}
     return out
+
+
+def write_report(work_dir: str, entries: list,
+                 name: str = "qa_report.json") -> str:
+    """把逐镜质检结果 + 分布汇总落盘，返回写入路径（无内容时返回 ""）。
+
+    统一出口：run_series（批量出片）与 MovieAgent（逐镜续写）共用同一份报告结构。
+    原先只有 run_series 自己写，MovieAgent 那条链路打分完就丢了；两条链路各写一份
+    不同形状的报告，后续也没法放在一起比。
+    """
+    if not entries:
+        return ""
+    path = os.path.join(work_dir, name)
+    try:
+        summary = summarize(entries)
+    except Exception:                 # noqa: BLE001 - 报告只是附属产物，失败不影响出片
+        summary = {}
+    failed = [e for e in entries if isinstance(e, dict) and not e.get("ok")]
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "total": len(entries), "failed": len(failed),
+                       "summary": summary, "shots": entries},
+                      f, ensure_ascii=False, indent=2)
+    except Exception as e:            # noqa: BLE001
+        log(f"  [qa] 报告写入失败（不影响出片）: {e}")
+        return ""
+    log(f"  [qa] 报告 {path}（{len(entries)} 次生成，{len(failed)} 次未达标）")
+    return path
 
 
 # ---------- CLI ----------

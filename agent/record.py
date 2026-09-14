@@ -40,11 +40,14 @@ def _engine_name(eng) -> str:
 def collect(eng, *, prompt: str, seed: int, attempt: int,
             image=None, ref_images=None, ref_video=None, style_anchor=None,
             control_video=None, fc_strength=None,
-            qa_policy: dict | None = None) -> dict:
+            qa_policy: dict | None = None, qa_score: dict | None = None) -> dict:
     """从引擎与调用上下文收集本次生成的全量参数。
 
     control_video: 白模 Fun Control 的逐帧控制视频（锁走位）。
     fc_strength:   本次调用**覆盖**的 Fun Control 强度；None 表示用引擎配置值。
+    qa_policy:     质检策略快照（仅在质检开启时传）。
+    qa_score:      本镜质检得分与判定（仅在质检开启时传），便于回看「这一镜当时的
+                   分数是多少、有没有重 roll」，否则只有策略、没有结果。
     """
     def _attr(name, default=None):
         return getattr(eng, name, default)
@@ -91,6 +94,21 @@ def collect(eng, *, prompt: str, seed: int, attempt: int,
             "min_sharpness": qa_policy.get("min_sharpness"),
             "min_motion": qa_policy.get("min_motion"),
         }
+    # 这一镜的实际质检结果（指标 + 判定 + 重 roll 次数）。
+    # 只存策略不存结果的话，事后回看只知道"开了质检"，不知道这一镜到底合不合格、
+    # 重 roll 了几次，无法定位"哪一镜是硬凑过去的"。
+    if qa_score:
+        p["qa_score"] = _compact({
+            "shot": qa_score.get("shot"),
+            "attempt": qa_score.get("attempt"),
+            "ok": qa_score.get("ok"),
+            "reasons": qa_score.get("reasons") or None,
+            "sharpness": qa_score.get("sharpness"),
+            "motion": qa_score.get("motion"),
+            "brightness": qa_score.get("brightness"),
+            "face_ratio": qa_score.get("face_ratio"),
+            "identity_sim": qa_score.get("identity_sim"),
+        })
     # None 值不落盘，保持文件紧凑
     return _compact(p)
 

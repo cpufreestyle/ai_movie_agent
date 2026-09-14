@@ -128,6 +128,11 @@ engine:
 #   单独给视频打分：python -m agent.qa <视频路径> [--char --anchor <锚定图>]
 qa:
   enabled: true
+  # MovieAgent（WebUI 一键出片 / cli run 逐镜续写）是否参与质检，**默认关**。
+  # 与上面的 enabled 分开：批量出片（run_series）历史上就开着质检，而逐镜链路一旦
+  # 开启会多出打分开销 + 换 seed 重 roll（一次重 roll 就是几分钟 GPU），默认必须与
+  # 既有出片行为完全一致，所以这里只在显式开启时才打分。阈值仍复用下面这段。
+  agent_enabled: false
   sample_frames: 9        # 每镜抽样帧数
   max_rerolls: 1          # 不达标时换 seed 重出的次数上限（0 = 只报告不重出）
   # ---- 风格无关指标（默认启用，只用 opencv+numpy，无额外依赖）----
@@ -142,6 +147,13 @@ qa:
   face_check: false
   min_face_ratio: 0.34    # 检出人脸的采样帧占比下限
   min_identity: 0.35      # arcface 余弦：>0.6 同一人，0.35~0.6 偏弱，<0.35 基本换人
+# 投稿前体检（静态校验：标题/标签/封面/时长等，不发网络请求）。
+#   仅作用于「配置开启自动投稿」的链路（finalize 自动投稿、WebUI 一键全自动）：
+#   体检有 error 且 block_publish 为真时拦下投稿，成片本身保留。
+#   显式投稿（cli publish / 发布页点按钮）不走这里——用户已明确点了，不该被静默拦下。
+preflight:
+  enabled: true           # false = 完全不跑体检
+  block_publish: true     # false = 只告警不拦截
 # 提示词默认值（负向提示词库）
 #   negative 可写预设名 quality / identity / anime，也可直接写一整串（非预设名时按字面处理）。
 #   注意 1：引擎级 engine.comfyui_ltx.negative 更具体，写了就以它为准。

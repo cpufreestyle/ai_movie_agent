@@ -64,6 +64,8 @@ class MovieAgent:
         # Blender 白模分镜（远程重构新增，未就绪自动跳过）
         self.blocking = BlockingGenerator(config, workdir)
         # 白模资产与关键帧索引见下方 property（单一来源 = self.state，不在此初始化）
+        # 逐镜质检累积结果（内存态；每打分一次就增量写 outputs/qa_report.json）
+        self._qa_entries: list = []
 
         self.film = os.path.join(self.workdir, "film.mp4")
         self.state_path = os.path.join(self.workdir, "state.json")
@@ -119,6 +121,74 @@ class MovieAgent:
     @keyframe_images.setter
     def keyframe_images(self, value) -> None:
         self.state["keyframe_images"] = list(value or [])
+
+    # ---------- 质检 / 投稿体检的配置入口 ----------
+    def _character_anchor(self) -> str:
+        """角色锚定图路径（相对路径按仓库根解析）。
+
+        `normpath`：config 里惯用正斜杠（`outputs/anchor/...`），直接 join 会得到
+        `...\\ai_movie_agent\\outputs/anchor/x.png` 这种混用分隔符。语义上等价，但
+        与 ref_images 去重比较、日志、record 落盘都会带上两种写法，故统一。
+        """
+        anchor = ((self.config.get("series", {}) or {}).get("character_anchor")
+                  or "outputs/anchor/mira_anchor.png")
+        if not os.path.isabs(anchor):
+            anchor = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), anchor)
+        return os.path.normpath(anchor)
+
+    def _qa_policy(self) -> tuple:
+        """返回 (是否对 MovieAgent 出片链路启用质检, 策略)。
+
+        默认**关**。WebUI / `cli run` 的逐镜续写链路一旦开启质检，就会多出打分开销
+        与「换 seed 重 roll」（一次重 roll 就是几分钟 GPU），默认行为必须与既有出片
+        完全一致，所以这里用独立开关 `qa.agent_enabled`，而不是复用 run_series 批量
+        链路那份 `qa.enabled`（它历史上默认就是开的）。
+        阈值仍复用 `qa.*` 同一段配置，不必维护两套。
+        """
+        from . import qa
+        on = bool((self.config.get("qa") or {}).get("agent_enabled", False))
+        return on, (qa.load_policy(self.config) if on else {})
+
+    def _score_shot(self, path: str, n: int) -> dict:
+        """给刚生成的镜头片段打分并判定，返回可直接落盘的 entry。"""
+        from . import qa
+        _, policy = self._qa_policy()
+        # 「是否含主角」复用出片侧判据：本镜挂了关键帧/白模首帧即视为含角色。
+        # 人脸类指标默认关闭（opencv 的 Haar 对动漫脸基本失效，见 qa.py 模块注释）。
+        is_char = bool(self.keyframe_images[n] if n < len(self.keyframe_images) else None)
+        score = qa.score_video(path, policy, is_char_shot=is_char,
+                               anchor=self._character_anchor())
+        ok, reasons = qa.evaluate(score, policy, is_char_shot=is_char)
+        return {**score, "shot": f"scene_{n+1:03d}", "ok": ok, "reasons": reasons}
+
+    def _preflight(self, video: str) -> dict:
+        """投稿前体检（只读静态校验；读 outputs/state.json 组装标题/标签）。"""
+        if not bool((self.config.get("preflight") or {}).get("enabled", True)):
+            return {}
+        from . import preflight as pf
+        try:
+            return pf.check_from_outputs(self.workdir, video=video)
+        except Exception as e:          # noqa: BLE001 - 体检本身不该拖垮出片
+            return {"ok": True, "errors": [],
+                    "warnings": [f"体检执行失败（已忽略）: {e}"]}
+
+    def publish_guard(self, video: str) -> tuple:
+        """自动投稿前的门禁：返回 (是否放行, 体检结果)。
+
+        只用于「配置开启自动投稿」的链路（finalize 的自动投稿、WebUI 一键全自动）。
+        显式投稿（cli publish / 发布页点按钮）不走这里 —— 用户已经明确点了，不该被
+        静默拦下。`preflight.block_publish: false` 可整体关掉拦截。
+        """
+        result = self._preflight(video)
+        for e in (result or {}).get("errors", []):
+            log(f"[agent] 投稿体检错误: {e}")
+        for w in (result or {}).get("warnings", []):
+            log(f"[agent] 投稿体检提醒: {w}")
+        if not result:
+            return True, {}
+        block = bool((self.config.get("preflight") or {}).get("block_publish", True))
+        return (not (block and not result.get("ok"))), result
 
     # ---------- 状态 ----------
     def _load_state(self) -> dict:
@@ -182,11 +252,7 @@ class MovieAgent:
         # 白模首帧(I2V start)是灰模，必须配角色锚定图作 ref_image(Hybrid)，否则 H3 会
         # 把灰模渲染成灰色角色。「use_as_i2v_start 开启」即表示本镜首帧已是白模 previs。
         if bcfg.get("use_as_i2v_start"):
-            _anchor = ((self.config.get("series", {}) or {}).get("character_anchor")
-                       or "outputs/anchor/mira_anchor.png")
-            if not os.path.isabs(_anchor):
-                _anchor = os.path.join(os.path.dirname(os.path.dirname(
-                    os.path.abspath(__file__))), _anchor)
+            _anchor = self._character_anchor()
             if os.path.exists(_anchor) and _anchor not in (ref_images or []):
                 ref_images = (ref_images or []) + [_anchor]
         if bcfg.get("use_as_ref_video"):
@@ -227,10 +293,38 @@ class MovieAgent:
         if ignored:
             log(f"  [agent] {type(self.engine).__name__} 不支持的条件已忽略: "
                 + ", ".join(sorted(ignored)))
-        # 先生成到临时片段，再作为续写结果替换 film
+        # ---- 逐镜生成（含可选质检重 roll，P2-⑬）----
+        # 默认不质检（见 _qa_policy）；开启后：不达标就换 seed 重出（限次），仍不达标
+        # 则采用最后一次并如实记录，绝不因为质检而中断整条出片链。
         tmp = os.path.join(self.scenes_dir, f"scene_{n+1:03d}.mp4")
-        self.engine.generate(prompt, tmp, prev_clip=prev, seed=seed,
-                              image=keyframe, two_pass=self.engine.two_pass, **extra)
+        qa_on, qa_policy = self._qa_policy()
+        if qa_on and seed is None:
+            # 要重 roll 就必须有确定的基准 seed：否则每镜都换随机数，重 roll 之间
+            # 不可比，事后也无法复现失败样本。这里现取一个并打进日志。
+            seed = int(time.time()) & 0x7FFFFFFF
+            log(f"  [qa] 未指定 seed，本次基准 seed={seed}（便于复现与换 seed 重 roll）")
+        rolls = 1 + (max(0, int(qa_policy.get("max_rerolls") or 0)) if qa_on else 0)
+        qa_score = None
+        attempt = 0
+        cur_seed = seed
+        for attempt in range(rolls):
+            cur_seed = seed if seed is None else seed + attempt * 7919
+            self.engine.generate(prompt, tmp, prev_clip=prev, seed=cur_seed,
+                                 image=keyframe, two_pass=self.engine.two_pass, **extra)
+            if not qa_on:
+                break
+            qa_score = self._score_shot(tmp, n)
+            qa_score["attempt"] = attempt
+            if qa_score["ok"]:
+                break
+            if attempt + 1 < rolls:
+                log(f"  [qa] 第 {n+1} 镜未达标（{'；'.join(qa_score['reasons'])}）"
+                    f" → 换 seed 重 roll（{attempt + 1}/{rolls - 1}）")
+            else:
+                log(f"  [qa] 第 {n+1} 镜仍未达标（{'；'.join(qa_score['reasons'])}），"
+                    f"采用本次结果继续")
+        if qa_on:
+            seed = cur_seed          # 落盘的 seed 必须是真正用上的那个
 
         # 备份当前长片，并把新片段设为影片（续写后的完整片）
         if n > 0 and os.path.exists(self.film):
@@ -241,6 +335,19 @@ class MovieAgent:
                 pass
         shutil.move(tmp, self.film)
 
+        # 质检结果：增量落盘（含分布汇总），并把紧凑摘要写进 state 供 WebUI/看板读
+        if qa_score:
+            from . import qa as qa_mod
+            self._qa_entries.append(qa_score)
+            report = qa_mod.write_report(self.workdir, self._qa_entries)
+            self.state["qa"] = {
+                "total": len(self._qa_entries),
+                "failed": sum(1 for e in self._qa_entries if not e.get("ok")),
+                "last_ok": bool(qa_score.get("ok")),
+                "last_attempts": attempt + 1,
+                "report": os.path.basename(report) if report else "",
+            }
+
         # 生成参数落盘（可复现 / 供 A/B 与回归）：含白模参考素材 ref_images / ref_video
         # 以及 Fun Control 的 control_video / strength —— 缺了 control_video 这一镜
         # 无法复现（它是当前唯一能锁走位的输入），故必须一并落盘。
@@ -248,10 +355,13 @@ class MovieAgent:
         record.save(self.workdir, f"scene_{n+1:03d}", record.collect(
             self.engine, prompt=prompt,
             seed=seed if seed is not None else getattr(self.engine, "seed", None),
-            attempt=0, image=keyframe, ref_images=extra.get("ref_images"),
+            attempt=attempt if qa_on else 0,
+            image=keyframe, ref_images=extra.get("ref_images"),
             ref_video=extra.get("ref_video"),
             control_video=extra.get("control_video"),
-            fc_strength=extra.get("fc_strength")))
+            fc_strength=extra.get("fc_strength"),
+            qa_policy=qa_policy if qa_on else None,
+            qa_score=qa_score))
 
         self.state["beats"].append(beat)
         self.state["scene_count"] = n + 1
@@ -363,6 +473,14 @@ class MovieAgent:
             out = self.film
         # 自动投稿 B 站（config.publish.enabled 时）
         if self.publisher.enabled:
+            # 投稿前体检：不通过就拦下自动投稿（config.preflight.block_publish=false 可放行）。
+            # 成片本身已经产出并保留，用户修完标题/封面后仍可手工作废。
+            allow, _pf = self.publish_guard(out)
+            if not allow:
+                log("[agent] 体检未通过，已拦截自动投稿"
+                    "（成片已保留；可修正后用 `python cli.py publish` 手动投稿，"
+                    "或设 config.preflight.block_publish=false 放行）")
+                return out
             res = self.publisher.publish_latest(self.state, out)
             if res.get("ok"):
                 log(f"[agent] 已投稿 B 站: {res['title']}")

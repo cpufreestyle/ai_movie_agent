@@ -267,26 +267,14 @@ def resolve_anchor(value: str, anchor_name: str = "mira") -> tuple:
 
 
 def _write_qa_report(entries: list) -> None:
-    """把逐镜质检结果落盘（含分布汇总，便于回头校准阈值）。"""
+    """把逐镜质检结果落盘（含分布汇总，便于回头校准阈值）。
+
+    实现在 agent/qa.py: write_report —— 与 MovieAgent 逐镜链路共用同一份报告结构。
+    """
     if not entries:
         return
-    path = os.path.join(WORK, "qa_report.json")
-    summary = {}
-    try:
-        from agent import qa as qa_mod
-        summary = qa_mod.summarize(entries)
-    except Exception:                 # noqa: BLE001 - 报告只是附属产物，失败不影响出片
-        pass
-    failed = [e for e in entries if not e.get("ok")]
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                       "total": len(entries), "failed": len(failed),
-                       "summary": summary, "shots": entries},
-                      f, ensure_ascii=False, indent=2)
-        print(f"[qa] 报告 {path}（{len(entries)} 次生成，{len(failed)} 次未达标）")
-    except Exception as e:            # noqa: BLE001
-        print(f"[qa] 写报告失败: {e}")
+    from agent import qa as qa_mod
+    qa_mod.write_report(WORK, entries)
 
 
 def run_episode(eng, ep: int, prompts: list, style_anchor: str,
