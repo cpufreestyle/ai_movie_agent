@@ -185,26 +185,72 @@ class BlockingGenerator:
         return self.client.is_ready()
 
     # ---------- 分镜文本 -> 场景 spec ----------
+    # 关键词 -> 取值的**声明式规则表**：列表顺序 == 优先级，先命中先定。
+    # 原先是顺序敏感的 if/elif 链（`摇` 必须排在 `推/拉` 前、"从左到右" 必须排在
+    # "走近镜头" 前），优先级只存在于代码顺序里，扩展和测试都很难；改成表之后
+    # 优先级一眼可见，加一类走位只需加一行，且能逐条锁进单测。
+    # 统一按小写匹配（原实现 shot/camera/height 大小写敏感、走位却先 lower，
+    # 口径不一 —— 结果就是英文 "Wide shot" 选不中全景）。
+    SHOT_RULES: tuple = (
+        ("wide", ("全景", "远景", "大远景", "wide", "establishing")),
+        ("close", ("特写", "大特写", "近景", "close", "cu")),
+    )
+    CAMERA_RULES: tuple = (
+        ("pan", ("摇", "pan")),
+        ("dolly", ("推", "推进", "拉", "dolly")),
+        ("track", ("横移", "移", "跟拍", "track")),
+        ("orbit", ("环绕", "旋转", "转圈", "orbit")),
+    )
+    HEIGHT_RULES: tuple = (
+        ("low", ("低机位", "仰拍", "low")),
+        ("high", ("高机位", "俯拍", "俯视", "航拍", "high")),
+    )
+    # 走位规则（归一化坐标，-1=画面左 / +1=画面右）。
+    # 注意：「左/右同时出现」不由本表处理，而是优先按出现先后定方向（见 _parse_walk）。
+    WALK_RULES: tuple = (
+        ("approach", ("走近镜头", "走向镜头", "靠近镜头", "approach"),
+         "0,0.6:0,-0.6"),
+        ("away", ("远离镜头", "走远", "walk away"), "0,-0.6:0,0.6"),
+        ("back_forth", ("来回", "徘徊", "踱步", "走来走去"), "-1,0:1,0:-1,0"),
+        ("circle", ("绕圈", "环绕走", "绕着", "走了一圈", "绕一圈", "绕一",
+                    "circle walk"),
+         "-1,0.4:1,0.4:1,-0.4:-1,-0.4:-1,0.4"),
+    )
+
+    @staticmethod
+    def _first_match(lowered: str, rules) -> str | None:
+        """按规则表顺序返回第一个命中的取值；无命中返回 None（表顺序 == 优先级）。"""
+        for value, keywords in rules:
+            if any(k in lowered for k in keywords):
+                return value
+        return None
+
+    @classmethod
+    def _parse_walk(cls, lowered: str) -> str:
+        """从分镜文本解析走位；无走位关键词返回 ""（调用方回退 config 默认）。
+
+        「左/右同时出现」优先按出现先后定方向，覆盖
+        "从左到右" / "从画面左侧走到右侧" / "由左向右" / "left to right" 等说法。
+        """
+        left_cn, right_cn = lowered.find("左"), lowered.find("右")
+        left_en, right_en = lowered.find("left"), lowered.find("right")
+        if (left_cn >= 0 and right_cn >= 0) or (left_en >= 0 and right_en >= 0):
+            left = left_cn if left_cn >= 0 else left_en
+            right = right_cn if right_cn >= 0 else right_en
+            return "-1,0:1,0" if left < right else "1,0:-1,0"
+        for _name, keywords, walk in cls.WALK_RULES:
+            if any(k in lowered for k in keywords):
+                return walk
+        return ""
+
     def parse_spec(self, text: str) -> dict:
         spec = {"characters": 1, "props": [], "shot": "medium",
                 "camera": "static", "height": "eye"}
         t = text or ""
-        if any(k in t for k in ("全景", "远景", "wide", "establishing", "大远景")):
-            spec["shot"] = "wide"
-        elif any(k in t for k in ("特写", "近景", "close", "cu", "大特写")):
-            spec["shot"] = "close"
-        if any(k in t for k in ("摇", "pan")):
-            spec["camera"] = "pan"
-        elif any(k in t for k in ("推", "dolly", "推进", "拉")):
-            spec["camera"] = "dolly"
-        elif any(k in t for k in ("移", "track", "横移", "跟拍")):
-            spec["camera"] = "track"
-        elif any(k in t for k in ("环绕", "orbit", "旋转", "转圈")):
-            spec["camera"] = "orbit"
-        if any(k in t for k in ("低机位", "仰拍", "low")):
-            spec["height"] = "low"
-        elif any(k in t for k in ("高机位", "俯拍", "航拍", "high", "俯视")):
-            spec["height"] = "high"
+        low = t.lower()
+        spec["shot"] = self._first_match(low, self.SHOT_RULES) or spec["shot"]
+        spec["camera"] = self._first_match(low, self.CAMERA_RULES) or spec["camera"]
+        spec["height"] = self._first_match(low, self.HEIGHT_RULES) or spec["height"]
         # 可选：LLM 增强角色数 / 道具
         if self.cfg.get("use_llm_parse"):
             try:
@@ -225,26 +271,9 @@ class BlockingGenerator:
                             spec["height"] = j["height"]
             except Exception as e:
                 log(f"  [blocking] LLM 解析失败，用规则兜底: {e}")
-        # 走位（归一化坐标，-1=画面左 / +1=画面右；空 = 用 config 的 fun_control_walk 默认）。
+        # 走位（归一化坐标；空 = 用 config 的 fun_control_walk 默认）。
         # 仅用于 Fun Control 控制序列；既有的 ref_images / ref_video 路线不受影响。
-        spec["walk"] = ""
-        _lt = t.lower()
-        _li, _ri = _lt.find("左"), _lt.find("右")
-        _lf, _rf = _lt.find("left"), _lt.find("right")
-        if (_li >= 0 and _ri >= 0) or (_lf >= 0 and _rf >= 0):
-            # "左/右"都出现 -> 按先后顺序定方向（覆盖"从左到右""从画面左侧走到右侧""由左向右"…）
-            _l = _li if _li >= 0 else _lf
-            _r = _ri if _ri >= 0 else _rf
-            spec["walk"] = "-1,0:1,0" if _l < _r else "1,0:-1,0"
-        elif any(k in t for k in ("走近镜头", "走向镜头", "靠近镜头", "approach")):
-            spec["walk"] = "0,0.6:0,-0.6"
-        elif any(k in t for k in ("远离镜头", "走远", "walk away")):
-            spec["walk"] = "0,-0.6:0,0.6"
-        elif any(k in t for k in ("来回", "徘徊", "踱步", "走来走去")):
-            spec["walk"] = "-1,0:1,0:-1,0"
-        elif any(k in t for k in ("绕圈", "环绕走", "circle walk",
-                                    "绕着", "走了一圈", "绕一圈", "绕一")):
-            spec["walk"] = "-1,0.4:1,0.4:1,-0.4:-1,-0.4:-1,0.4"
+        spec["walk"] = self._parse_walk(low)
         return spec
 
     # ---------- 代码模板填充 ----------
