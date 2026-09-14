@@ -18,7 +18,6 @@ import shutil
 import subprocess
 import sys
 import cv2
-import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tools.comfyui_client import ComfyUIClient

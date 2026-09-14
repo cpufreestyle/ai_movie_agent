@@ -14,7 +14,6 @@ CLI 用法（已核对）：
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import shutil

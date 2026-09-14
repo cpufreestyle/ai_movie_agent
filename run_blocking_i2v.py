@@ -27,7 +27,7 @@ import sys
 import time
 
 import run_series as rs
-from _exp_ref_video import motion_profile, _ffmpeg
+from _exp_ref_video import motion_profile
 
 ROOT = rs.ROOT
 PY = sys.executable

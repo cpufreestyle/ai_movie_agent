@@ -185,9 +185,9 @@ def _mux_bgm(video: str, audio: str, out: str) -> bool:
     if not exe:
         return False
     try:
-        r = subprocess.run([exe, "-y", "-i", video, "-i", audio,
-                            "-c:v", "copy", "-c:a", "aac", "-shortest", out],
-                           capture_output=True)
+        subprocess.run([exe, "-y", "-i", video, "-i", audio,
+                        "-c:v", "copy", "-c:a", "aac", "-shortest", out],
+                       capture_output=True)
         return os.path.exists(out) and os.path.getsize(out) > 0
     except Exception:
         return False
@@ -428,7 +428,7 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         setting_lines.append(f"声音基调：以「{tone}」为底，配乐留白与电子质感交织。")
     if not setting_lines:
         setting_lines.append("（由 Agent 基于创意自动派生，此处为占位。）")
-    cards.append(_card(width, height, f"Agent 的产出 · 世界观设定", setting_lines))
+    cards.append(_card(width, height, "Agent 的产出 · 世界观设定", setting_lines))
 
     # 5) 人物小传卡（C+ 真实数据，最多 3 个）
     for ci, ch in enumerate(characters[:3]):

@@ -15,7 +15,6 @@ import argparse
 import os
 import shutil
 import subprocess
-import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPACE_DIR = os.path.join(REPO_ROOT, "space")

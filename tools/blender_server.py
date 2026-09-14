@@ -17,7 +17,9 @@ import socket
 import sys
 import traceback
 
-import bpy  # Blender 内置模块，仅在 Blender 进程内可用
+# 必须保留在模块全局：_exec() 用 globals() 执行远端脚本，脚本里直接引用 `bpy`
+# （本项目生成的 blocking 代码自带 import bpy，但手工/其它客户端的代码不一定带）。
+import bpy  # noqa: F401  # Blender 内置模块，仅在 Blender 进程内可用
 
 HOST = "127.0.0.1"
 PORT = 9876

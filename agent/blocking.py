@@ -176,7 +176,6 @@ class BlockingGenerator:
                 return max(int(raw), 1)
             except (TypeError, ValueError):
                 pass
-        from .mmh3_engine import MMH3Engine
         from .video_engine import H3_SECTION_ALIASES, pick_engine_section
 
         mmh3 = pick_engine_section(self.config, *H3_SECTION_ALIASES)

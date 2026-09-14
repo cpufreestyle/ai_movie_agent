@@ -295,7 +295,7 @@ def build_steps(sch: dict, args) -> list:
             "title": f"下载视频权重（{engine} / {gpu}）",
             "cmds": [("下载权重", dl)],
             "runnable": bool(args.with_weights),  # 默认不跑，需 --with-weights 授权
-            "manual": "" if args.with_weights else f"需授权：加 --with-weights --models-dir <ComfyUI/models 路径>",
+            "manual": "" if args.with_weights else "需授权：加 --with-weights --models-dir <ComfyUI/models 路径>",
         })
     elif not comfyui_local:
         steps.append({

@@ -200,10 +200,7 @@ def main():
     ap.add_argument("--end-percent", type=float, default=0.85, help="控制生效到多少采样进度")
     a = ap.parse_args()
 
-    prompt = a.prompt
-    if a.prompt_file and os.path.exists(a.prompt_file):
-        prompt = open(a.prompt_file, encoding="utf-8").read().strip()
-    # 写入基础工作流的 prompt（node 6）
+    # 注：--prompt / --prompt-file 当前未参与出片（基础工作流自带 prompt），保留参数仅为兼容旧命令
     refresh()
     ctrl = a.control
     if a.walk:

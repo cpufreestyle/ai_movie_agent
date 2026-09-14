@@ -576,7 +576,6 @@ def test_comfyui_client_error_messages():
 
 
 def test_comfyui_client_cancel_and_progress():
-    from unittest.mock import MagicMock
     from tools.comfyui_client import ComfyUIClient
 
     c = ComfyUIClient("http://127.0.0.1:8188")

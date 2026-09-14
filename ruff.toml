@@ -1,0 +1,40 @@
+# 项目 lint 配置（ruff 0.16+）
+#
+# 背景：仓库此前**没有任何 ruff 配置**。后果是两件事：
+#   1) 本地跑 `ruff check .` 时 ruff 会向上查找配置，不同机器/不同目录结果不一样，
+#      报出来的 600+ 条里混着 BLE001 / I001 / PLW / S 等，根本没法当门槛；
+#   2) CI 只跑 `--select E9,F63,F7,F82`（还曾带 continue-on-error），等于没门槛。
+# 这里把规则集固化成文件，本地与 CI 行为一致。
+#
+# 用法：
+#   ruff check .            # 用本配置
+#   ruff check . --fix      # 自动修可修的
+#   ruff check . --isolated # 忽略本配置（排查配置本身时用）
+
+line-length = 100
+target-version = "py310"
+
+# 注意：ruff 的 exclude 会**覆盖**默认排除项，故这里把常用默认项一并写回。
+exclude = [
+  ".git",
+  ".ruff_cache",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "build",
+  "dist",
+  "node_modules",
+  # 项目自有：历史代码与生成物
+  "legacy",
+  "outputs",
+]
+
+[lint]
+# 只开「不会误伤风格偏好」的规则：
+#   E9 / F63 / F7 / F82 —— 语法错误、assert 写成元组、未定义名（CI 原有）
+#   F                   —— 未用导入、未用变量、f-string 无占位符、重复定义
+#
+# 暂不开 E4/E7（当前 52 处）：E402(module-import-not-at-top) 与本项目「刻意延迟
+# import 重依赖」的设计冲突（webui 顶层 import agent 会触发全量依赖，必须惰性加载）；
+# E722(裸 except) / E741(含糊变量名) 属风格级，单独立项后再开。
+select = ["E9", "F63", "F7", "F82", "F"]

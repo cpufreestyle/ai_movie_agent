@@ -53,7 +53,6 @@ def test_all_engines_share_one_generate_signature():
 
 def test_engines_declare_capabilities_they_actually_accept():
     """能力名必须都能作为关键字传进 generate，否则声明就是假的。"""
-    from agent.video_engine import VideoEngine
     for name, module in ENGINE_PATHS.items():
         cls = _load(name, module)
         params = inspect.signature(cls.generate).parameters

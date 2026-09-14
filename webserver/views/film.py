@@ -12,7 +12,6 @@ from flask import Blueprint, request, send_file
 from ..services.pipeline import (
     film_candidates,
     load_storyboard,
-    run_script,
     storyboard_from_bible,
 )
 from ..state import HERE, STORYBOARD_PATH, WORKDIR, _state, json_resp, load_config, run_in_background

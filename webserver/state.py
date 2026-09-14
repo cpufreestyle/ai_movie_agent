@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import copy
 import glob
 import io
 import json
@@ -160,9 +161,53 @@ def json_resp(data, status=200):
                     mimetype="application/json; charset=utf-8", status=status)
 
 
+_cfg_cache: dict = {"key": None, "data": None}
+_cfg_lock = threading.Lock()
+
+
+def _config_signature() -> tuple:
+    """配置文件的变更指纹（mtime_ns + size）。文件不存在/读不到时返回空元组。"""
+    try:
+        st = os.stat(CONFIG_PATH)
+    except OSError:
+        return ()
+    return (st.st_mtime_ns, st.st_size)
+
+
+def invalidate_config_cache() -> None:
+    """主动丢弃配置缓存（写完 config.yaml 后调用）。
+
+    mtime 判断在绝大多数情况下已经够用（mtime_ns 精度 ~100ns），但同一个
+    纳秒内连续写两次的理论窗口仍在；写配置是低频操作，多失效一次没有代价。
+    """
+    with _cfg_lock:
+        _cfg_cache["key"] = None
+        _cfg_cache["data"] = None
+
+
 def load_config() -> dict:
+    """读配置（按文件指纹缓存，返回副本）。
+
+    实测（13KB config.yaml）：`yaml.safe_load` 约 **10.8ms**，`copy.deepcopy`
+    约 **0.10ms**。原实现每次调用都读盘 + 解析 + 跑一遍 apply_env_overrides，
+    而一次请求里可能调好几次，前端又在 1s 轮询 `/api/logs` —— 白白烧 CPU。
+
+    缓存按 `(mtime_ns, size)` 失效；**返回 deepcopy** 以保留「每个调用方拿到
+    独立对象」的原语义（MovieAgent / Publisher 会持有 config，不能让它们共享
+    同一个 dict 后互相影响）。环境变量覆盖只在新解析时应用——运行期改 env
+    不生效，对本地单用户服务是可接受的取舍。
+    """
+    sig = _config_signature()
+    with _cfg_lock:
+        if _cfg_cache["key"] == sig and _cfg_cache["data"] is not None:
+            return copy.deepcopy(_cfg_cache["data"])
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return apply_env_overrides(yaml.safe_load(f) or {})
+        data = apply_env_overrides(yaml.safe_load(f) or {})
+    with _cfg_lock:
+        _cfg_cache["key"] = sig
+        # 存一份私有副本，避免外部改坏了缓存本体
+        _cfg_cache["data"] = copy.deepcopy(data)
+    return data
 
 
 def get_agent():

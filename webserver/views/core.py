@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import time
 
-import yaml
 from flask import Blueprint, Response, request
 
 from ..state import (
@@ -15,6 +14,7 @@ from ..state import (
     _lock,
     _state,
     get_agent,
+    invalidate_config_cache,
     json_resp,
     load_config,
     logbuf,
@@ -107,7 +107,8 @@ def save_config():
                     f.write(src.read())
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.safe_dump(body, f, allow_unicode=True, sort_keys=False)
-        # 重置已缓存的 agent，使其使用新配置
+        # 重置已缓存的 agent 与配置，使其使用新配置
+        invalidate_config_cache()
         with _lock:
             _state["agent"] = None
             _state["agent_error"] = None

@@ -15,7 +15,6 @@
 import os
 import sys
 import subprocess
-import platform
 
 
 def apply_env_overrides(cfg: dict) -> dict:

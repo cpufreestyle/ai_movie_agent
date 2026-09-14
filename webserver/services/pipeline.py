@@ -127,7 +127,7 @@ def storyboard_from_bible() -> dict:
     narration = [s.strip() for s in narration if s.strip()]
     if len(shots) < 18:
         shots = shots + [shots[-1]] * (18 - len(shots))
-        print(f"[storyboard] shots 不足 18，已补至 18")
+        print("[storyboard] shots 不足 18，已补至 18")
     elif len(shots) > 18:
         shots = shots[:18]
     if len(narration) < 9:

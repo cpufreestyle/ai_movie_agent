@@ -99,7 +99,7 @@ class Writer:
         refs = bible.get("outline_refs") or {}
         nxt = refs.get(str(next_index))
         if nxt:
-            parts.append(f"本镜参考资料(来自知识库):\n" + "\n".join(nxt[:2]))
+            parts.append("本镜参考资料(来自知识库):\n" + "\n".join(nxt[:2]))
         return "\n".join(parts)
 
 
