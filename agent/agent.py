@@ -199,12 +199,16 @@ class MovieAgent:
         shutil.move(tmp, self.film)
 
         # 生成参数落盘（可复现 / 供 A/B 与回归）：含白模参考素材 ref_images / ref_video
+        # 以及 Fun Control 的 control_video / strength —— 缺了 control_video 这一镜
+        # 无法复现（它是当前唯一能锁走位的输入），故必须一并落盘。
         from . import record
         record.save(self.workdir, f"scene_{n+1:03d}", record.collect(
             self.engine, prompt=prompt,
             seed=seed if seed is not None else getattr(self.engine, "seed", None),
             attempt=0, image=keyframe, ref_images=extra.get("ref_images"),
-            ref_video=extra.get("ref_video")))
+            ref_video=extra.get("ref_video"),
+            control_video=extra.get("control_video"),
+            fc_strength=extra.get("fc_strength")))
 
         self.state["beats"].append(beat)
         self.state["scene_count"] = n + 1
@@ -215,10 +219,24 @@ class MovieAgent:
     # ---------- 循环 ----------
     def run(self, continuous: bool = True, max_scenes: int | None = None,
             auto: bool = True, seed: int | None = None,
-            topic: str | None = None, do_research: bool = False) -> None:
+            topic: str | None = None, do_research: bool = False,
+            should_stop=None) -> None:
+        """持续创作循环。
+
+        should_stop: 可选的无参回调，返回 True 表示请求停止（WebUI「停止」按钮）。
+            注入式而非全局标志：CLI 不传即行为不变，也不会让两个并发任务互相干扰。
+            检查粒度是「每镜」，因为单次引擎渲染是阻塞调用，无法在渲染中途打断；
+            已生成的分镜与 film.mp4 全部保留。
+        """
         title = self.config.get("project", {}).get("title", "未命名")
         topic = topic or self.config.get("project", {}).get("theme", "")
         log(f"=== 开始创作《{title}》===")
+
+        def _stopped() -> bool:
+            try:
+                return bool(should_stop and should_stop())
+            except Exception:          # 停止回调异常不应中断创作
+                return False
 
         # ---- A→D 素材层 + 创意层前半 ----
         if do_research:
@@ -267,8 +285,10 @@ class MovieAgent:
             log(f"世界观: {concept.get('logline', '')}")
 
         # ---- E→G→H 创意层后半 + 发布 ----
+        # while not _stopped()：停止请求既能在「进入循环前」生效（企划阶段点了停止
+        # 就不会再启动一次渲染），也能在每镜之间生效。
         try:
-            while True:
+            while not _stopped():
                 if max_scenes and self.state["scene_count"] >= max_scenes:
                     log(f"已达到目标分镜数 {max_scenes}，停止。")
                     break
@@ -287,6 +307,8 @@ class MovieAgent:
                         break
         except KeyboardInterrupt:
             log("\n[agent] 用户中断，已保留当前影片。")
+        if _stopped():
+            log("[agent] 已按停止请求退出循环（已生成的分镜与 film.mp4 全部保留）。")
         self.finalize()
 
     def finalize(self) -> str:

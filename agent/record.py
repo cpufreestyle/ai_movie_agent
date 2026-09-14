@@ -8,13 +8,24 @@ lora/post/negative** 等。要「复现某一镜」或做 A/B 对比（建议 #9
 同目录的 `gen_params.json`：
     { shot_key: {engine, resolution, num_frames, fps, steps, lora, negative,
                  two_pass, block_cache, seed, attempt, image, ref_images,
+                 ref_video, control_video, fun_control:{...},
                  style_anchor, prompt, qa:{...}, generated_at} }
+
+`control_video` / `fun_control` 是白模 Fun Control 走位管线的关键输入：前者是逐帧
+depth 控制序列（当前唯一能真正锁住走位的输入），后者是引擎侧的控制参数快照。
+缺了它们，这一镜无法复现，也无法做 A/B 对比。媒体类字段一律只存 basename
+（与既有 ref_images / ref_video 一致）。
 """
 from __future__ import annotations
 
 import json
 import os
 import time
+
+
+def _compact(d: dict) -> dict:
+    """丢掉值为 None 的键，保持落盘文件紧凑。"""
+    return {k: v for k, v in d.items() if v is not None}
 
 
 def _engine_name(eng) -> str:
@@ -28,10 +39,18 @@ def _engine_name(eng) -> str:
 
 def collect(eng, *, prompt: str, seed: int, attempt: int,
             image=None, ref_images=None, ref_video=None, style_anchor=None,
+            control_video=None, fc_strength=None,
             qa_policy: dict | None = None) -> dict:
-    """从引擎与调用上下文收集本次生成的全量参数。"""
+    """从引擎与调用上下文收集本次生成的全量参数。
+
+    control_video: 白模 Fun Control 的逐帧控制视频（锁走位）。
+    fc_strength:   本次调用**覆盖**的 Fun Control 强度；None 表示用引擎配置值。
+    """
     def _attr(name, default=None):
         return getattr(eng, name, default)
+
+    def _base(p):
+        return os.path.basename(p) if p else None
 
     p = {
         "engine": _engine_name(eng),
@@ -45,14 +64,26 @@ def collect(eng, *, prompt: str, seed: int, attempt: int,
         "block_cache": _attr("block_cache"),
         "seed": seed,
         "attempt": attempt,
-        "image": os.path.basename(image) if image else None,
+        "image": _base(image),
         "ref_images": [os.path.basename(r) for r in (ref_images or [])],
         # 白模灰模动画（ref_video）也要落盘：否则这一镜的参考素材无法完整复现
-        "ref_video": os.path.basename(ref_video) if ref_video else None,
-        "style_anchor": os.path.basename(style_anchor) if style_anchor else None,
+        "ref_video": _base(ref_video),
+        # Fun Control 走位控制视频：不落盘则该镜不可复现（走位无法还原）
+        "control_video": _base(control_video),
+        "style_anchor": _base(style_anchor),
         "prompt": prompt,
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # Fun Control 引擎参数快照（旧引擎无这些属性时整块跳过，保持向后兼容）
+    if _attr("fun_control_enable") is not None:
+        p["fun_control"] = _compact({
+            "enable": bool(_attr("fun_control_enable", False)),
+            "control_kind": _attr("fc_control_kind"),
+            "fit_mode": _attr("fc_fit_mode"),
+            "strength": (fc_strength if fc_strength is not None
+                         else _attr("fc_strength")),
+            "end_percent": _attr("fc_end_percent"),
+        })
     if qa_policy:
         p["qa"] = {
             "enabled": qa_policy.get("enabled"),
@@ -61,7 +92,7 @@ def collect(eng, *, prompt: str, seed: int, attempt: int,
             "min_motion": qa_policy.get("min_motion"),
         }
     # None 值不落盘，保持文件紧凑
-    return {k: v for k, v in p.items() if v is not None}
+    return _compact(p)
 
 
 def save(work_dir: str, key: str, params: dict) -> None:

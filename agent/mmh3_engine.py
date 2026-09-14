@@ -26,8 +26,10 @@ H3 相对 LTX 的两大差异：
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
 
 from tools.comfyui_client import ComfyUIClient
 
@@ -186,8 +188,12 @@ class MMH3Engine:
         control_video: 白模逐帧控制视频（depth/pose 等），经 Fun Control 注入 DiT
             锁定走位/构图（与 ref_video 不同：ref_video 已证传不动运动，Fun Control 可以）。
             帧数须 ≥ num_frames 且落 17n+5 网格；geometry 须与出片一致（fit_mode=exact）。
+            传入的路径不可用会**直接报错**（不再静默忽略，避免走位悄悄失效）。
         fc_strength: Fun Control 强度覆盖（默认取 config，实测 0.8~1.2，≥1.5 崩坏）。
         """
+        # 前置校验放在 is_ready 之前：控制视频/强度这类入参错误应先于
+        # 「ComfyUI 未就绪」报出来，否则现场容易误判成服务问题。
+        self._validate_control_video(control_video, fc_strength)
         if not self.client.is_ready():
             raise RuntimeError(
                 "ComfyUI 未就绪：请启动 ComfyUI（8188）并安装 comfyui-minimax-h3-audio-T8 "
@@ -244,6 +250,84 @@ class MMH3Engine:
         if has_img:
             return "I2VA"
         return "T2VA"
+
+    # ---------- Fun Control 前置校验 ----------
+    @staticmethod
+    def _probe_frame_count(path: str) -> int | None:
+        """尽力探测视频帧数：优先 ffprobe 的 nb_frames，否则 时长×帧率。
+
+        本机 ffmpeg 来自 imageio-ffmpeg（不带 ffprobe），所以探测不到时返回 None，
+        调用方降级为「只打日志、不阻断」，绝不让校验本身成为新的失败源。
+        """
+        probe = shutil.which("ffprobe")
+        if not probe:
+            return None
+        try:
+            out = subprocess.run(
+                [probe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=nb_frames,duration,avg_frame_rate",
+                 "-of", "json", path],
+                capture_output=True, text=True, timeout=30)
+            if out.returncode != 0:
+                return None
+            streams = (json.loads(out.stdout or "{}") or {}).get("streams") or []
+            if not streams:
+                return None
+            st = streams[0]
+            nf = str(st.get("nb_frames") or "")
+            if nf.isdigit() and int(nf) > 0:
+                return int(nf)
+            dur, rate = st.get("duration"), str(st.get("avg_frame_rate") or "")
+            if dur and "/" in rate:
+                num, den = (float(x) for x in rate.split("/", 1))
+                if den > 0:
+                    return int(round(float(dur) * num / den))
+        except Exception:                 # noqa: BLE001 - 探测失败一律视为未知
+            return None
+        return None
+
+    def _validate_control_video(self, control_video: str | None,
+                                fc_strength: float | None = None) -> None:
+        """Fun Control 入参校验，把三类「静默失败」挡在提交 ComfyUI 之前。
+
+        1) 调用方**显式**传了 control_video 但文件不可用 —— 原实现直接当没传，
+           整镜悄悄不加控制，走位错得毫无提示（与 blocking 里「杜绝静默失败」同源）；
+        2) 控制视频比出片短 —— FunControlApply 的 frame_load_cap 会截断，只锁住
+           前几帧，走位只对一半，肉眼极难发现；
+        3) strength 越界 —— 实测 ≥1.5 画面崩坏。
+        """
+        fc_video = control_video or self.fc_video
+        if control_video:
+            usable = bool(fc_video) and os.path.isfile(fc_video)
+            if usable:
+                try:
+                    usable = os.path.getsize(fc_video) > 0
+                except OSError:
+                    usable = False
+            if not usable:
+                raise RuntimeError(
+                    f"Fun Control 控制视频不可用（不存在或为空）: {control_video}"
+                    "；若本镜不需要走位控制，请不要传 control_video。")
+        if not (fc_video and os.path.isfile(fc_video)):
+            return
+        strength = self.fc_strength if fc_strength is None else float(fc_strength)
+        if strength <= 0:
+            raise RuntimeError(f"Fun Control strength 必须 > 0，当前 {strength}")
+        if strength >= 1.5:
+            log(f"  [mmh3] 警告: Fun Control strength={strength} ≥ 1.5，"
+                f"实测画面会崩坏（建议 0.8~1.2）")
+        got = self._probe_frame_count(fc_video)
+        if got is None:
+            log(f"  [mmh3] 控制视频帧数未知（无 ffprobe），跳过帧数校验: "
+                f"{os.path.basename(fc_video)}")
+            return
+        if got < self.num_frames:
+            raise RuntimeError(
+                f"Fun Control 控制视频仅 {got} 帧 < 出片 {self.num_frames} 帧："
+                f"H3 会按 frame_load_cap 截断，走位只能锁住前 {got} 帧（控制形同虚设）。"
+                f"请让白模控制序列对齐出片帧数（blender.anim_frames=auto）: {fc_video}")
+        if got > self.num_frames:
+            log(f"  [mmh3] 控制视频 {got} 帧 → 按出片 {self.num_frames} 帧截断")
 
     def _build_workflow(self, prompt: str, seed: int | None,
                         image: str | None,

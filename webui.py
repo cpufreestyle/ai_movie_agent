@@ -124,12 +124,46 @@ class _LogSink(io.TextIOBase):
         pass
 
 
+def _stop_requested() -> bool:
+    """当前是否有停止请求（供 agent 循环与子进程泵轮询）。
+
+    原先 _state["stop"] 只被写入、**没有任何读取点** → 「停止」按钮完全不生效。
+    现在由 thread 安全地读取，交给 agent 的 should_stop 回调与 run_script 的轮询。
+    """
+    with _lock:
+        return bool(_state["stop"])
+
+
+def _kill_tree(proc) -> None:
+    """终止子进程及其整棵进程树。
+
+    Windows 上 proc.kill() 只杀直接子进程，渲染脚本拉起的 ffmpeg / python 孙进程
+    会变成孤儿继续跑（还占着 GPU 与输出文件句柄）→ 优先用 taskkill /T 连树一起杀。
+    失败（如沙箱拦截 taskkill）时退回 proc.kill()。
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=20)
+            if proc.poll() is None:
+                proc.kill()
+        else:
+            proc.kill()
+    except Exception:                 # noqa: BLE001 - 兜底再杀一次，不让停止逻辑抛错
+        try:
+            proc.kill()
+        except Exception:             # noqa: BLE001
+            pass
+
+
 def run_in_background(fn):
     """在后台线程跑 fn，捕获 stdout/stderr 到 _state['logs']。"""
     def _wrapped():
         with _lock:
             _state["running"] = True
-            _state["stop"] = False
+            _state["stop"] = False          # 新任务开始，清掉上一轮遗留的停止请求
             _state["logs"] = []
             _state["result"] = None
         sink = _LogSink()
@@ -309,7 +343,8 @@ def api_run():
     def _job():
         agent = get_agent()
         agent.run(continuous=False, max_scenes=max_scenes, auto=True,
-                  topic=topic, do_research=do_research)
+                  topic=topic, do_research=do_research,
+                  should_stop=_stop_requested)
     try:
         run_in_background(_job)
     except RuntimeError as e:
@@ -417,10 +452,21 @@ def api_run_full():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
+    """请求停止当前后台任务。
+
+    两条链路都会被响应：
+      - 进程内（/api/run 的 agent 循环）：should_stop=_stop_requested，每镜检查一次；
+      - 子进程（/api/run/full 的 run_script）：轮询本标志后 terminate 子进程。
+    检查粒度是「当前镜」，单次引擎渲染是阻塞调用，无法在渲染中途打断。
+    """
     with _lock:
         _state["stop"] = True
-        _state["logs"].append("[webui] 已请求停止（阻塞式任务将在本轮结束后生效）\n")
-    return json_resp({"ok": True})
+        running = bool(_state["running"])
+        _state["logs"].append(
+            "[webui] 已请求停止：进程内任务将在当前镜结束后退出；"
+            "子进程任务会立即终止（当镜产物可能不完整）。\n" if running
+            else "[webui] 当前没有正在运行的任务。\n")
+    return json_resp({"ok": True, "running": running})
 
 
 @app.route("/api/logs")
@@ -1034,12 +1080,23 @@ def run_script(script: str, timeout: int = 7200, args: list | None = None) -> No
 
     t = threading.Thread(target=_pump, daemon=True)
     t.start()
-    try:
-        proc.wait(timeout=timeout)   # 真超时：即使脚本卡死、一行不吐也能兜住
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        t.join(timeout=10)
-        raise RuntimeError(f"{script} 执行超时（>{timeout}s）")
+    # 边等边响应「停止」/超时：原先直接 proc.wait(timeout)，等待期间点停止完全无效，
+    # 只能等渲染自然跑完（数十分钟）。改为 1s 轮询。
+    deadline = time.time() + timeout
+    while True:
+        try:
+            proc.wait(timeout=1.0)
+            break
+        except subprocess.TimeoutExpired:
+            if _stop_requested():
+                _kill_tree(proc)
+                t.join(timeout=10)
+                raise RuntimeError(
+                    f"{script} 已按请求停止（子进程已终止，当前镜头产物可能不完整）")
+            if time.time() >= deadline:
+                _kill_tree(proc)
+                t.join(timeout=10)
+                raise RuntimeError(f"{script} 执行超时（>{timeout}s）")
     t.join(timeout=30)               # 等泵把剩余输出读完
     if proc.returncode != 0:
         raise RuntimeError(f"{script} 执行失败（code={proc.returncode}）")

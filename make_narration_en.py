@@ -207,12 +207,15 @@ def build_and_render() -> None:
         with open(os.path.join(NAR, f"line_zh_{i:02d}.txt"), "w",
                   encoding="utf-8") as f:
             f.write(LINES_ZH[i - 1])
+    # 字幕链首环取原始视频流：显式初始化 vprev，避免依赖
+    # 「条件表达式短路求值」来规避未定义名（ruff F821）。
+    vprev = "0:v"
     for i in range(1, len(LINES_EN) + 1):
         s = seg_start(i) + NARR_DELAY
         e = min(s + durs[i - 1] + 0.35, seg_start(i) + SEG_DUR)
         vcur = f"v{i}"
         parts.append(
-            f"[{vprev if i > 1 else '0:v'}]"
+            f"[{vprev}]"
             f"drawtext=fontfile='{FONT_EN}':textfile=line_en_{i:02d}.txt:"
             f"x=(w-tw)/2:y=h-th-66:fontsize=20:fontcolor=white:"
             f"borderw=2:bordercolor=black@0.9:"
