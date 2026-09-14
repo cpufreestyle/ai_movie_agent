@@ -18,6 +18,7 @@ from ..state import (
     get_agent,
     json_resp,
     load_config,
+    logbuf,
     run_in_background,
 )
 
@@ -155,8 +156,8 @@ def api_stop():
     with _lock:
         _state["stop"] = True
         running = bool(_state["running"])
-        _state["logs"].append(
-            "[webui] 已请求停止：进程内任务将在当前镜结束后退出；"
-            "子进程任务会立即终止（当镜产物可能不完整）。\n" if running
-            else "[webui] 当前没有正在运行的任务。\n")
+    logbuf.append(
+        "[webui] 已请求停止：进程内任务将在当前镜结束后退出；"
+        "子进程任务会立即终止（当镜产物可能不完整）。\n" if running
+        else "[webui] 当前没有正在运行的任务。\n")
     return json_resp({"ok": True, "running": running})

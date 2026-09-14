@@ -63,13 +63,7 @@ class MovieAgent:
         self.keyframe_gen = KeyframeGenerator(for_stage(config, "D"), workdir)
         # Blender 白模分镜（远程重构新增，未就绪自动跳过）
         self.blocking = BlockingGenerator(config, workdir)
-        # 白模资产缓存（出片时接入引擎：控制图 -> ref_images / 灰模动画 -> ref_video /
-        # 走位 depth 序列 -> Fun Control 的 control_video）
-        self.blocking_control: list = []
-        self.blocking_anim: list = []
-        self.blocking_fc: list = []
-        self.image_prompts: list[str] = []
-        self.keyframe_images: list[str] = []
+        # 白模资产与关键帧索引见下方 property（单一来源 = self.state，不在此初始化）
 
         self.film = os.path.join(self.workdir, "film.mp4")
         self.state_path = os.path.join(self.workdir, "state.json")
@@ -78,6 +72,53 @@ class MovieAgent:
         os.makedirs(self.scenes_dir, exist_ok=True)
 
         self.state = self._load_state()
+
+    # ---------- 白模 / 关键帧资产索引：单一来源 = self.state ----------
+    # 原先这些既是实例属性、又单独写进 self.state，于是有两个真相：
+    #   - 重启后 state.json 里载入的是 state 那份，实例属性仍是 []，白模条件
+    #     （控制图 -> ref_images / 灰模动画 -> ref_video / depth 序列 -> Fun Control）
+    #     会静默失效，日志上一片正常；
+    #   - previs 合并后的关键帧只写实例属性、没回写 state，_save_state 存的是旧值。
+    # 统一改成 property，读写都落到 self.state，两边不可能再漂移。
+    @property
+    def blocking_control(self) -> list:
+        return self.state.get("blocking_control") or []
+
+    @blocking_control.setter
+    def blocking_control(self, value) -> None:
+        self.state["blocking_control"] = list(value or [])
+
+    @property
+    def blocking_anim(self) -> list:
+        return self.state.get("blocking_anim") or []
+
+    @blocking_anim.setter
+    def blocking_anim(self, value) -> None:
+        self.state["blocking_anim"] = list(value or [])
+
+    @property
+    def blocking_fc(self) -> list:
+        return self.state.get("blocking_fc") or []
+
+    @blocking_fc.setter
+    def blocking_fc(self, value) -> None:
+        self.state["blocking_fc"] = list(value or [])
+
+    @property
+    def image_prompts(self) -> list:
+        return self.state.get("image_prompts") or []
+
+    @image_prompts.setter
+    def image_prompts(self, value) -> None:
+        self.state["image_prompts"] = list(value or [])
+
+    @property
+    def keyframe_images(self) -> list:
+        return self.state.get("keyframe_images") or []
+
+    @keyframe_images.setter
+    def keyframe_images(self, value) -> None:
+        self.state["keyframe_images"] = list(value or [])
 
     # ---------- 状态 ----------
     def _load_state(self) -> dict:
@@ -249,8 +290,6 @@ class MovieAgent:
             self.image_prompts = self.image_prompt.generate(concept)      # D 图像提示词
             self.keyframe_images = self.keyframe_gen.generate(self.image_prompts)  # D 关键帧出图
             self.state["bible"] = concept
-            self.state["image_prompts"] = self.image_prompts
-            self.state["keyframe_images"] = self.keyframe_images
             # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
             if self.blocking.is_ready():
                 log("[agent] 生成 Blender 白模分镜资产 ...")
@@ -260,9 +299,7 @@ class MovieAgent:
                     log(f"[agent] 白模渲染异常，跳过（不影响出片）: {e}")
                     blk = {"previews": [], "controls": [], "anims": [], "fcvideos": []}
                 self.state["blocking_previs"] = blk["previews"]
-                self.state["blocking_control"] = blk["controls"]
-                self.state["blocking_anim"] = blk["anims"]
-                self.state["blocking_fc"] = blk.get("fcvideos", [])
+                # 三个 property 直接写进 self.state，无需再各写一份
                 self.blocking_control = blk["controls"]
                 self.blocking_anim = blk["anims"]
                 self.blocking_fc = blk.get("fcvideos", [])
@@ -282,8 +319,9 @@ class MovieAgent:
         else:
             concept = self.state.get("bible") or self.writer.story_bible()
             self.state["bible"] = concept
-            self.image_prompts = self.state.get("image_prompts", [])
-            self.keyframe_images = self.state.get("keyframe_images", [])
+            # image_prompts / keyframe_images / blocking_* 全由 property 直读 state，
+            # 不再需要「再回填一份到实例属性」——原来的回填漏了 white-model 三个索引，
+            # 正是白模条件静默失效的根因。
             log(f"世界观: {concept.get('logline', '')}")
 
         # ---- E→G→H 创意层后半 + 发布 ----

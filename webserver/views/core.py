@@ -17,6 +17,7 @@ from ..state import (
     get_agent,
     json_resp,
     load_config,
+    logbuf,
 )
 
 bp = Blueprint("core", __name__)
@@ -118,9 +119,21 @@ def save_config():
 # ---------------- 运行日志 ----------------
 @bp.route("/api/logs")
 def api_logs():
+    """运行状态 + 日志。
+
+    ?since=<cursor> 只取新增部分（前端轮询用），不传则返回当前保留的全部内容
+    （老调用方行为不变）。响应里的 cursor 应原样回传作为下次的 since。
+    """
+    since = request.args.get("since", type=int)
     with _lock:
-        return json_resp({
-            "running": _state["running"],
-            "logs": "".join(_state["logs"]),
-            "result": _state["result"],
-        })
+        running = bool(_state["running"])
+        result = _state["result"]
+    data = logbuf.read(since)
+    return json_resp({
+        "running": running,
+        "logs": data["text"],
+        "cursor": data["cursor"],
+        "truncated": data["truncated"],
+        "reset": data["reset"],
+        "result": result,
+    })

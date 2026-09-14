@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import glob
 import io
@@ -56,10 +57,90 @@ _state = {
     "thread": None,
     "running": False,
     "stop": False,
-    "logs": [],
     "result": None,
 }
 _lock = threading.Lock()
+
+# 运行日志内存上限（按字符计）。一轮 30~60 分钟的渲染日志约几百 KB，
+# 400KB 足够回看整轮；超出后从最早处丢弃。
+LOG_MAX_CHARS = 400_000
+
+
+class LogBuffer:
+    """有界运行日志缓冲。
+
+    原先 `_state["logs"]` 是无界 list，且 /api/logs 每次都把全部内容 `"".join()`
+    返回：长时间渲染既撑内存，又让每 1s 一次的轮询响应体长到几 MB。
+    这里做两件事：
+      - 按字符预算淘汰最早条目，内存有上限；
+      - 每条日志带单调递增序号，客户端可用 ?since=<cursor> 只取新增部分。
+    """
+
+    def __init__(self, max_chars: int = LOG_MAX_CHARS):
+        self._max = int(max_chars)
+        self._items: collections.deque = collections.deque()   # (seq, text)
+        self._chars = 0
+        self._next_seq = 1
+        self._dropped_upto = 0      # 已被淘汰的最大序号（用于告知客户端有缺口）
+        # 独立锁：日志写入很频繁，不该和 _lock（agent 状态）互相排队
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        """新任务开始：丢弃旧日志并让序号从头开始。
+
+        序号归零是有意的：客户端带着上一轮的游标来问时，`since > next_seq` 会被
+        判定为 reset，前端据此清屏并从 0 重新拉取，不会出现错位或重复。
+        """
+        with self._lock:
+            self._items.clear()
+            self._chars = 0
+            self._next_seq = 1
+            self._dropped_upto = 0
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            self._items.append((self._next_seq, text))
+            self._next_seq += 1
+            self._chars += len(text)
+            while self._chars > self._max and len(self._items) > 1:
+                seq, old = self._items.popleft()
+                self._chars -= len(old)
+                self._dropped_upto = seq
+
+    def read(self, since: int | None = None) -> dict:
+        """读取日志。
+
+        since=None → 返回当前保留的全部内容（老客户端行为不变）；
+        since=N    → 只返回序号 >= N 的条目。
+        返回 text / cursor（下次应传的游标）/ truncated（中间有被淘汰的缺口）
+        / reset（游标越界，通常意味着服务重启，前端应清屏重拉）。
+        """
+        with self._lock:
+            if since is None:
+                text = "".join(t for _, t in self._items)
+                truncated = False
+                reset = False
+            else:
+                text = "".join(t for s, t in self._items if s >= since)
+                truncated = self._dropped_upto > 0 and since <= self._dropped_upto
+                reset = since > self._next_seq
+            return {"text": text, "cursor": self._next_seq,
+                    "truncated": truncated, "reset": reset}
+
+    @property
+    def total_chars(self) -> int:
+        with self._lock:
+            return self._chars
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+
+logbuf = LogBuffer()
+
 STAGE_NAMES = {
     "A": "资料采集",
     "B": "知识沉淀",
@@ -102,8 +183,7 @@ def get_agent():
 
 class _LogSink(io.TextIOBase):
     def write(self, s: str) -> int:
-        with _lock:
-            _state["logs"].append(s)
+        logbuf.append(s)
         return len(s)
 
     def flush(self):
@@ -145,20 +225,19 @@ def _kill_tree(proc) -> None:
 
 
 def run_in_background(fn):
-    """在后台线程跑 fn，捕获 stdout/stderr 到 _state['logs']。"""
+    """在后台线程跑 fn，捕获 stdout/stderr 到日志缓冲。"""
     def _wrapped():
         with _lock:
             _state["running"] = True
             _state["stop"] = False          # 新任务开始，清掉上一轮遗留的停止请求
-            _state["logs"] = []
             _state["result"] = None
+        logbuf.clear()
         sink = _LogSink()
         try:
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                 _state["result"] = fn()
         except Exception as e:  # noqa: BLE001
-            with _lock:
-                _state["logs"].append(f"[webui] 任务异常: {e}\n")
+            logbuf.append(f"[webui] 任务异常: {e}\n")
             _state["result"] = {"error": str(e)}
         finally:
             with _lock:

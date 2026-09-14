@@ -272,10 +272,16 @@ async function startPublish(){
   const j = await r.json(); if(!j.ok) alert(j.error);
 }
 
-// ---- 全局日志轮询 ----
+// ---- 全局日志轮询（增量：只取上次之后的新增行）----
+let _logCur = 0, _logText = '';
 async function poll(){
-  const r = await fetch('/api/logs'); const j = await r.json();
-  const txt = j.logs || '';
+  const r = await fetch('/api/logs?since=' + _logCur); const j = await r.json();
+  // reset=服务重启导致游标失效 → 清屏后从 0 重新拉全量
+  if (j.reset) _logText = '';
+  _logText = (_logText + (j.logs || '')).slice(-200000);
+  _logCur = j.reset ? 0 : (j.cursor ?? _logCur);
+  const head = j.truncated ? '[webui] 日志过长，已省略最早部分\n' : '';
+  const txt = head + _logText;
   document.querySelectorAll('pre.logs').forEach(el => el.textContent = txt);
   // 滚到最新
   document.querySelectorAll('pre.logs').forEach(el => el.scrollTop = el.scrollHeight);
