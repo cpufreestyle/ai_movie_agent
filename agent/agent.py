@@ -215,13 +215,16 @@ class MovieAgent:
             f.write(json.dumps({"beat": beat, "prompt": prompt, "clip": clip},
                                ensure_ascii=False) + "\n")
 
-    # ---------- 核心：生成一镜 ----------
-    def generate_one_scene(self, seed: int | None = None) -> dict:
-        n = self.state["scene_count"]
+    # ---------- 单镜生成的子步骤 ----------
+    # 原先 generate_one_scene 一个函数里塞了「取分镜 / 拼白模条件 / 重 roll /
+    # 备份+落盘 / 写质检 / 写参数」六件事，圈复杂度 26，改任何一环都得先读完
+    # 150 行。这里按职责切开，每个 helper 只做一件事且可单独测试；
+    # generate_one_scene 只剩「按序调用」这层胶水，行为逐条保持不变。
+    def _prepare_beat(self, n: int) -> tuple:
+        """取第 n 镜分镜并润色/挂关键帧，返回 (beat, prompt, keyframe)。"""
         beat = self.writer.next_beat(self.state["bible"], self.state["beats"])
         # F 阶段：去 AI 味润色（作用于分镜描述）
-        raw = beat.get("description", "")
-        beat["description"] = self.polisher.polish(raw)
+        beat["description"] = self.polisher.polish(beat.get("description", ""))
         # D 阶段：若已规划关键帧提示词/出图，挂到分镜（供 I2V 使用）
         if self.image_prompts and n < len(self.image_prompts):
             beat["keyframe_prompt"] = self.image_prompts[n]
@@ -231,19 +234,11 @@ class MovieAgent:
             beat["keyframe_image"] = keyframe
         prompt = self.director.beat_to_prompt(beat)
         log(f"[agent] 第 {n+1} 镜: {beat.get('title')} | 提示词: {prompt}")
+        return beat, prompt, keyframe
 
-        if not self.engine.is_ready():
-            log("[agent] 视频引擎未就绪，停止创作（请安装对应后端或检查 engine.backend 配置）。")
-            return None
-        prev = self.film if (n > 0 and os.path.exists(self.film)) else None
-        # ---- 白模 -> 视频 流程闭环：控制图/灰模动画接入引擎 ----
-        #   控制图(depth/normal/line) -> ref_images；灰模运镜 mp4 -> ref_video；
-        #   白模 depth 序列 -> control_video(Fun Control)
-        #   能力过滤由 filter_engine_kwargs 按引擎的 CAPABILITIES 声明完成
-        #   （SkyReels/LTX 不支持则跳过并记日志，不报错）
-        bcfg = self.config.get("blender", {}) or {}
+    def _ref_images_for(self, n: int, bcfg: dict) -> list | None:
+        """白模控制图 -> ref_images；use_as_i2v_start 时再补一张角色锚定图。"""
         ref_images = None
-        ref_video = None
         if bcfg.get("use_as_ref_images"):
             ctrl = self.blocking_control[n] if n < len(self.blocking_control) else None
             if isinstance(ctrl, dict):
@@ -255,35 +250,60 @@ class MovieAgent:
             _anchor = self._character_anchor()
             if os.path.exists(_anchor) and _anchor not in (ref_images or []):
                 ref_images = (ref_images or []) + [_anchor]
-        if bcfg.get("use_as_ref_video"):
-            anim = self.blocking_anim[n] if n < len(self.blocking_anim) else None
-            if anim and str(anim).lower().endswith(".mp4") and os.path.exists(anim):
-                # H3 参考视频走官方 2~15s 策略：过短的灰模动画喂不进去（运动引导无效或直接
-                # 报错）。这里预检后不传，保证本镜照常出片；把 blender.anim_frames 设为 auto
-                # 即可自动对齐出片帧数并兜底 2s。
-                dur = self.editor.probe_duration(anim)
-                floor = float(getattr(self.blocking, "MIN_REF_SECONDS", 2.0) or 2.0)
-                if 0 < dur < floor:
-                    log(f"  [agent] 跳过 ref_video：灰模动画 {dur:.2f}s 低于 {floor:g}s 下限"
-                        f"（把 blender.anim_frames 设为 auto 可修）")
-                else:
-                    ref_video = anim
-        # Fun Control 走位控制视频（白模 depth 序列，来自 blocking.render_assets 的 fcvideos）
-        control_video = None
-        if bcfg.get("use_as_fun_control"):
-            fc = self.blocking_fc[n] if n < len(self.blocking_fc) else None
-            if fc and str(fc).lower().endswith(".mp4") and os.path.exists(fc):
-                control_video = fc
-        # Fun Control 强度：白模走位序列 -> H3 逐帧注入（真正能控走位；ref_video 已证无效）
-        fc_strength = None
-        if control_video:
-            try:
-                fc_strength = float(bcfg.get("fun_control_strength", 1.2))
-            except (TypeError, ValueError):
-                fc_strength = None
-        # 传什么由引擎**显式声明**（VideoEngine.CAPABILITIES），不再用
-        # inspect.signature 反射猜签名：反射让补全/类型检查/静态分析全失效，
-        # 新增能力还得改这里。被引擎忽略的条件照样记日志，避免「走位悄悄没生效」。
+        return ref_images
+
+    def _ref_video_for(self, n: int, bcfg: dict) -> str | None:
+        """灰模动画 -> ref_video；过短（低于官方 2s 下限）则跳过并返回 None。
+
+        H3 参考视频走官方 2~15s 策略：过短的灰模动画喂不进去（运动引导无效或直接
+        报错）。这里预检后不传，保证本镜照常出片；把 blender.anim_frames 设为 auto
+        即可自动对齐出片帧数并兜底 2s。
+        """
+        if not bcfg.get("use_as_ref_video"):
+            return None
+        anim = self.blocking_anim[n] if n < len(self.blocking_anim) else None
+        if not (anim and str(anim).lower().endswith(".mp4") and os.path.exists(anim)):
+            return None
+        dur = self.editor.probe_duration(anim)
+        floor = float(getattr(self.blocking, "MIN_REF_SECONDS", 2.0) or 2.0)
+        if 0 < dur < floor:
+            log(f"  [agent] 跳过 ref_video：灰模动画 {dur:.2f}s 低于 {floor:g}s 下限"
+                f"（把 blender.anim_frames 设为 auto 可修）")
+            return None
+        return anim
+
+    def _control_video_for(self, n: int, bcfg: dict) -> str | None:
+        """Fun Control 走位控制视频（白模 depth 序列，来自 blocking.render_assets）。"""
+        if not bcfg.get("use_as_fun_control"):
+            return None
+        fc = self.blocking_fc[n] if n < len(self.blocking_fc) else None
+        if fc and str(fc).lower().endswith(".mp4") and os.path.exists(fc):
+            return fc
+        return None
+
+    @staticmethod
+    def _fc_strength(control_video: str | None, bcfg: dict) -> float | None:
+        """Fun Control 强度：白模走位序列 -> H3 逐帧注入（ref_video 已证无效）。"""
+        if not control_video:
+            return None
+        try:
+            return float(bcfg.get("fun_control_strength", 1.2))
+        except (TypeError, ValueError):
+            return None
+
+    def _white_model_kwargs(self, n: int) -> tuple:
+        """白模 -> 视频 流程闭环：把控制图/灰模动画/走位序列接进引擎。
+
+        传什么由引擎**显式声明**（VideoEngine.CAPABILITIES），不再用
+        inspect.signature 反射猜签名：反射让补全/类型检查/静态分析全失效，
+        新增能力还得改这里。被引擎忽略的条件照样记日志，避免「走位悄悄没生效」。
+        """
+        bcfg = self.config.get("blender", {}) or {}
+        # 求值顺序即日志顺序：控制图 -> 灰模动画 -> 走位序列
+        ref_images = self._ref_images_for(n, bcfg)
+        ref_video = self._ref_video_for(n, bcfg)
+        control_video = self._control_video_for(n, bcfg)
+        fc_strength = self._fc_strength(control_video, bcfg)
         extra, ignored = filter_engine_kwargs(
             self.engine,
             ref_images=ref_images, ref_video=ref_video,
@@ -293,17 +313,16 @@ class MovieAgent:
         if ignored:
             log(f"  [agent] {type(self.engine).__name__} 不支持的条件已忽略: "
                 + ", ".join(sorted(ignored)))
-        # ---- 逐镜生成（含可选质检重 roll，P2-⑬）----
-        # 默认不质检（见 _qa_policy）；开启后：不达标就换 seed 重出（限次），仍不达标
-        # 则采用最后一次并如实记录，绝不因为质检而中断整条出片链。
-        tmp = os.path.join(self.scenes_dir, f"scene_{n+1:03d}.mp4")
-        qa_on, qa_policy = self._qa_policy()
-        if qa_on and seed is None:
-            # 要重 roll 就必须有确定的基准 seed：否则每镜都换随机数，重 roll 之间
-            # 不可比，事后也无法复现失败样本。这里现取一个并打进日志。
-            seed = int(time.time()) & 0x7FFFFFFF
-            log(f"  [qa] 未指定 seed，本次基准 seed={seed}（便于复现与换 seed 重 roll）")
-        rolls = 1 + (max(0, int(qa_policy.get("max_rerolls") or 0)) if qa_on else 0)
+        return extra, ignored
+
+    def _render_with_rerolls(self, prompt: str, keyframe: str | None, prev: str | None,
+                             tmp: str, n: int, extra: dict, seed: int | None,
+                             qa_on: bool, rolls: int) -> tuple:
+        """渲染一镜并在质检不达标时换 seed 重 roll，返回 (实际 seed, 评分, 第几次)。
+
+        默认不质检（见 _qa_policy）；开启后：不达标就换 seed 重出（限次），仍不达标
+        则采用最后一次并如实记录，绝不因为质检而中断整条出片链。
+        """
         qa_score = None
         attempt = 0
         cur_seed = seed
@@ -323,34 +342,40 @@ class MovieAgent:
             else:
                 log(f"  [qa] 第 {n+1} 镜仍未达标（{'；'.join(qa_score['reasons'])}），"
                     f"采用本次结果继续")
-        if qa_on:
-            seed = cur_seed          # 落盘的 seed 必须是真正用上的那个
+        return cur_seed, qa_score, attempt
 
-        # 备份当前长片，并把新片段设为影片（续写后的完整片）
+    def _rotate_film(self, n: int, tmp: str) -> None:
+        """备份当前长片，并把新片段设为影片（续写后的完整片）。"""
         if n > 0 and os.path.exists(self.film):
             backup = os.path.join(self.scenes_dir, f"film_after_{n:03d}.mp4")
             try:
                 shutil.copy(self.film, backup)
-            except Exception:
+            except Exception:          # 备份失败不该中断出片
                 pass
         shutil.move(tmp, self.film)
 
-        # 质检结果：增量落盘（含分布汇总），并把紧凑摘要写进 state 供 WebUI/看板读
-        if qa_score:
-            from . import qa as qa_mod
-            self._qa_entries.append(qa_score)
-            report = qa_mod.write_report(self.workdir, self._qa_entries)
-            self.state["qa"] = {
-                "total": len(self._qa_entries),
-                "failed": sum(1 for e in self._qa_entries if not e.get("ok")),
-                "last_ok": bool(qa_score.get("ok")),
-                "last_attempts": attempt + 1,
-                "report": os.path.basename(report) if report else "",
-            }
+    def _record_qa(self, qa_score: dict, attempt: int) -> None:
+        """质检结果：增量落盘（含分布汇总），并把紧凑摘要写进 state 供 WebUI/看板读。"""
+        from . import qa as qa_mod
+        self._qa_entries.append(qa_score)
+        report = qa_mod.write_report(self.workdir, self._qa_entries)
+        self.state["qa"] = {
+            "total": len(self._qa_entries),
+            "failed": sum(1 for e in self._qa_entries if not e.get("ok")),
+            "last_ok": bool(qa_score.get("ok")),
+            "last_attempts": attempt + 1,
+            "report": os.path.basename(report) if report else "",
+        }
 
-        # 生成参数落盘（可复现 / 供 A/B 与回归）：含白模参考素材 ref_images / ref_video
-        # 以及 Fun Control 的 control_video / strength —— 缺了 control_video 这一镜
-        # 无法复现（它是当前唯一能锁走位的输入），故必须一并落盘。
+    def _save_scene_record(self, n: int, prompt: str, seed: int | None,
+                           keyframe: str | None, extra: dict, attempt: int,
+                           qa_on: bool, qa_policy: dict, qa_score: dict | None) -> None:
+        """生成参数落盘（可复现 / 供 A/B 与回归）。
+
+        含白模参考素材 ref_images / ref_video 以及 Fun Control 的
+        control_video / strength —— 缺了 control_video 这一镜无法复现
+        （它是当前唯一能锁走位的输入），故必须一并落盘。
+        """
         from . import record
         record.save(self.workdir, f"scene_{n+1:03d}", record.collect(
             self.engine, prompt=prompt,
@@ -363,6 +388,37 @@ class MovieAgent:
             qa_policy=qa_policy if qa_on else None,
             qa_score=qa_score))
 
+    # ---------- 核心：生成一镜 ----------
+    def generate_one_scene(self, seed: int | None = None) -> dict:
+        n = self.state["scene_count"]
+        beat, prompt, keyframe = self._prepare_beat(n)
+
+        if not self.engine.is_ready():
+            log("[agent] 视频引擎未就绪，停止创作（请安装对应后端或检查 engine.backend 配置）。")
+            return None
+        prev = self.film if (n > 0 and os.path.exists(self.film)) else None
+        extra, _ignored = self._white_model_kwargs(n)
+
+        # ---- 逐镜生成（含可选质检重 roll，P2-⑬）----
+        tmp = os.path.join(self.scenes_dir, f"scene_{n+1:03d}.mp4")
+        qa_on, qa_policy = self._qa_policy()
+        if qa_on and seed is None:
+            # 要重 roll 就必须有确定的基准 seed：否则每镜都换随机数，重 roll 之间
+            # 不可比，事后也无法复现失败样本。这里现取一个并打进日志。
+            seed = int(time.time()) & 0x7FFFFFFF
+            log(f"  [qa] 未指定 seed，本次基准 seed={seed}（便于复现与换 seed 重 roll）")
+        rolls = 1 + (max(0, int(qa_policy.get("max_rerolls") or 0)) if qa_on else 0)
+        cur_seed, qa_score, attempt = self._render_with_rerolls(
+            prompt, keyframe, prev, tmp, n, extra, seed, qa_on, rolls)
+        if qa_on:
+            seed = cur_seed          # 落盘的 seed 必须是真正用上的那个
+
+        self._rotate_film(n, tmp)
+        if qa_score:
+            self._record_qa(qa_score, attempt)
+        self._save_scene_record(n, prompt, seed, keyframe, extra, attempt,
+                                qa_on, qa_policy, qa_score)
+
         self.state["beats"].append(beat)
         self.state["scene_count"] = n + 1
         self._save_state(self.state)
@@ -370,6 +426,70 @@ class MovieAgent:
         return beat
 
     # ---------- 循环 ----------
+    def _merge_previews(self, previews: list) -> None:
+        """把白模 previs 合并进关键帧序列（同下标覆盖，超出的追加）。"""
+        merged = list(self.keyframe_images)
+        for i, p in enumerate(previews):
+            if p:
+                if i < len(merged):
+                    merged[i] = p
+                else:
+                    merged.append(p)
+        self.keyframe_images = merged
+
+    def _prepare_concept(self, topic: str) -> dict:
+        """A→D：素材采集 / 知识沉淀 / 概念企划 / 关键帧，并生成白模分镜资产。"""
+        material = self.collector.collect(topic)                          # A 资料采集
+        self.knowledge.ingest(material)                                   # B 知识沉淀
+        concept = self.planner.plan(topic, material, self.knowledge)      # C 概念企划
+        concept = self.planner.enrich(concept, topic, self.knowledge)     # C+ 充实设定
+        self.image_prompts = self.image_prompt.generate(concept)          # D 图像提示词
+        self.keyframe_images = self.keyframe_gen.generate(self.image_prompts)  # D 出图
+        self.state["bible"] = concept
+        # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
+        if self.blocking.is_ready():
+            log("[agent] 生成 Blender 白模分镜资产 ...")
+            try:
+                blk = self.blocking.render_assets(self.image_prompts)
+            except Exception as e:
+                log(f"[agent] 白模渲染异常，跳过（不影响出片）: {e}")
+                blk = {"previews": [], "controls": [], "anims": [], "fcvideos": []}
+            self.state["blocking_previs"] = blk["previews"]
+            # 三个 property 直接写进 self.state，无需再各写一份
+            self.blocking_control = blk["controls"]
+            self.blocking_anim = blk["anims"]
+            self.blocking_fc = blk.get("fcvideos", [])
+            if self.config.get("blender", {}).get("use_as_i2v_start") and blk["previews"]:
+                self._merge_previews(blk["previews"])
+        self._save_state(self.state)
+        log(f"世界观: {concept.get('logline', '')}")
+        log(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
+            f"（已出图 {sum(1 for x in self.keyframe_images if x)} 张）")
+        return concept
+
+    def _scene_loop(self, continuous: bool, max_scenes: int | None, auto: bool,
+                    seed: int | None, stopped) -> None:
+        """E→G：逐镜续写循环。stopped 是无参回调，返回 True 即停止。"""
+        # while not stopped()：停止请求既能在「进入循环前」生效（企划阶段点了停止
+        # 就不会再启动一次渲染），也能在每镜之间生效。
+        while not stopped():
+            if max_scenes and self.state["scene_count"] >= max_scenes:
+                log(f"已达到目标分镜数 {max_scenes}，停止。")
+                break
+            beat = self.generate_one_scene(seed=seed)
+            if beat is None:
+                log("[agent] 引擎未就绪，已停止创作。")
+                break
+            dur = self.editor.probe_duration(self.film)
+            log(f"  [agent] 当前影片时长 ≈ {dur:.1f}s，"
+                f"共 {self.state['scene_count']} 镜 @ {self.film}")
+            if not continuous:
+                break
+            if not auto:
+                ans = input("继续创作下一镜? [y/N] ").strip().lower()
+                if ans not in ("y", "yes"):
+                    break
+
     def run(self, continuous: bool = True, max_scenes: int | None = None,
             auto: bool = True, seed: int | None = None,
             topic: str | None = None, do_research: bool = False,
@@ -393,39 +513,7 @@ class MovieAgent:
 
         # ---- A→D 素材层 + 创意层前半 ----
         if do_research:
-            material = self.collector.collect(topic)              # A 资料采集
-            self.knowledge.ingest(material)                       # B 知识沉淀
-            concept = self.planner.plan(topic, material, self.knowledge)  # C 概念企划
-            concept = self.planner.enrich(concept, topic, self.knowledge)  # C+ 充实设定
-            self.image_prompts = self.image_prompt.generate(concept)      # D 图像提示词
-            self.keyframe_images = self.keyframe_gen.generate(self.image_prompts)  # D 关键帧出图
-            self.state["bible"] = concept
-            # Blender 白模分镜资产（previs / 控制图 / 灰模动画），未就绪则跳过
-            if self.blocking.is_ready():
-                log("[agent] 生成 Blender 白模分镜资产 ...")
-                try:
-                    blk = self.blocking.render_assets(self.image_prompts)
-                except Exception as e:
-                    log(f"[agent] 白模渲染异常，跳过（不影响出片）: {e}")
-                    blk = {"previews": [], "controls": [], "anims": [], "fcvideos": []}
-                self.state["blocking_previs"] = blk["previews"]
-                # 三个 property 直接写进 self.state，无需再各写一份
-                self.blocking_control = blk["controls"]
-                self.blocking_anim = blk["anims"]
-                self.blocking_fc = blk.get("fcvideos", [])
-                if self.config.get("blender", {}).get("use_as_i2v_start") and blk["previews"]:
-                    merged = list(self.keyframe_images)
-                    for i, p in enumerate(blk["previews"]):
-                        if p:
-                            if i < len(merged):
-                                merged[i] = p
-                            else:
-                                merged.append(p)
-                    self.keyframe_images = merged
-            self._save_state(self.state)
-            log(f"世界观: {concept.get('logline', '')}")
-            log(f"  规划分镜 {len(self.image_prompts)} 个关键帧提示词"
-                  f"（已出图 {sum(1 for x in self.keyframe_images if x)} 张）")
+            self._prepare_concept(topic)
         else:
             concept = self.state.get("bible") or self.writer.story_bible()
             self.state["bible"] = concept
@@ -435,26 +523,8 @@ class MovieAgent:
             log(f"世界观: {concept.get('logline', '')}")
 
         # ---- E→G→H 创意层后半 + 发布 ----
-        # while not _stopped()：停止请求既能在「进入循环前」生效（企划阶段点了停止
-        # 就不会再启动一次渲染），也能在每镜之间生效。
         try:
-            while not _stopped():
-                if max_scenes and self.state["scene_count"] >= max_scenes:
-                    log(f"已达到目标分镜数 {max_scenes}，停止。")
-                    break
-                beat = self.generate_one_scene(seed=seed)
-                if beat is None:
-                    log("[agent] 引擎未就绪，已停止创作。")
-                    break
-                dur = self.editor.probe_duration(self.film)
-                log(f"  [agent] 当前影片时长 ≈ {dur:.1f}s，"
-                      f"共 {self.state['scene_count']} 镜 @ {self.film}")
-                if not continuous:
-                    break
-                if not auto:
-                    ans = input("继续创作下一镜? [y/N] ").strip().lower()
-                    if ans not in ("y", "yes"):
-                        break
+            self._scene_loop(continuous, max_scenes, auto, seed, _stopped)
         except KeyboardInterrupt:
             log("\n[agent] 用户中断，已保留当前影片。")
         if _stopped():
