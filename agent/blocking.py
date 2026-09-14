@@ -113,25 +113,37 @@ class BlockingGenerator:
         self.fc_w, self.fc_h = self._resolve_fc_size()
 
     def _resolve_fc_frames(self) -> int:
-        """Fun Control 控制视频帧数：对齐出片 num_frames 并吸附到 H3 的 17n+5 网格。"""
-        mmh3 = ((self.config.get("engine", {}) or {}).get("comfyui_mmH3", {}) or {})
+        """Fun Control 控制视频帧数：对齐出片 num_frames 并吸附到 H3 的 17n+5 网格。
+
+        吸附直接调 `MMH3Engine.snap_length`（唯一来源）：这里原先自己写了一遍
+        `5 + ceil((nf-5)/17)*17`，两处一旦漂移，控制视频与出片帧数错位，
+        FunControlApply 的 frame_load_cap 会静默截断，走位只锁住前几帧。
+        配置段别名也统一走 pick_engine_section（原先只认 comfyui_mmH3，
+        配成 minimax_h3 时这里会读到默认值，帧数与真实出片不符）。
+        """
+        from .mmh3_engine import MMH3Engine
+        from .video_engine import H3_SECTION_ALIASES, pick_engine_section
+
+        mmh3 = pick_engine_section(self.config, *H3_SECTION_ALIASES)
         try:
             nf = int(mmh3.get("num_frames", 0))
         except (TypeError, ValueError):
             nf = 0
-        nf = max(nf or 48, 5)
-        k = -(-(nf - 5) // 17)
-        return 5 + k * 17
+        return MMH3Engine.snap_length(nf or 48)
 
     def _resolve_fc_size(self) -> tuple:
-        """Fun Control 控制视频分辨率：必须与出片一致（fit_mode=exact）。"""
-        mmh3 = ((self.config.get("engine", {}) or {}).get("comfyui_mmH3", {}) or {})
+        """Fun Control 控制视频分辨率：必须与出片一致（fit_mode=exact）。
+
+        同样调引擎的 `snap_resolution`：出片分辨率会被向下吸附到 32 的倍数，
+        这里若按原始配置值渲染（如 800x448 → 出片 768x448），exact 对齐必然失败。
+        """
+        from .mmh3_engine import MMH3Engine
+        from .video_engine import H3_SECTION_ALIASES, pick_engine_section
+
+        mmh3 = pick_engine_section(self.config, *H3_SECTION_ALIASES)
         res = str(mmh3.get("resolution", "768x448") or "768x448").lower()
-        try:
-            w, h = (int(v) for v in res.split("x"))
-            return w, h
-        except (TypeError, ValueError):
-            return 768, 448
+        w, h = (int(v) for v in MMH3Engine.snap_resolution(res).split("x"))
+        return w, h
 
     def _resolve_anim_frames(self) -> int:
         """解析 blender.anim_frames。
@@ -146,7 +158,10 @@ class BlockingGenerator:
                 return max(int(raw), 1)
             except (TypeError, ValueError):
                 pass
-        mmh3 = ((self.config.get("engine", {}) or {}).get("comfyui_mmH3", {}) or {})
+        from .mmh3_engine import MMH3Engine
+        from .video_engine import H3_SECTION_ALIASES, pick_engine_section
+
+        mmh3 = pick_engine_section(self.config, *H3_SECTION_ALIASES)
         try:
             nf = int(mmh3.get("num_frames", 0))
         except (TypeError, ValueError):

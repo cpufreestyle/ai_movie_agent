@@ -1,8 +1,8 @@
 """视频引擎：ComfyUI + MiniMax H3（默认 Turbo 4 步），替代 / 并列 LTX-2.5。
 
-与 LTXEngine / SkyReelsEngine 保持同一接口：
-    generate(prompt, out_path, prev_clip=None, seed=None, image=None, two_pass=None)
-因此可被 run_series.py（三集出片）与 agent.py（G 阶段）透明替换。
+与其它引擎共用统一契约（见 agent/video_engine.py），可被 run_series.py（三集出片）
+与 agent.py（G 阶段）透明替换。本引擎 CAPABILITIES 覆盖全部白模条件
+（ref_images / ref_video / control_video / fc_strength）。
 
 H3 相对 LTX 的两大差异：
   - 原生音视频联合生成（自带立体声），无需外接音轨；
@@ -35,32 +35,51 @@ from tools.comfyui_client import ComfyUIClient
 
 from . import comfyui_post
 from .llmutil import log
+from .node_ids import NodeAllocator
+from .video_engine import H3_SECTION_ALIASES, VideoEngine, pick_engine_section
+
+#: H3 默认权重文件名（放 ComfyUI 对应 models 子目录）。
+#: 抽成常量而不是散在构造函数里：升级权重只改一处，也便于比对「跑的是哪一版」。
+DEFAULT_MODELS = {
+    "unet": "minimax_h3_fl2va_pruned_int4_convrot.safetensors",
+    "text_encoder": "qwen3vl_32b_minimax_h3_int4_convrot.safetensors",
+    "video_vae": "minimax_h3_video_vae_fp16.safetensors",
+    "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+    "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+    "fun_control_net":
+        "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors",
+    "latent_upscaler": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+}
 
 
-class MMH3Engine:
+class MMH3Engine(VideoEngine):
     # H3 的条件节点要求分辨率 32 整除、长度落在 17n+5 网格
     ALIGN = 32
     LEN_BASE = 5
     LEN_STEP = 17
 
+    TAG = "mmh3"
+    #: H3 是唯一支持全部白模条件的引擎（多参考图 / 参考视频 / Fun Control 走位）
+    CAPABILITIES = frozenset({"ref_images", "ref_video",
+                              "control_video", "fc_strength"})
+
     def __init__(self, config: dict, agent_root: str = ""):
-        eng = config.get("engine", {}) or {}
-        h3 = (eng.get("comfyui_mmH3") or eng.get("minimax_h3")
-              or eng.get("comfyui_h3") or {})
+        # 配置段别名（comfyui_mmH3 / minimax_h3 / comfyui_h3）统一由
+        # pick_engine_section 解析：原先各模块各写一遍 or 链，blocking.py 甚至
+        # 只认 comfyui_mmH3，别名配置下白模控制视频帧数会悄悄错位。
+        h3 = pick_engine_section(config or {}, *H3_SECTION_ALIASES)
         self.h3 = h3
+        eng = (config or {}).get("engine", {}) or {}
         self.api = h3.get("api") or eng.get("api") or "http://127.0.0.1:8188"
-        self.unet = (h3.get("unet")
-                     or "minimax_h3_fl2va_pruned_int4_convrot.safetensors")
-        self.text_encoder = (h3.get("text_encoder")
-                             or "qwen3vl_32b_minimax_h3_int4_convrot.safetensors")
-        self.video_vae = (h3.get("video_vae")
-                          or "minimax_h3_video_vae_fp16.safetensors")
-        self.audio_vae = (h3.get("audio_vae")
-                          or "minimax_h3_audio_vae_fp32.safetensors")
+        self.unet = h3.get("unet") or DEFAULT_MODELS["unet"]
+        self.text_encoder = h3.get("text_encoder") or DEFAULT_MODELS["text_encoder"]
+        self.video_vae = h3.get("video_vae") or DEFAULT_MODELS["video_vae"]
+        self.audio_vae = h3.get("audio_vae") or DEFAULT_MODELS["audio_vae"]
         # Turbo LoRA：给 pruned 架构做的，形状与量化位数无关，故 pruned INT4 可直接用
+        # 注意用 is None 判断（与其它权重不同）：显式置空串 = 关闭 Turbo
         self.lora = h3.get("lora")
         if self.lora is None:
-            self.lora = "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"
+            self.lora = DEFAULT_MODELS["lora"]
         self.lora_strength = float(h3.get("lora_strength", 1.0))
         self.video_steps = int(h3.get("video_steps", 4))
         self.audio_steps = int(h3.get("audio_steps", 8))
@@ -89,12 +108,11 @@ class MMH3Engine:
 
         # 学习型 latent 二采放大：一采低清 → 3D latent upscaler 放大 → 二采高清。
         # 依赖 H3 内置二采节点（MiniMaxH3LearnedLatentUpscaleT8Advanced 等）+ 模型
-        # minimax_h3_latent_upscaler_3d_fp16.safetensors（放 ComfyUI models/latent_upscale_models）。
+        # DEFAULT_MODELS["latent_upscaler"]（放 ComfyUI models/latent_upscale_models）。
         # EXP 路线：单样本不证画质增益；开启后一采走 DualClock（非 Turbo 双速率）。
         tp = h3.get("two_pass") or {}
         self.two_pass_latent = bool(tp.get("enable", False))
-        self.tp_upscaler = str(tp.get("model_name")
-                               or "minimax_h3_latent_upscaler_3d_fp16.safetensors")
+        self.tp_upscaler = str(tp.get("model_name") or DEFAULT_MODELS["latent_upscaler"])
         self.tp_scale = float(tp.get("scale_by", 1.5))
         self.tp_base = int(tp.get("base_steps", 8))
         self.tp_coarse = int(tp.get("coarse_steps", 4))
@@ -107,8 +125,7 @@ class MMH3Engine:
         fcfg = h3.get("fun_control") or {}
         self.fun_control_enable = bool(fcfg.get("enable", False))
         self.fc_control_net = str(
-            fcfg.get("control_net")
-            or "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors")
+            fcfg.get("control_net") or DEFAULT_MODELS["fun_control_net"])
         self.fc_control_kind = str(fcfg.get("control_kind", "depth"))
         self.fc_fit_mode = str(fcfg.get("fit_mode", "exact"))
         self.fc_strength = float(fcfg.get("strength", 0.8))
@@ -335,7 +352,13 @@ class MMH3Engine:
                         ref_images: list | None = None,
                         control_video: str | None = None,
                         fc_strength: float | None = None) -> dict:
-        """直接拼 API Format 工作流（不依赖外部 json，避免节点 ID 漂移）。"""
+        """直接拼 API Format 工作流（不依赖外部 json，避免节点 ID 漂移）。
+
+        节点 ID 一律经 NodeAllocator 按语义名分配，不再出现裸数字：分配器保证
+        名字唯一、ID 唯一，构建完成后再 audit() 一次，杜绝撞号——历史上
+        ref_images 的 20~28 与后处理的 30/31/32 撞号会形成依赖环。
+        """
+        ids = NodeAllocator()
         seed = seed if seed is not None else self.seed
         w, h = (int(x) for x in self.resolution.split("x"))
         has_img = bool(image and os.path.exists(image))
@@ -351,37 +374,40 @@ class MMH3Engine:
         # 任务类型：首帧锁形象/场景，参考视频锁走位与镜头运动，同时给走 Hybrid
         task = self.resolve_task(has_img, has_any_ref)
 
+        n_unet = ids.alloc("unet")
+        n_clip = ids.alloc("clip")
+        n_vae_v = ids.alloc("vae_video")
+        n_vae_a = ids.alloc("vae_audio")
         nodes: dict = {
-            "1": {"class_type": "UNETLoader",
-                  "inputs": {"unet_name": self.unet, "weight_dtype": "default"}},
-            "3": {"class_type": "CLIPLoader",
-                  "inputs": {"clip_name": self.text_encoder, "type": "minimax"}},
-            "4": {"class_type": "VAELoader",
-                  "inputs": {"vae_name": self.video_vae}},
-            "5": {"class_type": "VAELoader",
-                  "inputs": {"vae_name": self.audio_vae}},
+            n_unet: {"class_type": "UNETLoader",
+                     "inputs": {"unet_name": self.unet, "weight_dtype": "default"}},
+            n_clip: {"class_type": "CLIPLoader",
+                     "inputs": {"clip_name": self.text_encoder, "type": "minimax"}},
+            n_vae_v: {"class_type": "VAELoader", "inputs": {"vae_name": self.video_vae}},
+            n_vae_a: {"class_type": "VAELoader", "inputs": {"vae_name": self.audio_vae}},
         }
         # 模型源：Turbo 时经 LoRA 注入
         if self.turbo:
-            nodes["2"] = {"class_type": "LoraLoaderBypassModelOnly",
-                          "inputs": {"model": ["1", 0], "lora_name": self.lora,
-                                     "strength_model": self.lora_strength}}
-            model_src = ["2", 0]
+            n_lora = ids.alloc("lora")
+            nodes[n_lora] = {"class_type": "LoraLoaderBypassModelOnly",
+                             "inputs": {"model": [n_unet, 0], "lora_name": self.lora,
+                                        "strength_model": self.lora_strength}}
+            model_src = [n_lora, 0]
         else:
-            model_src = ["1", 0]
+            model_src = [n_unet, 0]
 
-        # BlockCache（缓存加速）：插在模型源与采样器之间。节点 ID 用 40，避开
-        # 1~14 / 20~28(ref_images) / 30~32(后处理)。仅当 config 开启时接入，
+        # BlockCache（缓存加速）：插在模型源与采样器之间。仅当 config 开启时接入，
         # 缺失节点时 ComfyUI 会报 class_type 不存在，故默认关闭。
         if self.block_cache:
-            nodes["40"] = {"class_type": "MiniMaxH3BlockCacheT8", "inputs": {
+            n_bc = ids.alloc("block_cache")
+            nodes[n_bc] = {"class_type": "MiniMaxH3BlockCacheT8", "inputs": {
                 "model": model_src,
                 "residual_diff_threshold": self.bc_threshold,
                 "start_percent": 0.08, "end_percent": 0.95,
                 "max_consecutive_hits": 2,
                 "cache_device": self.bc_cache_device,
                 "metric_stride": 8, "verbose": False}}
-            model_src = ["40", 0]
+            model_src = [n_bc, 0]
 
         # 条件节点（I2VA 时挂首帧）
         cond_in = {
@@ -398,11 +424,13 @@ class MMH3Engine:
             img_name = (meta or {}).get("name") or (meta or {}).get("filename")
             if not img_name:
                 raise RuntimeError(f"起始帧上传失败: {image}")
-            nodes["13"] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
-            cond_in["first_frame"] = ["13", 0]
+            n_first = ids.alloc("first_frame")
+            nodes[n_first] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
+            cond_in["first_frame"] = [n_first, 0]
         if has_ref:
             # 参考视频：本地绝对路径直接加载（免上传），输出 IMAGE 帧批次接 ref_videos
-            nodes["14"] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+            n_refv = ids.alloc("ref_video")
+            nodes[n_refv] = {"class_type": "VHS_LoadVideoPath", "inputs": {
                 "video": os.path.abspath(ref_video),
                 "force_rate": float(self.fps),
                 "custom_width": 0, "custom_height": 0,
@@ -413,7 +441,7 @@ class MMH3Engine:
             #   f"{autogrow_input_id}.{prefix}{i}"，i 从 0 开始 → "ref_videos.ref_video_0"
             # 写成嵌套 dict 或裸 ref_video_1 都会被丢弃（节点不执行，报
             # "requires at least one reference media input"）。
-            cond_in["ref_videos.ref_video_0"] = ["14", 0]
+            cond_in["ref_videos.ref_video_0"] = [n_refv, 0]
         # 多参考图（最多 9 张）：增强身份/形象信号，缓解 Hybrid 下人物形态崩坏。
         # 同样是 Autogrow：键名带父级前缀 ref_images.ref_image_i，i 从 0 开始。
         for i, rp in enumerate((ref_images or [])[:9]):
@@ -423,69 +451,74 @@ class MMH3Engine:
             nm = (meta or {}).get("name") or (meta or {}).get("filename")
             if not nm:
                 continue
-            nid = "2%d" % i          # 20..28，避开已占用的节点 ID
+            nid = ids.alloc_range("ref_image", i)    # 20..28，区间由分配器保证不越界
             nodes[nid] = {"class_type": "LoadImage", "inputs": {"image": nm}}
             cond_in[f"ref_images.ref_image_{i}"] = [nid, 0]
-        nodes["6"] = {"class_type": "MiniMaxH3AudioConditioningT8", "inputs": cond_in}
+        n_cond = ids.alloc("cond")
+        nodes[n_cond] = {"class_type": "MiniMaxH3AudioConditioningT8", "inputs": cond_in}
 
         # 采样器：Turbo 走双速率（4 视频 / 8 音频），否则统一步数双时钟。
         # 二采模式下一采固定用 DualClock（统一 sigma 轨迹 → ParityPlan 切 coarse/refine）。
+        n_sampler = ids.alloc("sampler")
         if self.two_pass_latent:
-            nodes["7"] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
-                "model": model_src, "av_latent": ["6", 1], "steps": self.tp_base,
+            nodes[n_sampler] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
+                "model": model_src, "av_latent": [n_cond, 1], "steps": self.tp_base,
                 "shift_video": self.shift_video, "shift_audio": self.shift_audio,
                 "sampler_name": "dual_clock_euler", "scheduler": "native_flow"}}
             # 二采 sigma 计划：coarse 段给一采，refine 段给二采（base = coarse + refine）
-            nodes["57"] = {"class_type": "MiniMaxH3LearnedTwoPassParityPlanT8Advanced",
-                           "inputs": {"model": ["7", 0], "base_steps": self.tp_base,
-                                      "coarse_steps": self.tp_coarse,
-                                      "refine_steps": self.tp_refine}}
-            first_sigmas = ["57", 0]
+            n_par = ids.alloc("tp_parity")
+            nodes[n_par] = {"class_type": "MiniMaxH3LearnedTwoPassParityPlanT8Advanced",
+                            "inputs": {"model": [n_sampler, 0], "base_steps": self.tp_base,
+                                       "coarse_steps": self.tp_coarse,
+                                       "refine_steps": self.tp_refine}}
+            first_sigmas = [n_par, 0]
         elif self.turbo:
-            nodes["7"] = {"class_type": "MiniMaxH3MultiRateSamplerEXPT8", "inputs": {
-                "model": model_src, "av_latent": ["6", 1],
+            nodes[n_sampler] = {"class_type": "MiniMaxH3MultiRateSamplerEXPT8", "inputs": {
+                "model": model_src, "av_latent": [n_cond, 1],
                 "video_steps": self.video_steps, "audio_steps": self.audio_steps,
                 "shift_video": self.shift_video, "shift_audio": self.shift_audio}}
-            first_sigmas = ["7", 2]
+            first_sigmas = [n_sampler, 2]
         else:
-            nodes["7"] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
-                "model": model_src, "av_latent": ["6", 1], "steps": self.steps,
+            nodes[n_sampler] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
+                "model": model_src, "av_latent": [n_cond, 1], "steps": self.steps,
                 "shift_video": self.shift_video, "shift_audio": self.shift_audio,
                 "sampler_name": "dual_clock_euler", "scheduler": "native_flow"}}
-            first_sigmas = ["7", 2]
+            first_sigmas = [n_sampler, 2]
         # 一采 guider model：Turbo / 二采 => 采样器 wrapper 输出(7.0)；非 Turbo 直连模型源
-        guider_model = (["7", 0] if (self.turbo or self.two_pass_latent)
+        guider_model = ([n_sampler, 0] if (self.turbo or self.two_pass_latent)
                         else model_src)
 
         # ---------- Fun Control：把「走位/构图」真正交给白模 ----------
-        # 逐帧 depth/pose 控制视频经 FunControlApply 注入 DiT(第0/10/20/30/40层)；
-        # 节点 ID 用 41/42/43，避开 1~14 / 20~28(ref_images) / 30~32(post) / 40(BlockCache) / 50~57(二采)。
+        # 逐帧 depth/pose 控制视频经 FunControlApply 注入 DiT(第0/10/20/30/40层)。
         # 实测：能把走位方向从 H3 默认「左移」纠正为「跟随白模」；strength 0.8~1.2，≥1.5 崩坏。
-        cond_src = ["6", 0]
+        cond_src = [n_cond, 0]
         fc_video = control_video or self.fc_video
         if ((self.fun_control_enable or control_video)
                 and fc_video and os.path.exists(fc_video)):
             fc_str = self.fc_strength if fc_strength is None else float(fc_strength)
-            nodes["41"] = {"class_type": "MiniMaxH3FunControlLoaderT8Advanced",
-                           "inputs": {"control_net_name": self.fc_control_net}}
-            nodes["42"] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+            n_fc_l = ids.alloc("fc_loader")
+            n_fc_v = ids.alloc("fc_video")
+            n_fc_a = ids.alloc("fc_apply")
+            nodes[n_fc_l] = {"class_type": "MiniMaxH3FunControlLoaderT8Advanced",
+                             "inputs": {"control_net_name": self.fc_control_net}}
+            nodes[n_fc_v] = {"class_type": "VHS_LoadVideoPath", "inputs": {
                 "video": os.path.abspath(fc_video),
                 "force_rate": float(self.fps),
                 "custom_width": w, "custom_height": h,
                 "frame_load_cap": self.num_frames, "skip_first_frames": 0,
                 "select_every_nth": 1}}
-            nodes["43"] = {"class_type": "MiniMaxH3FunControlApplyT8Advanced",
-                           "inputs": {"model": guider_model, "positive": ["6", 0],
-                                      "control_net": ["41", 0], "vae": ["4", 0],
-                                      "control_video": ["42", 0],
-                                      "width": w, "height": h, "length": self.num_frames,
-                                      "control_kind": self.fc_control_kind,
-                                      "fit_mode": self.fc_fit_mode,
-                                      "strength": fc_str,
-                                      "start_percent": 0.0,
-                                      "end_percent": self.fc_end_percent}}
-            guider_model = ["43", 0]
-            cond_src = ["43", 1]
+            nodes[n_fc_a] = {"class_type": "MiniMaxH3FunControlApplyT8Advanced",
+                             "inputs": {"model": guider_model, "positive": [n_cond, 0],
+                                        "control_net": [n_fc_l, 0], "vae": [n_vae_v, 0],
+                                        "control_video": [n_fc_v, 0],
+                                        "width": w, "height": h, "length": self.num_frames,
+                                        "control_kind": self.fc_control_kind,
+                                        "fit_mode": self.fc_fit_mode,
+                                        "strength": fc_str,
+                                        "start_percent": 0.0,
+                                        "end_percent": self.fc_end_percent}}
+            guider_model = [n_fc_a, 0]
+            cond_src = [n_fc_a, 1]
             log(f"  [mmh3] Fun Control 注入：{os.path.basename(fc_video)} "
                 f"({self.fc_control_kind}, strength={fc_str}, end={self.fc_end_percent})")
 
@@ -493,86 +526,96 @@ class MMH3Engine:
         # decode(11) 输出 [IMAGE 帧批次, AUDIO]；音频不动，只增强图像分辨率/锐度。
         # 帧插值(RIFE)故意不接此处：会改变帧率导致音画不同步，作为离线增强单独提供。
         # 具体实现统一在 agent/comfyui_post.py（与 LTX-2.5 共用）。
-        images_src = ["11", 0]
+        n_decode = ids.alloc("decode")
+        images_src = [n_decode, 0]
         if self.post_upscale or self.post_sharpen > 0:
-            # 节点 ID 固定用 30/31/32：20~28 已被 ref_images 的 LoadImage 占用
-            # （"2%d" % i），复用会覆盖参考图节点、使 ref_image_i 指向后处理输出并形成依赖环。
-            post_ids = {"upscale_loader": "30", "upscale_apply": "31", "sharpen": "32"}
             images_src = comfyui_post.build_post_nodes(
                 nodes, images_src,
                 upscale=self.post_upscale, sharpen=self.post_sharpen,
-                alloc=lambda name: post_ids[name])
+                alloc=ids.alloc)          # 30/31/32，由分配器保证不与 20~28 撞号
 
+        n_guider = ids.alloc("guider")
+        n_noise = ids.alloc("noise")
+        n_final = ids.alloc("sampler_final")
         nodes.update({
-            "8": {"class_type": "BasicGuider",
-                  "inputs": {"model": guider_model, "conditioning": cond_src}},
-            "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
-            "10": {"class_type": "SamplerCustomAdvanced", "inputs": {
-                "noise": ["9", 0], "guider": ["8", 0], "sampler": ["7", 1],
-                "sigmas": first_sigmas, "latent_image": ["6", 1]}},
+            n_guider: {"class_type": "BasicGuider",
+                       "inputs": {"model": guider_model, "conditioning": cond_src}},
+            n_noise: {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+            n_final: {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "noise": [n_noise, 0], "guider": [n_guider, 0],
+                "sampler": [n_sampler, 1],
+                "sigmas": first_sigmas, "latent_image": [n_cond, 1]}},
         })
-        # 解码源：单采用一采结果(10)；二采用二采采样器(56)
-        decoded_src = ["10", 0]
+        # 解码源：单采用一采结果；二采用二采采样器
+        decoded_src = [n_final, 0]
         if self.two_pass_latent:
-            # 二采：一采 denoised(10.1) → 3D latent 放大(51) → 高清 Conditioning(50)
-            #      → Reconcile(52) → DetailMixer(53) → 二采采样(56)
-            # 节点 ID 用 50~57，避开 1~14 / 20~28 / 30~32 / 40。
-            # 放大必须接 10 的 denoised_output(1)，不能用中间噪声状态的 output(0)。
-            nodes["51"] = {"class_type": "MiniMaxH3LearnedLatentUpscaleT8Advanced",
-                           "inputs": {
-                               "av_latent": ["10", 1], "model_name": self.tp_upscaler,
-                               "size_mode": "scale_by", "scale_by": self.tp_scale,
-                               "target_megapixels": 1.0, "target_width": 1024,
-                               "target_height": 576, "aspect_policy": "preserve_source",
-                               "max_anisotropy": 1.05, "precision": "fp16",
-                               "release_policy": "offload_after"}}
+            # 二采：一采 denoised(10.1) → 3D latent 放大 → 高清 Conditioning
+            #      → Reconcile → DetailMixer → 二采采样
+            # 放大必须接一采的 denoised_output(1)，不能用中间噪声状态的 output(0)。
+            n_tp_up = ids.alloc("tp_upscale")
+            n_cond2 = ids.alloc("cond2")
+            n_rec = ids.alloc("tp_reconcile")
+            n_mix = ids.alloc("tp_mixer")
+            n_g2 = ids.alloc("tp_guider")
+            n_n2 = ids.alloc("tp_noise")
+            n_s2 = ids.alloc("tp_sampler")
+            nodes[n_tp_up] = {"class_type": "MiniMaxH3LearnedLatentUpscaleT8Advanced",
+                              "inputs": {
+                                  "av_latent": [n_final, 1], "model_name": self.tp_upscaler,
+                                  "size_mode": "scale_by", "scale_by": self.tp_scale,
+                                  "target_megapixels": 1.0, "target_width": 1024,
+                                  "target_height": 576, "aspect_policy": "preserve_source",
+                                  "max_anisotropy": 1.05, "precision": "fp16",
+                                  "release_policy": "offload_after"}}
             # 二采 Conditioning：同 prompt/参考媒体，宽高接放大输出的 width/height
             cond2 = dict(cond_in)
             cond2.pop("width", None)
             cond2.pop("height", None)
-            cond2["width"] = ["51", 1]
-            cond2["height"] = ["51", 2]
-            nodes["50"] = {"class_type": "MiniMaxH3AudioConditioningT8",
-                           "inputs": cond2}
-            nodes["52"] = {"class_type": "MiniMaxH3TwoPassLatentReconcileT8Advanced",
-                           "inputs": {
-                               "learned_latent": ["51", 0],
-                               "highres_template": ["50", 1], "positive": ["50", 0],
-                               "audio_policy": "auto",
-                               "second_pass_audio_source": "legacy_policy",
-                               "second_pass_audio_strength": 0.0}}
+            cond2["width"] = [n_tp_up, 1]
+            cond2["height"] = [n_tp_up, 2]
+            nodes[n_cond2] = {"class_type": "MiniMaxH3AudioConditioningT8",
+                              "inputs": cond2}
+            nodes[n_rec] = {"class_type": "MiniMaxH3TwoPassLatentReconcileT8Advanced",
+                            "inputs": {
+                                "learned_latent": [n_tp_up, 0],
+                                "highres_template": [n_cond2, 1], "positive": [n_cond2, 0],
+                                "audio_policy": "auto",
+                                "second_pass_audio_source": "legacy_policy",
+                                "second_pass_audio_strength": 0.0}}
             # DetailMixer 的 model 用原始模型源（非一采采样器 wrapper 输出）
-            nodes["53"] = {"class_type": "MiniMaxH3TwoPassDetailMixerT8Advanced",
-                           "inputs": {
-                               "model": model_src, "av_latent": ["52", 0],
-                               "refine_sigmas": ["57", 1],
-                               "shift_video": self.shift_video,
-                               "shift_audio": self.shift_audio,
-                               "enable_tail": False, "extra_tail_steps": 3,
-                               "tail_spacing": "video_sigma_linear",
-                               "enable_model_time_bias": False, "bias": -0.025,
-                               "bias_start_progress": 0.7, "bias_end_progress": 0.95,
-                               "bias_domain": "video_sigma",
-                               "enable_stg": False, "stg_scale": 0.35,
-                               "stg_double_blocks": "25",
-                               "stg_start_progress": 0.25, "stg_end_progress": 0.85,
-                               "enable_restart": False, "restart_video_sigma": 0.15,
-                               "restart_steps": 3, "restart_seed": seed}}
-            nodes["54"] = {"class_type": "BasicGuider",
-                           "inputs": {"model": ["53", 0], "conditioning": ["52", 1]}}
-            nodes["55"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
-            nodes["56"] = {"class_type": "SamplerCustomAdvanced", "inputs": {
-                "noise": ["55", 0], "guider": ["54", 0], "sampler": ["53", 1],
-                "sigmas": ["53", 2], "latent_image": ["52", 0]}}
-            decoded_src = ["56", 0]
+            nodes[n_mix] = {"class_type": "MiniMaxH3TwoPassDetailMixerT8Advanced",
+                            "inputs": {
+                                "model": model_src, "av_latent": [n_rec, 0],
+                                "refine_sigmas": [n_par, 1],
+                                "shift_video": self.shift_video,
+                                "shift_audio": self.shift_audio,
+                                "enable_tail": False, "extra_tail_steps": 3,
+                                "tail_spacing": "video_sigma_linear",
+                                "enable_model_time_bias": False, "bias": -0.025,
+                                "bias_start_progress": 0.7, "bias_end_progress": 0.95,
+                                "bias_domain": "video_sigma",
+                                "enable_stg": False, "stg_scale": 0.35,
+                                "stg_double_blocks": "25",
+                                "stg_start_progress": 0.25, "stg_end_progress": 0.85,
+                                "enable_restart": False, "restart_video_sigma": 0.15,
+                                "restart_steps": 3, "restart_seed": seed}}
+            nodes[n_g2] = {"class_type": "BasicGuider",
+                           "inputs": {"model": [n_mix, 0], "conditioning": [n_rec, 1]}}
+            nodes[n_n2] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
+            nodes[n_s2] = {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "noise": [n_n2, 0], "guider": [n_g2, 0], "sampler": [n_mix, 1],
+                "sigmas": [n_mix, 2], "latent_image": [n_rec, 0]}}
+            decoded_src = [n_s2, 0]
+        n_combine = ids.alloc("combine")
         nodes.update({
-            "11": {"class_type": "MiniMaxH3AVDecodeT8", "inputs": {
-                "av_latent": decoded_src, "video_vae": ["4", 0],
-                "audio_vae": ["5", 0]}},
-            "12": {"class_type": "VHS_VideoCombine", "inputs": {
-                "images": images_src, "audio": ["11", 1], "frame_rate": self.fps,
+            n_decode: {"class_type": "MiniMaxH3AVDecodeT8", "inputs": {
+                "av_latent": decoded_src, "video_vae": [n_vae_v, 0],
+                "audio_vae": [n_vae_a, 0]}},
+            n_combine: {"class_type": "VHS_VideoCombine", "inputs": {
+                "images": images_src, "audio": [n_decode, 1], "frame_rate": self.fps,
                 "filename_prefix": self.filename_prefix,
                 "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 18,
                 "loop_count": 0, "pingpong": False, "save_output": True}},
         })
+        ids.audit(nodes)      # 自检：无未登记 / 无悬空 ID
         return nodes

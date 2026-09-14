@@ -40,9 +40,14 @@ from tools.comfyui_client import ComfyUIClient
 from . import comfyui_post
 from . import prompting
 from .llmutil import log
+from .video_engine import VideoEngine
 
 
-class LTXEngine:
+class LTXEngine(VideoEngine):
+    TAG = "ltx"
+    #: LTX-2.5 是 T2V/I2V 引擎，白模条件（参考图/参考视频/Fun Control）全不支持。
+    CAPABILITIES = frozenset()
+
     def __init__(self, config: dict, agent_root: str = ""):
         eng = config.get("engine", {}) or {}
         ltx = eng.get("comfyui_ltx", {}) or {}
@@ -83,11 +88,14 @@ class LTXEngine:
     def generate(self, prompt: str, out_path: str, prev_clip: str | None = None,
                  seed: int | None = None, image: str | None = None,
                  two_pass: bool | None = None,
-                 ref_images: list | None = None) -> str:
-        # ref_images（多参考图锁身份）目前只有 MiniMax H3 引擎支持。这里保留同名参数
-        # 以维持「各引擎接口一致」，否则 run_series.py 等统一调用方会 TypeError。
-        if ref_images:
-            log(f"  [ltx] 忽略 ref_images（{len(ref_images)} 张）：该能力仅 MiniMax H3 支持")
+                 ref_video: str | None = None,
+                 ref_images: list | None = None,
+                 control_video: str | None = None,
+                 fc_strength: float | None = None) -> str:
+        # 签名与 MiniMax H3 引擎保持一致（见 agent/video_engine.py）；本引擎不支持
+        # 白模条件，统一由 _warn_ignored 记一条日志，绝不静默丢弃。
+        self._warn_ignored(ref_images=ref_images, ref_video=ref_video,
+                           control_video=control_video, fc_strength=fc_strength)
         if not self.client.is_ready():
             raise RuntimeError(
                 "ComfyUI 未就绪：请启动 ComfyUI 并安装 LTX-2.5 节点（见 docs/ltx_comfyui_nvfp4.md）。"

@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import shutil
@@ -30,6 +29,7 @@ from .keyframe import KeyframeGenerator
 from .configutil import for_stage
 from .blocking import BlockingGenerator
 from .llmutil import log
+from .video_engine import filter_engine_kwargs
 
 
 class MovieAgent:
@@ -126,8 +126,10 @@ class MovieAgent:
             return None
         prev = self.film if (n > 0 and os.path.exists(self.film)) else None
         # ---- 白模 -> 视频 流程闭环：控制图/灰模动画接入引擎 ----
-        #   控制图(depth/normal/line) -> ref_images；灰模运镜 mp4 -> ref_video
-        #   仅当引擎签名支持对应参数时才传（SkyReels/LTX 不支持则自动跳过，不报错）
+        #   控制图(depth/normal/line) -> ref_images；灰模运镜 mp4 -> ref_video；
+        #   白模 depth 序列 -> control_video(Fun Control)
+        #   能力过滤由 filter_engine_kwargs 按引擎的 CAPABILITIES 声明完成
+        #   （SkyReels/LTX 不支持则跳过并记日志，不报错）
         bcfg = self.config.get("blender", {}) or {}
         ref_images = None
         ref_video = None
@@ -165,25 +167,25 @@ class MovieAgent:
             fc = self.blocking_fc[n] if n < len(self.blocking_fc) else None
             if fc and str(fc).lower().endswith(".mp4") and os.path.exists(fc):
                 control_video = fc
-        extra = {}
-        try:
-            params = inspect.signature(self.engine.generate).parameters
-            if ref_images and "ref_images" in params:
-                extra["ref_images"] = ref_images
-            if ref_video and "ref_video" in params:
-                extra["ref_video"] = ref_video
-            # Fun Control 白模走位：depth 走位序列 -> H3 逐帧注入（真正能控走位；ref_video 已证无效）
-            if control_video and "control_video" in params:
-                extra["control_video"] = control_video
-                if "fc_strength" in params:
-                    try:
-                        extra["fc_strength"] = float(bcfg.get("fun_control_strength", 1.2))
-                    except (TypeError, ValueError):
-                        pass
-        except (TypeError, ValueError):
-            pass
+        # Fun Control 强度：白模走位序列 -> H3 逐帧注入（真正能控走位；ref_video 已证无效）
+        fc_strength = None
+        if control_video:
+            try:
+                fc_strength = float(bcfg.get("fun_control_strength", 1.2))
+            except (TypeError, ValueError):
+                fc_strength = None
+        # 传什么由引擎**显式声明**（VideoEngine.CAPABILITIES），不再用
+        # inspect.signature 反射猜签名：反射让补全/类型检查/静态分析全失效，
+        # 新增能力还得改这里。被引擎忽略的条件照样记日志，避免「走位悄悄没生效」。
+        extra, ignored = filter_engine_kwargs(
+            self.engine,
+            ref_images=ref_images, ref_video=ref_video,
+            control_video=control_video, fc_strength=fc_strength)
         if extra:
             log("  [agent] 白模条件已接入引擎: " + ", ".join(sorted(extra)))
+        if ignored:
+            log(f"  [agent] {type(self.engine).__name__} 不支持的条件已忽略: "
+                + ", ".join(sorted(ignored)))
         # 先生成到临时片段，再作为续写结果替换 film
         tmp = os.path.join(self.scenes_dir, f"scene_{n+1:03d}.mp4")
         self.engine.generate(prompt, tmp, prev_clip=prev, seed=seed,

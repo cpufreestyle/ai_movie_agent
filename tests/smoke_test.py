@@ -762,12 +762,16 @@ def test_agent_passes_blocking_assets_to_engine():
 
     class _Eng:
         two_pass = False
+        # 能力声明（见 agent/video_engine.py）：agent.py 不再反射签名，
+        # 而是按 CAPABILITIES 决定传哪些白模条件。
+        CAPABILITIES = frozenset({"ref_images", "ref_video"})
 
         def is_ready(self):
             return True
 
         def generate(self, prompt, out_path, prev_clip=None, seed=None, image=None,
-                     two_pass=None, ref_images=None, ref_video=None):
+                     two_pass=None, ref_images=None, ref_video=None,
+                     control_video=None, fc_strength=None):
             self.got = {"ref_images": ref_images, "ref_video": ref_video}
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write("stub")
