@@ -9,3 +9,15 @@
 ## 环境守卫 / 工具坑
 - SAFE_DELETE：Python 删除 API turn 级批量拦截(阈值 50)。绕过用 os.system("del /q")（项目惯例见 gen_blocking.py）。
 - Bash shim 损坏：cd/dirname/ls 不可用(Exit 127)。绝对路径调 D:/Program/python.exe；脚本用 __file__ 自定位 ROOT，不依赖 cwd。
+- 预览：沙箱 loopback 不可用于预览 running Flask；用 Bash run_in_background 起 webui.py(:8000)。改 .py 需重启服务，HTML 即时生效。
+- 偶发 Edit 报成功但未落盘：改完必须 grep/read 复核。
+
+## Git 同步（仓库 / 凭据 / 行尾）
+- 仓库实际路径：`C:\Users\michael\CodeBuddy\ai_movie_agent` 是 Junction → `D:\ai sheare\repo\ai_movie_agent`（show-toplevel 落在 D:）。
+- 远端：GitHub `cpufreestyle/ai_movie_agent`（origin，https）；本地 main 跟踪 origin/main。
+- **推送必须禁用 helper 并内嵌 token**（否则 HTTP 401）：
+  `git -c credential.helper= push https://cpufreestyle:<TOKEN>@github.com/cpufreestyle/ai_movie_agent.git main`
+  只读操作(fetch/ls-remote)匿名即可。
+- **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
+- **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
+- 提交习惯：`_*.py/_*.ps1/_*.bat`、`outputs/`、`.venv/` 均 gitignore；每个独立变更批次单独 commit。
