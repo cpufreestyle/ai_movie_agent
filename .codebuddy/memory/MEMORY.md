@@ -1,66 +1,48 @@
 # 长期记忆 (MEMORY.md) — ai_movie_agent
 
 ## 环境
-- GPU: RTX 5070 Ti 16GB（Blackwell sm_120）。ComfyUI `D:/ComfyUI` 常驻 **8188**（venv python；GGUF+LTXVideo+T8/VideoHelperSuite）。
-- 模型根 `E:/ComfyUI_models/`（extra_model_paths.yaml 映射，E/D 都查）。代理 `127.0.0.1:7897`；⚠️ 代理 env 让 urllib 把 127.0.0.1 也走代理→502，访问本机 ComfyUI 须 `install_opener(ProxyHandler({}))` 或 NO_PROXY。
-- **cu130 必须**（cu128 下 CUDA 禁用→latent 全噪声）。项目 venv：`d:/ai sheare/repo/ai管理/.venv/Scripts/python.exe`（系统 python 缺依赖）。Edge TTS/外网经 7897 正常。
-- 终端 **PowerShell**（非 cmd）：`cd /d`、`&&` 会失败；用 `Set-Location; & 'python' args`。长任务用 `Start-Process ... -RedirectStandardOutput/-Error -NoNewWindow -PassThru` 后台跑 + `Get-Content -Tail` 轮询。
+- GPU: RTX 5070 Ti 16GB (sm_120)。ComfyUI `D:/ComfyUI` 常驻 8188 (venv python; GGUF+LTXVideo+T8/VideoHelperSuite)。
+- 模型根 `E:/ComfyUI_models/` (extra_model_paths.yaml，E/D 都查)。代理 127.0.0.1:7897；访问本机 ComfyUI 须 NO_PROXY/ProxyHandler({}) 防 502。
+- cu130 必须 (cu128→CUDA 禁用→latent 全噪)。venv: `d:/ai sheare/repo/ai管理/.venv/Scripts/python.exe`。终端 PowerShell；长任务 Start-Process 后台 + Get-Content 轮询。
 
-## SageAttention（2026-09-10 跑通，推翻"Win+sm_120 只能 SDPA"）
-- wheel 用 HF `ussoewwin/Sage-Attention-for-Windows`（cu130torch2.11.0-cp313 匹配版，SA2/SA3）。安装**必须 `--no-deps`** 防覆盖 torch；wheel 文件名须保留完整五段标签；另 `pip install triton-windows`。
-- 实测(bf16,H=12,D=128)：L=8192→SA2 **6.22x**(cos .9992)/SA3 **7.05x**(cos .9812)；**L≤512 时两者比 SDPA 慢 3~4x，勿用于短序列**（交叉点 512~2048）。
-- H3 注意力走 ComfyUI 全局 `optimized_attention`（**不是** `wan_video_dit.sageattn`，monkey-patch 无效——H3 早于 custom node 捕获引用）。启用 SA2：启动加 `--use-sage-attention`。启用 SA3：改 `D:\ComfyUI\comfy\ldm\modules\attention.py` 在 `sage_attention_enabled()` 后加 `elif os.environ.get("SA3")=="1" and SAGE_ATTENTION3_IS_AVAILABLE: optimized_attention = attention3_sage`，并用 `launch_comfy.py --sage3`。
-- **H3 生产推荐 SA2**（cos .999 近无损，86.6s）；SA3(FP4) 短序列不划算（93.5s，慢~8%）且 cos .981 或劣化人脸一致性。arcface：SA2 0.3509 vs SDPA 0.3631（噪声级）→ SA2 可常态化。切换见 `_launch_comfy.py` 的 `COMFY_SAGE`（默认 1）。
+## SageAttention (2026-09-10)
+- wheel: HF `ussoewwin/Sage-Attention-for-Windows` (cu130torch2.11.0-cp313, SA2/SA3)，装须 `--no-deps`；另 `pip install triton-windows`。
+- L≤512 比 SDPA 慢 3~4x，勿用于短序列。H3 走全局 optimized_attention：SA2=`--use-sage-attention`；SA3=改 attention.py + `launch_comfy.py --sage3`。
+- 生产推荐 SA2 (cos .999 近无损, 86.6s)；SA3 慢~8% 且 cos .981 或劣化人脸。SA2 可常态化 (COMFY_SAGE=1)。
 
-## 16GB 出片方案（推荐度）
-- **① LTX-2.5**：gguf Q2_K+gemma4-12b int8+vae；`python cli.py ltx`，engine `agent/ltx_engine.py`。真 T2V+自带音频。帧数 bug 已修。
-- **② LTX-2.3**：gguf Q3+gemma3_12b+connectors；`run_ltx23.py`(8200)/`run_ltx23_multishot.py`。
-- **③ Wan2.2**：仅 I2V 无音轨。TI2V-5B Q8+umt5xxl Q5+VAE，必传 start_image、负向必填。
-- **④ MiniMax H3（主力）**：INT4 档（扩散11.3G+文本15G+视频vae4.9G+音频vae0.6G）；须 `comfyui-minimax-h3-audio-T8`+`ComfyUI-VideoHelperSuite`。Turbo LoRA→48s 出 768×448/2.33s/立体声。入口 `agent/mmh3_engine.py`+`cli.py mmh3`+`run_series.py --engine mmh3`。引擎自动修 H3 约束(32整除/17n+5 吸附)。坑：本机绕代理；`--medvram` 不识别；DynamicVRAM 够；VHS_VideoCombine 必填 save_output/loop_count/pingpong；宽高须32整除。⑥**组件勿跨模型混搭**（H3 UNet 须配 H3 TE `MiniMaxH3TEModel_` 输出5120，勿用 LTX CLIP 6144；VAE/latent 也须 H3 全套）。
+## 出片引擎 (16GB)
+- LTX-2.5 (Q2_K+gemma4-12b int8): `cli.py ltx`, `agent/ltx_engine.py`。真 T2V+音频。
+- Wan2.2 TI2V-5B Q8: 仅 I2V 无音轨，必传 start_image、负向必填。
+- **MiniMax H3 (主力)**: INT4 档；须 comfyui-minimax-h3-audio-T8 + VideoHelperSuite。Turbo LoRA→48s 出 768×448/2.33s/立体声。入口 `agent/mmh3_engine.py`+`cli.py mmh3`+`run_series.py --engine mmh3`。引擎自动修 32整除/17n+5 吸附。组件勿跨模型混搭 (H3 UNet 须配 H3 TE 输出5120)。
 
-## H3 白模控制走位（已被否，归档）
-- 路线：`ref_videos`(≥5帧,≤3段)+`task_type=Hybrid`(首帧锁形象+参考视频锁走位)。`pip install bpy`→`gen_blocking.py` 建白模→H3 Hybrid。
-- **⚠️ 白模路线被否（2026-09-10 实测）**：成片「人物内容乱」。arcface：白模Hybrid 0.122 vs 锚定原 0.146 vs **锚定换脸后 0.466**。白模 Hybrid 结构性崩坏（部分镜人物形态乱，换脸也救不回）→ **ep1 主成片=`outputs/ep1_vo_mmh3_fs.mp4`（换脸+旁白），白模弃用，ep2/ep3 不走白模**。
-- 教训：评估质量须同时量 **arcface 身份一致性 + 人脸检出率**，不能只量「人脸面积/运动幅度」，否则会把"运动可控但人物崩坏"误判为可行。
-- 身份增强手段（`MiniMaxH3AudioConditioningT8`，Autogrow）：`ref_images`(≤9张，当前只给1张首帧，信号弱)、`last_frame` 锁尾帧、关 Turbo 提步数、降白模运动。
+## H3 白模控制走位
+- 首帧/ref_video 路线已证无效 (2026-09-14): 首帧只弱锁起始构图/站位；连"角色走位灰模 ref_video"也左移且慢1.7× → ref_video 彻底弃用。
+- **✅ H3 Fun Control = 真正能控走位 (2026-09-14 实测突破)**: H3 原生节点 `MiniMaxH3FunControlLoader/ApplyT8Advanced` 把逐帧 depth/pose/edge `control_video` 注入 DiT(第0/10/20/30/40层)。
+  - 权重 `minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors`(2.3GB, 单权重支持 Canny/Depth/HED/MLSD/Pose); 本机 HF 被封→从 ModelScope `Comfy-Org/MiniMax-H3` 拉(`download_ms.py`, 直连CN CDN, 设 `MS_PROXY=none`); 放 `E:/ComfyUI_models/model_patches/`(T8 loader 查 controlnet+model_patches)。
+  - pruned 控制须配 pruned 主模型(fl2va_pruned_int4=8维AdaLN 兼容)。control_kind 仅描述性, 须自预处理。17n+5 帧/24fps/fit_mode=exact 几何须严格匹配。
+  - **A/B(768×448/56帧/Turbo/seed12345, 白模角色 0.1W→0.9W 左→右走)**: 基线(无FC) net −10.9px(左)/act1.98; FC depth strength0.8 → net +13.7px(右)/act2.14(干净); **strength1.2+end1.0 → net +37.1px(右)/act10.78(明显增强,画面较活跃)**; strength1.5 → act13.33 崩坏(net−5.7失稳)。→ **FC 纠正走位方向(H3默认左→跟随右)**; **strength 是主杠杆, 推荐 0.8~1.2(<1.5)**; 幅度仍远小于白模意图(+37 vs +614px)。
+  - 落地: `gen_blocking.py --depth`(相机视距 MapRange 近白远黑, 背景/地面压黑只留角色); `run_h3_funcontrol.py`(FunControlApply 插 LoRA后/采样前, VHS_LoadVideo 锁 768×448×56; 支持 `--walk` 端到端自动生成控制视频)。strength≈0.8~1.2 起点。
+  - ⚠️ 白模走位须落在相机视野内: static/no-track 相机(0,-7) 在角色深度处水平可见约 ±2.6; walk ±3 会起末出画(实测仅46/56帧可见,控制信号丢失), 用 ±2.2 全程可见(56/56, 屏幕x 0.07W→0.93W)。要更大范围就拉远相机或 `--cam lateral`。
+  - 视野影响 A/B(seed12345/s1.2/e1.0): 出画(walk±3) net+37.1px/act10.78 vs 全程可见(±2.2) net+21.2px/act9.42 —— 都右移✓; 推荐 ±2.2(控制信号完整、画面略稳)。**度量口径: 以 net_shift(帧差前景净位移)为主**, 光流 trend 在大运动下不稳(曾 dx 正/trend 负矛盾)。
+  - **复杂走位**: `gen_blocking --walk` 支持多点折线 `x1,y1:x2,y2:...`(按累计弧长匀速)。闭环 `-2,1:2,1:2,-1:-2,-1:-2,1`(俯视矩形循环+景深, 面积2.8%→5.2%, 56/56可见) → H3 出片屏幕x亦**先增后减**(argmax f33中部, 首末1/4 367≈372px 闭环)→ 跟随的是**逐帧运动结构**而非单向位移。
+  - **主线集成**: `agent/mmh3_engine.py` 已内建 -> `generate(control_video=.., fc_strength=..)` 或 config `engine.comfyui_mmH3.fun_control`(enable/control_net/control_kind/fit_mode/strength/end_percent/video); 引擎自动插节点 41/42/43(避让 ref_images 20~28/post 30~32/BlockCache 40/二采 50~57), guider 改接 Apply 输出。真机引擎路径 net_shift +223.7px(右移)✓。
+  - **全链路接入(agent.py + blocking.py)**: config `blender.use_as_fun_control: true` → `render_assets` 每镜产 **fcvideos**(走位 depth 序列→fc.mp4) → `generate_one_scene` 自动作 control_video 喂引擎。走位来源: `blender.fun_control_walk`(默认 `-1,0:1,0`, 归一化 ±1=画面左右) + 分镜文本识别(左→右/走近/来回/绕圈, `parse_spec`)。`_FC_TAIL` 模板按镜头距离自动换算世界坐标+留边距→不出画; 控制序列分辨率/帧数严格对齐出片(fit_mode=exact, 帧数吸附 17n+5)。需 Blender+BlenderMCP(9876) 运行。
+  - 坑: FunControl int8 2.3GB+H3 累积易 OOM 使 ComfyUI 崩(连续 A/B 两版后崩); 重启 `python launch_comfy.py --sage-attention`; 脚本须用 /prompt 返回的 prompt_id 轮询(非本地 uuid)。
+- 评估须量化: arcface 身份 + 人脸检出率 + 走位方向(frame-diff 前景质心 net_shift / optical flow trend)，不凭肉眼。
 
-## 后期：英文配音+双语字幕（离线）
-- `make_narration.py --film <in> --out <out> --fit-film --fps 24 [--series-script outputs/series_script.json --ep N] [--shots N] [--orig-vol 0.18]`。voice=en-US-AndrewMultilingualNeural；中文 zh-CN-XiaoxiaoNeural。`--orig-vol 0`=去原音。
-- `--fit-film`(隐含 --auto-dur)按「N_SHOTS 镜 / n 段，通常2镜1段」做镜头块对齐，起点按 slot 整数倍排布，消除累积漂移。台词优先级：series_script > lines-json > storyboard > 内置。
-- **mp4 必加 faststart**：`ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4`（否则浏览器能取封面但不能播）。`outputs/_serve.py`(:8777) 本地 Range 预览。
+## 无真人脸 / 动漫化 (用户硬性要求)
+- 成片不得出现真人脸，且反对全片模糊。画风由参考图定，文本说了不算 (写实锚定→真人)。
+- 现用路线: H3 原片 → `anime_redraw.py` 逐帧动漫重绘 (Counterfeit-V3.0, denoise 0.70, steps 20, 0% 检出, 最稳) 或 `anime_stable.py --mode keyframe` → `make_narration` 加旁白 → faststart。
+- 弃用: 像素化 (用户否"脸部打码")、prop 模式 (花屏发散)、ControlNet-Canny (锁真人脸→检出飙68%)、3D 画风 (70% 检出)。
+- 连贯性: 全片固定同一种子 (逐帧变种子→抖动8x)。单 GPU 不能同时跑多个 anime_redraw。
+- 验收: `diag_face_rate.py` (insightface buffalo_l) 量化，目标 0%。
 
-## 无真人脸 / 动漫化（2026-09-10 用户硬性要求，核心）
-- 要求：成片**不得出现真人脸**（《看见未来之前》系列）；并**明确反对全片模糊**（要保清晰）。
-- 画风由参考图决定，文本说了不算：写实锚定图必出真人，即使 prompt 写 anime。→ 改动漫风须先换动漫资产（`outputs/anchor/mira_*.png`、`scene_*.png` 皆写实）。
-- H3 无法靠文本出真 2D 动漫：人脸特写弱/强 anime 提示仍 98%/100% 检出；H3 **不支持负向提示词**。
-- 真 2D 动漫尝试（下 `Counterfeit-V3.0` 2GB 到 E:/ComfyUI_models/checkpoints，重启 ComfyUI 才识别）：用 SD 生成动漫 Mira 三视图(`gen_anime_anchor.py`)+逐镜动漫关键帧(`--shots epN`)→**关键帧 PNG 自身 0 检出(纯动漫)**；但 H3 动画时把动漫首帧**漂回写实**→全片仍 **38%** 检出。H3 真人视频模型固有漂移，首帧方案无法稳定归零。
-- **后期局部处理（保清晰的关键）**：
-  - ❌ **平涂(kmeans)+模糊 反生效**：清晰写实大脸被平涂后肤色均匀→RetinaFace 更易检出(0.786→0.814)。`cartoonize.py` 旧 face_paint 此路不通。
-  - ✅ **像素化(马赛克)人脸区域**：`pixelate(roi, bs=18)` 缩小再最近邻放大→彻底破坏五官→**检出 0.0**，背景锐利。`cartoonize.py` 默认 `--mode pixelate`（此方案现已弃用，见下）。
-  - ❌ **像素化被用户否决（2026-09-11，「脸部不要打码」）**：马赛克观感差，弃用。改为 **逐帧动漫重绘**（`anime_redraw.py`：ComfyUI + Counterfeit-V3.0 动漫 checkpoint 对每帧做 img2img）→ 脸变成**画出来的 2D 动漫角色**，且非打码。代价：每帧~2s（每集约25–90min）、逐帧独立可能轻微闪烁、脸变通用动漫角色(无 Mira LoRA 不保身份)。⚠️ ComfyUI 单 GPU，**不能同时跑多个 anime_redraw**（input 目录 `redraw_XXXXX.png` 文件名冲突），须逐集串行。
-  - **画面连贯性（2026-09-11 关键）**：用户看片判"画面混乱"。根因=旧版 `seed=基准+帧号`（**逐帧变种子**）→帧间抖动 44（源片~5，约 8 倍）。**修复=全片固定同一种子**（默认已改），抖动降到 ~15（3× 改善）且保持 0% 检出；`--vary-seed` 退回旧行为。
-  - ⚠️ **ControlNet-Canny 在此项目不可用**：其 Canny 边缘会锁死真人脸眼/鼻/嘴轮廓→动漫模型画出贴近真人脸结构的脸→RetinaFace 检出率从 0% 飙到 68%。`anime_redraw.py` 默认 `--controlnet ""`（禁用）。
-  - **denoise 定档 0.70（2026-09-11 实测）**：ep2 全片 0.6→**10%**检出、ep1 旧版0.55→**32%**；难帧样本 0.70→**0%**、0.75→2%（更高无益）。故统一 `--denoise 0.70 --steps 20`。`run_anime_series.py` 调 `REDRAW_DENOISE`（默认0.70）强制重绘 ep(2,1,3)。
-  - **⚠️ 花屏根因（2026-09-12 定案）**：`anime_stable.py` 的 **prop 模式（逐帧传播+轻刷新）会发散**——
-    每帧闭环「光流 warp → VAE编码 → 低 denoise 重刷 → VAE解码」累积 VAE 损失+光流误差，约 10~14 帧后成**彩色噪点(花屏)**。
-    逐帧相关性扫描(各输出第 i 帧 vs 源第 690+i 帧)：朴素逐帧 0.60(零坏帧) / keyframe 0.57(2坏帧) / **prop 0.14(第14帧起全坏)**。
-    → **弃用 prop**（默认已改 keyframe，prop 加警告）。`--mode keyframe --key 1` 等价朴素逐帧重绘。
-  - keyframe 模式（每 K 帧重绘关键帧+中间帧光流搬运）不花屏且抖动更低（实测 5.18 vs 逐帧 12.35），可作较快的选项；
-    ⚠️ `cv2.remap` 的 map 必须=恒等网格+位移（绝对坐标）。参数 `--key 8 --blend 0.85 --flow-scale 0.5`。
-  - ⚠️ 3D 画风(`--style3d`)：不花屏但**真人脸检出 70%**（皮克斯风让脸更写实）→ 与"无真人脸"冲突。
-  - 现用流程：H3 原片 → `anime_redraw.py`（朴素逐帧，0% 检出，最稳）或 `anime_stable.py --mode keyframe` → `make_narration` 加旁白 → faststart。检出率目标 0%。
-- **验收工具**：`python diag_face_rate.py <视频...>` 输出真实人脸检出率与平均置信（insightface buffalo_l，真实照片训练）。`PERFRAME=1`+传两视频逐帧对比。判断是否"有真人脸"**一律量化，不凭肉眼**。
-- ⚠️ 教训：①本会话模型**读不了图片**，绝不能凭想象描述画面，须用可量化指标并声明"请你目视确认"。②局部平涂会帮倒忙，像素化才是杀检测且保锐利的正确局部手段。
-- **交付物（现用逐帧动漫重绘路线）**：`outputs/epN_anime_mmh3.mp4`（无旁白，2D 动漫整片，0% 检出）、旁白版 `outputs/epN_vo_anime_mmh3.mp4`。工具 `gen_anime_anchor.py`/`anime_redraw.py`/`make_narration.py`/`diag_face_rate.py`。`cartoonize.py` 的像素化模式已弃用（用户否）。ep1 原像素化版 `ep1_faceonly_mmh3.mp4` 已被动漫重绘路线取代。
+## 后期配音
+- `make_narration.py --film --out --fit-film --fps 24 [--series-script outputs/series_script.json --ep N] [--shots N] [--orig-vol 0.18]`。en-US-Andrew / zh-CN-Xiaoxiao。mp4 必加 faststart。
 
-## 其他（备查）
-- WebUI `python webui.py`(:8000)。A–H 老管线(SkyReels)仅采集+企划，G 断；出片走 LTX/H3+storyboard.json。
-- B站：`outputs/cookies.json`，走代理7897；删除接口失效候 `bilibili-api-python` Video.delete()，交接 BILIBILI_HANDOFF.md。
-- **⚠️ B站投稿 21150 绕过（2026-09-13 实测定案，重要）**：B站 2025-09-23 升级后，**动画分区 tid=174 的 `x/vu/web/add/v3` 被端点级拦截**（返回 `21150 投稿入口升级中`），biliup 全系(v0.2.4/v1.2.4/master)与 bilibili-api 9.1.0(其 submit 端点甚至还是旧 `add` 无 v3) 全部失效。但**其它分区(如 172 短片/17 单机游戏/21 日常…)的 add/v3 仍正常接受请求**（假文件名时返回 `21015 视频上传问题`，真文件即成功）。
-  - ✅ **解法=切换分区 id 到非 174**（用户原话"切换分区"思路成立）：AI 短片用 `tid=172`(短片) 直投成功。
-  - 脚本：`_bili_upload.py`（已落地，EP2→BV1y5YZ69EwS、EP3→BV1y5YZ69EwR）。关键：用 `outputs/cookies.json` **完整 cookie 头(含 sec_ck)** + `finger/spi` 补 `buvid3`，不能用 bilibili-api 9.1.0 的 `Credential`(只带 sessdata/bili_jct/buvid3 三字段→412 风控)；upos 分块上传复用 bilibili-api 9.1.0 video_uploader 逻辑。
-  - 验证：`view` 接口查 bvid，`state=0` 即正常发布；标题须含片名+集数(用户规则"标题要准确才发")。
-  - 注：动画分区(174)若用户坚持要，只能走真实 Web 投稿界面(browser-use，但本机未装 CLI)。
-- 三集连贯：时间线1进城→2觉醒→3对抗前主人；台词源 `outputs/series_script.json`、Mira 档案 `outputs/series_bible.json`。
-- AMD395(128GB)：NVFP4 不兼容，需 BF16(~44G)/FP8(~22G)；本机 ltx_engine/config/cli 可复用。
-- H3 优化备选（未装插件）：BlockCache 加速（tokendance-h3 的 YixuAnH3AccSwitch，运动小镜头显著加速）；PDD 8步；学习型 latent 放大；Prompt Relay。推荐装 Manager/KJNodes/RIFE(补帧48fps)。
+## 发布
+- B站 21150 绕过: 动画分区 tid=174 的 add/v3 被端点拦截；切 `tid=172`(短片) 直投成功。`_bili_upload.py` (用 cookies.json 完整 cookie + buvid3)。
+- 三集连贯: 1进城→2觉醒→3对抗前主人。台词 outputs/series_script.json。
+
+## 其他
+- WebUI `python webui.py`(:8000)。AMD395(128GB) 须 BF16/FP8 (NVFP4 不兼容)。

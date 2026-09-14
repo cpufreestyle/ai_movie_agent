@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -23,15 +24,34 @@ import bpy
 
 
 # ---------- 场景搭建 ----------
-def set_emission(obj, color):
-    """自发光纯色材质：白模不受光照影响，轮廓最清晰。"""
+def set_emission(obj, color, depth=False):
+    """自发光纯色材质：白模不受光照影响，轮廓最清晰。
+    depth=True 时改为「深度材质」：用相机视距经 MapRange 映射为近白远黑灰度，
+    渲染出的 RGB 直接是 depth 控制图（供 H3 Fun Control control_kind=depth）。"""
     mat = bpy.data.materials.new("M_" + obj.name)
     mat.use_nodes = True
     nt = mat.node_tree
     for n in list(nt.nodes):
         nt.nodes.remove(n)
-    em = nt.nodes.new("ShaderNodeEmission")
-    em.inputs[0].default_value = (*color, 1.0)
+    if depth:
+        # 视图坐标(Camera)的长度 = 到相机的欧氏距离 -> MapRange 近白远黑
+        tc = nt.nodes.new("ShaderNodeTexCoord")
+        vm = nt.nodes.new("ShaderNodeVectorMath")
+        vm.operation = "LENGTH"
+        nt.links.new(tc.outputs["Camera"], vm.inputs[0])
+        mr = nt.nodes.new("ShaderNodeMapRange")
+        mr.clamp = True
+        mr.inputs[1].default_value = 1.0    # from_min（近）
+        mr.inputs[2].default_value = 45.0   # from_max（远）
+        mr.inputs[3].default_value = 1.0    # to_min（近 -> 白）
+        mr.inputs[4].default_value = 0.0    # to_max（远 -> 黑）
+        nt.links.new(vm.outputs[0], mr.inputs[0])  # LENGTH 标量
+        em = nt.nodes.new("ShaderNodeEmission")
+        em.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)
+        nt.links.new(mr.outputs[0], em.inputs[0])  # 标量广播成灰度
+    else:
+        em = nt.nodes.new("ShaderNodeEmission")
+        em.inputs[0].default_value = (*color, 1.0)
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     nt.links.new(em.outputs[0], out.inputs[0])
     if obj.data.materials:
@@ -40,7 +60,7 @@ def set_emission(obj, color):
         obj.data.materials.append(mat)
 
 
-def add_actor(name, height=1.75, radius=0.28, color=(0.95, 0.95, 0.95)):
+def add_actor(name, height=1.75, radius=0.28, color=(0.95, 0.95, 0.95), depth=False):
     """简化人形代理：圆柱身体 + 球头（只表达位置/高度/体积）。"""
     bpy.ops.mesh.primitive_cylinder_add(radius=radius, depth=height * 0.78,
                                         location=(0, 0, height * 0.39))
@@ -52,25 +72,28 @@ def add_actor(name, height=1.75, radius=0.28, color=(0.95, 0.95, 0.95)):
     head.name = name + "_head"
     head.parent = body
     head.matrix_parent_inverse = body.matrix_world.inverted()
-    set_emission(body, color)
-    set_emission(head, color)
+    set_emission(body, color, depth=depth)
+    set_emission(head, color, depth=depth)
     return body
 
 
-def add_ground(size=80, color=(0.16, 0.17, 0.20)):
+def add_ground(size=80, color=(0.16, 0.17, 0.20), depth=False):
     bpy.ops.mesh.primitive_plane_add(size=size)
     g = bpy.context.active_object
     g.name = "ground"
-    set_emission(g, color)
+    if depth:
+        set_emission(g, (0.0, 0.0, 0.0), depth=False)  # 深度模式：黑地，仅角色显形
+    else:
+        set_emission(g, color, depth=False)
     return g
 
 
-def setup_world(scene, color=(0.04, 0.045, 0.06)):
+def setup_world(scene, color=(0.04, 0.045, 0.06), depth=False):
     world = bpy.data.worlds.new("W")
     world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
     if bg:
-        bg.inputs[0].default_value = (*color, 1.0)
+        bg.inputs[0].default_value = ((0.0, 0.0, 0.0, 1.0) if depth else (*color, 1.0))
     scene.world = world
 
 
@@ -86,15 +109,29 @@ def parse_pt(s):
 
 
 def apply_walk(actor, spec, frames, z=0.0):
-    """走位：'x1,y1:x2,y2' —— 起点 -> 终点（均匀位移）。"""
+    """走位：'x1,y1[:x2,y2:...]' —— 单点=定住；两点=直线；多点=折线路径。
+    多点时按**累计弧长**均匀分配时长（每段速度一致，匀速走位）。"""
     if not spec:
         key_loc(actor, 1, (0.0, 0.0, z))
         return
-    a, b = spec.split(":")
-    x1, y1 = parse_pt(a)
-    x2, y2 = parse_pt(b)
-    key_loc(actor, 1, (x1, y1, z))
-    key_loc(actor, frames, (x2, y2, z))
+    pts = [parse_pt(p) for p in spec.split(":")]
+    if len(pts) == 1:
+        key_loc(actor, 1, (pts[0][0], pts[0][1], z))
+        return
+    seg = [math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+           for i in range(len(pts) - 1)]
+    total = sum(seg) or 1.0
+    cum = 0.0
+    for i, (px, py) in enumerate(pts):
+        if i == 0:
+            f = 1
+        elif i == len(pts) - 1:
+            f = frames
+        else:
+            f = 1 + round((frames - 1) * cum / total)
+        key_loc(actor, f, (px, py, z))
+        if i < len(seg):
+            cum += seg[i]
     # bpy 5.0 起 Action 改为分层结构，action.fcurves 可能不存在；取不到就用默认插值
     try:
         for fc in actor.animation_data.action.fcurves:
@@ -167,27 +204,35 @@ def main():
     ap.add_argument("--res", default="1024x576")
     ap.add_argument("--cam", default="push_in",
                     choices=["push_in", "pull_out", "lateral", "orbit", "static"])
-    ap.add_argument("--walk", default="", help="主角走位 'x1,y1:x2,y2'（起点->终点）")
+    ap.add_argument("--walk", default="",
+                    help="主角走位：'x1,y1' 定住 / 'x1,y1:x2,y2' 直线 / "
+                         "多点折线 'x1,y1:x2,y2:x3,y3:...'（按累计弧长匀速）")
     ap.add_argument("--second", default="", help="第二个角色位置 'x,y'（如老板）")
     ap.add_argument("--no-track", action="store_true",
                     help="相机不跟拍（固定朝向），用于让横向走位在画面里体现出来")
     ap.add_argument("--keep-png", action="store_true", help="保留 PNG 序列（调试用）")
+    ap.add_argument("--depth", action="store_true",
+                    help="渲染 depth 控制序列（Mist 反相，近白远黑），供 H3 Fun Control(control_kind=depth) 作逐帧条件")
+    ap.add_argument("--previs-out", default="",
+                    help="另存一张代表帧为 PNG（白模构图帧，可作 H3 的 I2V 首帧，锁站位/机位/走位起点）")
+    ap.add_argument("--previs-frame", type=int, default=1,
+                    help="--previs-out 取第几帧（默认 1 = 走位起点构图；走位镜头用较大值取中段）")
     a = ap.parse_args()
 
     w, h = (int(x) for x in a.res.lower().split("x"))
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
-    setup_world(scene)
-    add_ground()
+    setup_world(scene, depth=a.depth)
+    add_ground(depth=a.depth)
 
-    mira = add_actor("mira")
+    mira = add_actor("mira", depth=a.depth)
     apply_walk(mira, a.walk, a.frames)
 
     second = None
     if a.second:
         x, y = parse_pt(a.second)
-        second = add_actor("boss", color=(0.55, 0.6, 0.7))
+        second = add_actor("boss", color=(0.55, 0.6, 0.7), depth=a.depth)
         key_loc(second, 1, (x, y, 0.0))
 
     add_camera(scene, a.cam, a.frames, mira, track=not a.no_track)
@@ -203,6 +248,18 @@ def main():
     print(f"[blocking] 渲染白模 {w}x{h} {a.frames}帧@{a.fps}fps  cam={a.cam} "
           f"walk={a.walk or '-'}", flush=True)
     render_pngs(scene, tmp, w, h, a.frames, a.fps)
+
+    # 白模构图帧（I2V 首帧）：取代表帧导成 PNG，供 H3 锁站位/机位/走位起点
+    if a.previs_out:
+        a.previs_out = os.path.abspath(a.previs_out)
+        pf = max(1, min(int(a.previs_frame), a.frames))
+        src = os.path.join(tmp, "f%04d.png" % pf)
+        if os.path.exists(src):
+            os.makedirs(os.path.dirname(a.previs_out) or ".", exist_ok=True)
+            shutil.copy(src, a.previs_out)
+            print(f"[OK] 白模构图帧 -> {a.previs_out}（第 {pf}/{a.frames} 帧）", flush=True)
+        else:
+            print(f"[warn] 未找到构图帧 {src}，跳过 --previs-out", flush=True)
 
     # PNG 序列 -> mp4（参考视频只需运动信息，用低码率 h264 即可）
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

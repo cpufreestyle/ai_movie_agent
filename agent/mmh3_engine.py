@@ -98,6 +98,21 @@ class MMH3Engine:
         self.tp_coarse = int(tp.get("coarse_steps", 4))
         self.tp_refine = int(tp.get("refine_steps", 4))
 
+        # Fun Control（控制走位）：白模 depth/pose 序列作逐帧稠密条件注入 DiT，
+        # 依赖 H3 内置节点 MiniMaxH3FunControl*T8Advanced + 控制权重（放 ComfyUI
+        # models/model_patches 或 controlnet）。默认关闭；generate(control_video=...)
+        # 亦可逐镜覆盖。实测 strength≈0.8~1.2（≥1.5 画面崩坏）。
+        fcfg = h3.get("fun_control") or {}
+        self.fun_control_enable = bool(fcfg.get("enable", False))
+        self.fc_control_net = str(
+            fcfg.get("control_net")
+            or "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors")
+        self.fc_control_kind = str(fcfg.get("control_kind", "depth"))
+        self.fc_fit_mode = str(fcfg.get("fit_mode", "exact"))
+        self.fc_strength = float(fcfg.get("strength", 0.8))
+        self.fc_end_percent = float(fcfg.get("end_percent", 0.85))
+        self.fc_video = str(fcfg.get("video") or "")
+
         self._num_frames = self.snap_length(int(h3.get("num_frames", 56)))
         self._resolution = self.snap_resolution(h3.get("resolution", "768x448"))
 
@@ -157,7 +172,9 @@ class MMH3Engine:
                  seed: int | None = None, image: str | None = None,
                  two_pass: bool | None = None,
                  ref_video: str | None = None,
-                 ref_images: list | None = None) -> str:
+                 ref_images: list | None = None,
+                 control_video: str | None = None,
+                 fc_strength: float | None = None) -> str:
         """生成一段视频。
 
         ref_video: 参考视频（白模走位等），经 VHS_LoadVideoPath 加载成 IMAGE 帧批次后
@@ -166,13 +183,18 @@ class MMH3Engine:
         ref_images: 额外参考图（最多 9 张），接 ref_images.ref_image_i。
             Hybrid 下只靠 1 张 first_frame 锁形象时，身份信号会被参考视频的运动
             信号压过导致人物形态崩坏；补多张同角色参考图可显著增强身份一致性。
+        control_video: 白模逐帧控制视频（depth/pose 等），经 Fun Control 注入 DiT
+            锁定走位/构图（与 ref_video 不同：ref_video 已证传不动运动，Fun Control 可以）。
+            帧数须 ≥ num_frames 且落 17n+5 网格；geometry 须与出片一致（fit_mode=exact）。
+        fc_strength: Fun Control 强度覆盖（默认取 config，实测 0.8~1.2，≥1.5 崩坏）。
         """
         if not self.client.is_ready():
             raise RuntimeError(
                 "ComfyUI 未就绪：请启动 ComfyUI（8188）并安装 comfyui-minimax-h3-audio-T8 "
                 "与 ComfyUI-VideoHelperSuite 节点。"
             )
-        wf = self._build_workflow(prompt, seed, image, ref_video, ref_images)
+        wf = self._build_workflow(prompt, seed, image, ref_video, ref_images,
+                                  control_video=control_video, fc_strength=fc_strength)
         dest = os.path.dirname(os.path.abspath(out_path)) or "."
         os.makedirs(dest, exist_ok=True)
         w, h = (int(x) for x in self.resolution.split("x"))
@@ -226,7 +248,9 @@ class MMH3Engine:
     def _build_workflow(self, prompt: str, seed: int | None,
                         image: str | None,
                         ref_video: str | None = None,
-                        ref_images: list | None = None) -> dict:
+                        ref_images: list | None = None,
+                        control_video: str | None = None,
+                        fc_strength: float | None = None) -> dict:
         """直接拼 API Format 工作流（不依赖外部 json，避免节点 ID 漂移）。"""
         seed = seed if seed is not None else self.seed
         w, h = (int(x) for x in self.resolution.split("x"))
@@ -349,6 +373,38 @@ class MMH3Engine:
         guider_model = (["7", 0] if (self.turbo or self.two_pass_latent)
                         else model_src)
 
+        # ---------- Fun Control：把「走位/构图」真正交给白模 ----------
+        # 逐帧 depth/pose 控制视频经 FunControlApply 注入 DiT(第0/10/20/30/40层)；
+        # 节点 ID 用 41/42/43，避开 1~14 / 20~28(ref_images) / 30~32(post) / 40(BlockCache) / 50~57(二采)。
+        # 实测：能把走位方向从 H3 默认「左移」纠正为「跟随白模」；strength 0.8~1.2，≥1.5 崩坏。
+        cond_src = ["6", 0]
+        fc_video = control_video or self.fc_video
+        if ((self.fun_control_enable or control_video)
+                and fc_video and os.path.exists(fc_video)):
+            fc_str = self.fc_strength if fc_strength is None else float(fc_strength)
+            nodes["41"] = {"class_type": "MiniMaxH3FunControlLoaderT8Advanced",
+                           "inputs": {"control_net_name": self.fc_control_net}}
+            nodes["42"] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+                "video": os.path.abspath(fc_video),
+                "force_rate": float(self.fps),
+                "custom_width": w, "custom_height": h,
+                "frame_load_cap": self.num_frames, "skip_first_frames": 0,
+                "select_every_nth": 1}}
+            nodes["43"] = {"class_type": "MiniMaxH3FunControlApplyT8Advanced",
+                           "inputs": {"model": guider_model, "positive": ["6", 0],
+                                      "control_net": ["41", 0], "vae": ["4", 0],
+                                      "control_video": ["42", 0],
+                                      "width": w, "height": h, "length": self.num_frames,
+                                      "control_kind": self.fc_control_kind,
+                                      "fit_mode": self.fc_fit_mode,
+                                      "strength": fc_str,
+                                      "start_percent": 0.0,
+                                      "end_percent": self.fc_end_percent}}
+            guider_model = ["43", 0]
+            cond_src = ["43", 1]
+            log(f"  [mmh3] Fun Control 注入：{os.path.basename(fc_video)} "
+                f"({self.fc_control_kind}, strength={fc_str}, end={self.fc_end_percent})")
+
         # ---------- 后处理（质量增强，由 config.engine.comfyui_mmH3.post 控制）----------
         # decode(11) 输出 [IMAGE 帧批次, AUDIO]；音频不动，只增强图像分辨率/锐度。
         # 帧插值(RIFE)故意不接此处：会改变帧率导致音画不同步，作为离线增强单独提供。
@@ -365,7 +421,7 @@ class MMH3Engine:
 
         nodes.update({
             "8": {"class_type": "BasicGuider",
-                  "inputs": {"model": guider_model, "conditioning": ["6", 0]}},
+                  "inputs": {"model": guider_model, "conditioning": cond_src}},
             "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
             "10": {"class_type": "SamplerCustomAdvanced", "inputs": {
                 "noise": ["9", 0], "guider": ["8", 0], "sampler": ["7", 1],

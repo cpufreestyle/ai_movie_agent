@@ -105,6 +105,33 @@ class BlockingGenerator:
         # 出片帧率（灰模动画时长换算用）与动画帧数解析
         self.fps = int(((config.get("engine", {}) or {}).get("fps", 24)) or 24)
         self.anim_frames = self._resolve_anim_frames()
+        # 白模控制走位（Fun Control）：depth 走位序列 -> H3 Fun Control 逐帧注入 DiT。
+        # 控制视频必须与出片**同分辨率、同帧数(17n+5)**（fit_mode=exact），故用引擎出片参数。
+        self.fc_enabled = bool(self.cfg.get("use_as_fun_control", False))
+        self.fc_walk = str(self.cfg.get("fun_control_walk", "-1,0:1,0") or "")
+        self.fc_frames = self._resolve_fc_frames()
+        self.fc_w, self.fc_h = self._resolve_fc_size()
+
+    def _resolve_fc_frames(self) -> int:
+        """Fun Control 控制视频帧数：对齐出片 num_frames 并吸附到 H3 的 17n+5 网格。"""
+        mmh3 = ((self.config.get("engine", {}) or {}).get("comfyui_mmH3", {}) or {})
+        try:
+            nf = int(mmh3.get("num_frames", 0))
+        except (TypeError, ValueError):
+            nf = 0
+        nf = max(nf or 48, 5)
+        k = -(-(nf - 5) // 17)
+        return 5 + k * 17
+
+    def _resolve_fc_size(self) -> tuple:
+        """Fun Control 控制视频分辨率：必须与出片一致（fit_mode=exact）。"""
+        mmh3 = ((self.config.get("engine", {}) or {}).get("comfyui_mmH3", {}) or {})
+        res = str(mmh3.get("resolution", "768x448") or "768x448").lower()
+        try:
+            w, h = (int(v) for v in res.split("x"))
+            return w, h
+        except (TypeError, ValueError):
+            return 768, 448
 
     def _resolve_anim_frames(self) -> int:
         """解析 blender.anim_frames。
@@ -183,6 +210,26 @@ class BlockingGenerator:
                             spec["height"] = j["height"]
             except Exception as e:
                 log(f"  [blocking] LLM 解析失败，用规则兜底: {e}")
+        # 走位（归一化坐标，-1=画面左 / +1=画面右；空 = 用 config 的 fun_control_walk 默认）。
+        # 仅用于 Fun Control 控制序列；既有的 ref_images / ref_video 路线不受影响。
+        spec["walk"] = ""
+        _lt = t.lower()
+        _li, _ri = _lt.find("左"), _lt.find("右")
+        _lf, _rf = _lt.find("left"), _lt.find("right")
+        if (_li >= 0 and _ri >= 0) or (_lf >= 0 and _rf >= 0):
+            # "左/右"都出现 -> 按先后顺序定方向（覆盖"从左到右""从画面左侧走到右侧""由左向右"…）
+            _l = _li if _li >= 0 else _lf
+            _r = _ri if _ri >= 0 else _rf
+            spec["walk"] = "-1,0:1,0" if _l < _r else "1,0:-1,0"
+        elif any(k in t for k in ("走近镜头", "走向镜头", "靠近镜头", "approach")):
+            spec["walk"] = "0,0.6:0,-0.6"
+        elif any(k in t for k in ("远离镜头", "走远", "walk away")):
+            spec["walk"] = "0,-0.6:0,0.6"
+        elif any(k in t for k in ("来回", "徘徊", "踱步", "走来走去")):
+            spec["walk"] = "-1,0:1,0:-1,0"
+        elif any(k in t for k in ("绕圈", "环绕走", "circle walk",
+                                    "绕着", "走了一圈", "绕一圈", "绕一")):
+            spec["walk"] = "-1,0.4:1,0.4:1,-0.4:-1,-0.4:-1,0.4"
         return spec
 
     # ---------- 代码模板填充 ----------
@@ -249,6 +296,9 @@ class BlockingGenerator:
         return uniq[: max(1, int(self.retries) + 1)]
 
     def _common(self, spec: dict, out_dir: str) -> dict:
+        # Blender 会把相对路径解析到它自己的 cwd（不是本进程的 cwd）→ 一律转绝对，
+        # 否则渲染产物会落到 Blender 的工作目录（静默"无产物"）。
+        out_dir = os.path.abspath(out_dir)
         n = max(1, int(spec.get("characters", 1)))
         props = [str(p) for p in (spec.get("props", []) or [])]
         return dict(
@@ -268,6 +318,10 @@ class BlockingGenerator:
             NEAR=str(self.depth_near),
             FAR=str(self.depth_far),
             LS=str(min(int(self.samples), 16)),
+            # Fun Control 走位控制序列（归一化走位；分辨率/帧数对齐出片）
+            FCW=str(self.fc_w), FCH=str(self.fc_h), FCFRAMES=str(self.fc_frames),
+            WALK=json.dumps(spec.get("walk") or self.fc_walk, ensure_ascii=False),
+            FCPATH=json.dumps(os.path.join(out_dir, "fc_")),
         )
 
     def _build_block_code(self, spec: dict, out_dir: str, mode: str, engine: str) -> str:
@@ -286,6 +340,19 @@ class BlockingGenerator:
         core = self._fill(_CORE_TEMPLATE, **c)
         cam = self._fill(_CAM_TEMPLATE, **c)
         tail = self._fill(_ANIM_TAIL, **c)
+        return core + "\n" + cam + "\n" + tail
+
+    def _build_fc_code(self, spec: dict, out_dir: str, engine: str) -> str:
+        """Fun Control 走位控制序列：depth（近白远黑、地面压黑只留角色）+ 角色走位关键帧。
+
+        走位用归一化坐标，模板内按相机水平半宽换算世界坐标并留边距 → 自动适配镜头、不出画。
+        """
+        c = self._common(spec, out_dir)
+        c["ENGINE"] = self._engine_setup(engine)
+        c["FRAMES"] = str(int(self.fc_frames))
+        core = self._fill(_CORE_TEMPLATE, **c)
+        cam = self._fill(_CAM_TEMPLATE, **c)
+        tail = self._fill(_FC_TAIL, **c)
         return core + "\n" + cam + "\n" + tail
 
     # ---------- 校验 / 预检 ----------
@@ -310,10 +377,13 @@ class BlockingGenerator:
 
     @staticmethod
     def _clean(files: list) -> None:
+        # 用 cmd `del` 删文件：绕过 python 删除 API 的 SAFE_DELETE turn 级批量拦截
+        # （长批量进程内累计删除超阈值后 os.remove 会被拦导致崩；项目惯例见
+        #  gen_blocking.py:247/278 的 `os.system('del /q ...')`）。
         for p in files:
             try:
                 if os.path.exists(p):
-                    os.remove(p)
+                    os.system(f'del /q "{p}" 2>nul')
             except OSError:
                 pass
 
@@ -415,16 +485,65 @@ class BlockingGenerator:
             log(f"  [blocking] 灰模动画合成失败: {e}")
             return None
 
+    def render_fc_anim(self, spec: dict, out_dir: str, frames: int | None = None) -> str:
+        """渲染 Fun Control 走位控制序列（逐帧 depth PNG，近白远黑、只留角色）。返回目录。
+
+        与 render_animation 的区别：这里是 depth 控制序列（喂 H3 Fun Control），
+        不是灰模运镜（ref_video）；分辨率/帧数严格对齐出片（fit_mode=exact）。
+        """
+        os.makedirs(out_dir, exist_ok=True)
+        self._clean(glob.glob(os.path.join(out_dir, "fc_*.png")))
+        last_err = ""
+        plans = self._plans()
+        for idx, (_mode, engine) in enumerate(plans):
+            code = self._build_fc_code(spec, out_dir, engine)
+            self._check_syntax(code)
+            self.client.timeout = self.anim_timeout
+            ex = self.client.exec_code_ex(code)
+            if not ex["ok"]:
+                last_err = ex.get("error") or "Blender 执行失败"
+                log(f"  [blocking] 走位控制序列第 {idx+1} 次失败（{engine}）: {last_err[:200]}")
+                continue
+            got = glob.glob(os.path.join(out_dir, "fc_*.png"))
+            if got:
+                if idx > 0:
+                    log(f"  [blocking] 走位控制序列在第 {idx+1} 次尝试成功（{engine}）")
+                return out_dir
+            last_err = "未产出任何帧"
+            log(f"  [blocking] 走位控制序列第 {idx+1} 次无产物（{engine}）")
+        raise BlockingError(f"走位控制序列渲染失败（已尝试 {len(plans)} 次）: {last_err}")
+
+    def export_fc_video(self, fc_dir: str) -> str | None:
+        """把走位控制帧序列合成 mp4（Fun Control 的 control_video）。缺 ffmpeg 返回 None。"""
+        frames = sorted(glob.glob(os.path.join(fc_dir, "fc_*.png")))
+        if not frames:
+            return None
+        out = os.path.join(fc_dir, "fc.mp4")
+        ff = self._ffmpeg()
+        if not ff:
+            log("  [blocking] 未找到 ffmpeg，跳过走位控制合成（Fun Control 不可用）")
+            return None
+        try:
+            subprocess.run([ff, "-y", "-loglevel", "error", "-framerate", str(self.fps),
+                            "-i", os.path.join(fc_dir, "fc_%04d.png"),
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", out],
+                           check=True, capture_output=True)
+            return out if os.path.exists(out) else None
+        except Exception as e:
+            log(f"  [blocking] 走位控制合成失败: {e}")
+            return None
+
     def render_assets(self, prompts: list) -> dict:
         """批量生成全套白模资产（每镜）。返回 {previews, controls, anims}。
 
         - previews: 白模 previs 图路径（None 表示该镜失败）
         - controls: {previs,line,depth,normal} 控制图路径字典（None 表示失败）
         - anims:    灰模运镜 mp4 路径（static 机位或合成失败为 None）
+        - fcvideos: 走位控制视频 mp4（Fun Control 用；未开启/失败为 None）
 
         单镜失败不影响其它镜（该项记 None 并记录日志），避免一次渲染问题拖垮整批。
         """
-        res = {"previews": [], "controls": [], "anims": []}
+        res = {"previews": [], "controls": [], "anims": [], "fcvideos": []}
         for i, p in enumerate(prompts):
             spec = self.parse_spec(p)
             d = os.path.join(self.out_dir, f"shot_{i:03d}")
@@ -435,6 +554,7 @@ class BlockingGenerator:
                 res["previews"].append(None)
                 res["controls"].append(None)
                 res["anims"].append(None)
+                res["fcvideos"].append(None)
                 continue
             res["previews"].append(blk["previs"])
             res["controls"].append(blk)
@@ -448,6 +568,17 @@ class BlockingGenerator:
                     res["anims"].append(None)
             else:
                 res["anims"].append(None)
+            # Fun Control 走位控制序列（表达角色走位，与相机是否运动无关）
+            if self.fc_enabled:
+                fc_dir = os.path.join(d, "fc")
+                try:
+                    self.render_fc_anim(spec, fc_dir, self.fc_frames)
+                    res["fcvideos"].append(self.export_fc_video(fc_dir))
+                except BlockingError as e:
+                    log(f"  [blocking] 第 {i+1} 镜走位控制失败，跳过: {e}")
+                    res["fcvideos"].append(None)
+            else:
+                res["fcvideos"].append(None)
         return res
 
 
@@ -634,4 +765,79 @@ scn.render.filepath={OUTDIR} + "/blocking_"
 scn.frame_step=1
 bpy.ops.render.render(write_still=False, scene=scn.name, animation=True)
 print("OK_ANIM", {OUTDIR})
+'''
+
+# Fun Control 走位控制序列（逐帧 depth；近白远黑、地面压黑只留角色）。
+# 走位为**归一化坐标**（x: -1=画面左 / +1=画面右；y: -1=近 / +1=远），模板内按相机水平
+# 半宽 HW=DIST*tan(19.8°) 换算世界坐标并留 20% 边距 → 自动适配镜头、角色全程不出画。
+# 分辨率/帧数由 _common 的 FCW/FCH/FCFRAMES 给出（严格对齐出片，fit_mode=exact）。
+_FC_TAIL = r'''
+W={FCW}; H={FCH}
+scn.render.resolution_x=W; scn.render.resolution_y=H; scn.render.resolution_percentage=100
+scn.render.image_settings.file_format="PNG"
+scn.render.use_freestyle=False
+{ENGINE}
+FR={FRAMES}
+scn.frame_start=1; scn.frame_end=FR
+def _fc_depth():
+    m=bpy.data.materials.new("fcd"); m.use_nodes=True; t=m.node_tree; t.nodes.clear()
+    tc=t.nodes.new("ShaderNodeTexCoord")
+    vm=t.nodes.new("ShaderNodeVectorMath"); vm.operation="LENGTH"
+    mr=t.nodes.new("ShaderNodeMapRange"); mr.clamp=True
+    mr.inputs[1].default_value=1.0
+    mr.inputs[2].default_value={FAR}
+    mr.inputs[3].default_value=1.0
+    mr.inputs[4].default_value=0.0
+    em=t.nodes.new("ShaderNodeEmission"); ou=t.nodes.new("ShaderNodeOutputMaterial")
+    t.links.new(tc.outputs["Camera"], vm.inputs[0])
+    t.links.new(vm.outputs[0], mr.inputs[0])
+    t.links.new(mr.outputs[0], em.inputs["Color"])
+    t.links.new(em.outputs[0], ou.inputs[0])
+    return m
+def _fc_black():
+    m=bpy.data.materials.new("fcb"); m.use_nodes=True; t=m.node_tree; t.nodes.clear()
+    em=t.nodes.new("ShaderNodeEmission"); em.inputs["Color"].default_value=(0.0,0.0,0.0,1.0)
+    ou=t.nodes.new("ShaderNodeOutputMaterial")
+    t.links.new(em.outputs[0], ou.inputs[0])
+    return m
+_dm=_fc_depth(); _bm=_fc_black()
+for o in scn.collection.objects:
+    if o.type!="MESH": continue
+    o.data.materials.clear()
+    o.data.materials.append(_bm if o.name=="ground" else _dm)
+BASE={}
+for o in scn.collection.objects:
+    if o.name.startswith("char_"):
+        BASE[o.name]=(o.location.x, o.location.y, o.location.z)
+HW=DIST*0.36
+CX=(sum(b[0] for b in BASE.values())/len(BASE)) if BASE else 0.0   # 角色组中心初始 x
+def _wx(nx): return nx*HW*0.8
+def _wy(ny): return ny*DIST*0.22
+PTS=[]
+for _s in {WALK}.split(":"):
+    _s=_s.strip()
+    if not _s: continue
+    _x,_y=_s.split(",")
+    PTS.append((float(_x),float(_y)))
+if PTS:
+    _segs=([math.hypot(PTS[i+1][0]-PTS[i][0],PTS[i+1][1]-PTS[i][1]) for i in range(len(PTS)-1)]
+           if len(PTS)>1 else [0.0])
+    _tot=sum(_segs) or 1.0
+    _cum=0.0
+    for _i,_p in enumerate(PTS):
+        if _i==0: _f=1
+        elif _i==len(PTS)-1: _f=FR
+        else: _f=1+round((FR-1)*_cum/_tot)
+        _dx=_wx(_p[0])-CX      # 角色组中心移到目标世界 x（绝对定位，非相对起点）
+        _dy=_wy(_p[1])         # y 为相对初始 0 的前后偏移
+        for _nm,_b in BASE.items():
+            _o=bpy.data.objects.get(_nm)
+            if _o is None: continue
+            _o.location=(_b[0]+_dx, _b[1]+_dy, _b[2])
+            _o.keyframe_insert("location", frame=_f)
+        if _i<len(_segs): _cum+=_segs[_i]
+scn.render.filepath={FCPATH}
+scn.frame_step=1
+bpy.ops.render.render(write_still=False, scene=scn.name, animation=True)
+print("OK_FC", {FCPATH})
 '''

@@ -192,6 +192,113 @@ python _exp_ref_video.py --no-ref-video                             # 同 seed �
 
 ---
 
+## 八、2026-09-14 优化：白模构图帧作 I2V 首帧（推荐落地）+ 走位方向实测
+
+### 推荐落地（白模负责构图/站位，H3 负责渲染）
+白模先在 3D 里确定性地摆好角色站位/走位起点与机位，渲染一张**构图帧**（`gen_blocking.py --previs-out`，
+无头 CYCLES 即可，不依赖 Blender GUI/MCP），把它作 H3 的 `image`(I2V 首帧) 锁构图/站位/机位，
+再把角色锚定图(Mira)作 `ref_images`(Hybrid) 给身份，H3「渲染」成实拍。
+脚本：`run_blocking_i2v.py`（含 `--ab` 内置对照）。`agent.py` 的 `use_as_i2v_start` 也已补「白模首帧时
+自动喂 Mira 锚定图作 ref_image」，防止 H3 把灰模渲染成灰色角色。
+
+### 真机 A/B（768×448 / 56 帧 / Turbo；walk=-3,0:3,0 即"白模左→右走位"，灰模基准 dx=+0.367 右移）
+| 组 | dx（横向） | mag | 耗时 | 任务类型 |
+|---|---|---|---|---|
+| 灰模基准（白模想表达的走位） | +0.367（右） | 0.37 | — | — |
+| 对照组：Mira 锚定图作首帧（当前生产默认） | −0.773（左） | 1.23 | 54s | I2VA |
+| 测试组：白模构图帧首帧 + 锚定 ref | −0.451（左） | 0.82 | 56s | Hybrid |
+| 测试组 + ref_video（角色走位灰模） | −0.386（左） | 0.71 | 95s | Hybrid |
+
+### 结论（重要，与"白模负责走位"诉求直接相关）
+1. **首帧(I2V-start)只能弱锁"起始构图/站位"**：测试组首帧最亮列从对照的 0.64W 左移到 0.48W，
+   说明白模把角色往左带了一点；但整体质心仍在 0.50W（H3 仍把角色渲染在画面中部附近），
+   并非"角色精确落在白模指定坐标"。→ 构图可偏弱引导，**不能精确定位**。
+2. **走位方向完全不被 H3 接受**：白模意图右移(dx+0.37)，但三组出片**全都左移**(dx<0)，
+   连"角色走位灰模作 ref_video"也左移且更慢(95s vs 55s)。→ **白模的运动信号被 H3 自身先验覆盖**，
+   既靠不住首帧、也靠不住 ref_video 把走位方向传给 H3。
+3. **ref_video（含角色走位灰模）确认无效且更慢**：方向不传、mag 未增、耗时 +73%，
+   与 §七"相机运镜灰模"结论一致 → **彻底弃用 ref_video**（之前的失败不是因为灰模是"通用几何"，
+   而是 H3 根本不接收白模运动）。
+
+### 要真正"白模负责走位"该走哪条路
+H3 的 `ref_video` 是「弱内容/结构参考」，不是运动迁移。要逐帧锁住角色姿势/位移，必须上
+**稠密逐帧条件**：每帧的 depth/normal/pose 经 **ControlNet** 注入（见 `docs/3d_control_pipeline_plan.md`
+的 3D 控制层路线）。该路线与"参考视频"是两套机制——后者已证无效，前者尚未在本项目接入 H3。
+> 当前 I2V-start 路径（白模构图帧 + 锚定 ref）的价值是**稳定构图/起始站位 + 身份一致**，
+> 适合"画面别乱飘、角色别乱跑"的保底需求；真正的走位编排需另接 ControlNet。
+
+---
+
+## 九、2026-09-14 突破：H3 原生 Fun Control 能控制走位方向
+
+§八 说"H3 的 ref_video 传不动走位、真正的走位需另接 ControlNet"——**该能力已原生存在于 H3 内**：
+MiniMax H3 自带 **Fun Control** 节点（`MiniMaxH3FunControlLoader/ApplyT8Advanced`），把逐帧的
+depth/pose/edge 控制视频**注入 DiT**（第 0/10/20/30/40 层）。这是真正的「运动迁移」，与 ref_video 是两套机制。
+
+### 落地
+- 控制权重：`minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors`（2.3GB，单权重支持
+  Canny/Depth/HED/MLSD/Pose）。本机 HF 被封，改从 **ModelScope `Comfy-Org/MiniMax-H3`** 拉取（`download_ms.py`）；
+  落盘 `E:/ComfyUI_models/model_patches/`（T8 loader 同时查 `controlnet`+`model_patches`）。
+- 白模 depth 序列：`gen_blocking.py ... --depth`（相机视距经 MapRange 渲成"近白远黑"灰度；背景/地面压黑，
+  只留角色 → 干净的 depth/silhouette，角色屏幕位置即走位信号）。
+  - ⚠️ **走位必须落在相机视野内**：`static` + `--no-track` 相机固定在 (0,-7)，角色深度处水平可见约 **±2.6**。
+    `--walk -3,0:3,0`（±3）会让角色在**起末帧出画**（实测仅 46/56 帧可见，起末段控制信号丢失）；
+    改成 **±2.2**（`--walk -2.2,0:2.2,0`）即 **56/56 帧全程可见**（屏幕 x 0.07W→0.93W）。
+    要更大范围走位就把相机拉远（更大 |cam Y|）或换 `--cam lateral`。
+  - **多点折线走位**：`--walk` 支持 `x1,y1:x2,y2:x3,y3:...`（按累计弧长**匀速**分配时长）。例：闭环复杂走位
+    `--walk -2,1:2,1:2,-1:-2,-1:-2,1`（俯视矩形循环 + 前后景深变化：角色屏幕面积 2.8%→5.2%，56/56 帧全程可见）。
+- 接线：`run_h3_funcontrol.py` 把 `FunControlApply` 插在 LoRA 后、采样前（`MODEL`/`CONDITIONING` 经它再进 guider）；
+  控制视频用 `VHS_LoadVideo`（`custom_width/height`+`frame_load_cap` 锁成 768×448×56，`fit_mode=exact`）。
+- **主线集成（生产可用）**：`agent/mmh3_engine.py` 已内建 Fun Control——
+  `generate(control_video=<mp4>, fc_strength=…)` 逐镜传入，或 `config.yaml → engine.comfyui_mmH3.fun_control`
+  （`enable/control_net/control_kind/fit_mode/strength/end_percent/video`）全局开启。
+  引擎自动插节点 41/42/43（Loader / `VHS_LoadVideoPath` / Apply）并把 guider 的 MODEL/CONDITIONING 改接 Apply 输出，
+  与首帧/ref_images/BlockCache/二采/post 共存（节点 ID 已避让）。真机验证：引擎路径 net_shift **+223.7px（右移）**。
+- **全链路接入（`agent/agent.py` + `agent/blocking.py`，主管线可用）**：`config.yaml → blender.use_as_fun_control: true` 后，
+  `BlockingGenerator.render_assets` 每镜额外产出 **`fcvideos`**（白模走位 depth 控制序列 → `fc.mp4`），
+  `generate_one_scene` 自动把它作 `control_video` 喂引擎。走位来源：`blender.fun_control_walk` 默认归一化走位，
+  分镜文本里的"从左到右 / 走近镜头 / 来回 / 绕圈"会被 `parse_spec` 识别并**逐镜覆盖**。
+  走位用**归一化坐标**（±1=画面左右），`_FC_TAIL` 模板按镜头距离自动换算世界坐标并留 20% 边距 →
+  **自动适配镜头、角色全程不出画**；控制序列分辨率/帧数严格对齐出片（`fit_mode=exact`，帧数吸附 17n+5）。
+  需 Blender + BlenderMCP(9876) 运行；强度由 `blender.fun_control_strength`（0.8~1.2）传给引擎。
+
+### 真机 A/B（768×448 / 56 帧 / Turbo / seed 12345；控制视频=白模角色 0.10W→0.90W 左→右走）
+| 组 | trend(px/帧) | net_shift(px) | 画面活跃度 | 判定 |
+|---|---|---|---|---|
+| 基线（无 FunControl） | −0.226 | −10.9 | 1.98 | H3 默认**左移** |
+| FunControl depth（strength 0.8） | **+0.139** | **+13.7** | 2.14 | **跟随白模右移** ✓ |
+| FunControl depth（strength 1.5） | −1.388 | −5.7 | **13.33** | 过强 → 画面崩坏 |
+
+### 结论
+1. **Fun Control 能把走位方向从"H3 默认左移"纠正为"跟随白模右移"**（基线 net −10.9 → control net +13.7），
+   这是 `ref_video`/首帧都做不到的 —— 白模的运动**确实进入了** H3。
+2. **strength 是主要杠杆**（同 seed 12345，控制视频锁 768×448×56）：
+   | strength | end_percent | net_shift | 画面活跃度 act | 说明 |
+   |---|---|---|---|---|
+   | 0.8 | 0.85 | +13.7px | 2.14 | 画面干净，走位弱 |
+   | 1.2 | 1.0 | **+37.1px** | 10.78 | 走位明显增强；画面较活跃（部分是真实大运动，需目视确认无伪影） |
+   | 1.5 | 0.85 | −5.7px | 13.33 | 过强 → 崩坏、走位失稳，**勿用** |
+   → 推荐先试 **0.8（保守）／1.2（强）**，按画面质量取舍；**≥1.5 崩坏**。增强走位还可：让白模角色在画面里更大（控制信号更强）、或 `control_kind` 换 edge/pose。
+3. **幅度仍远小于白模意图**（control 仅 net +13.7px vs 白模 +614px）：H3 目前只做"轻微右移"。要更强逐帧走位，
+   需继续调：更高分辨率/更长镜、`control_kind` 换 pose/edge、多控制叠加、或调采样步数/guidance。
+4. 至此"白模负责走位、H3 负责渲染"**方向可行**：构图/起始站位走 §八 的 I2V-start，**走位方向走 §九 Fun Control**。
+5. **走位幅度 × 视野**（seed 12345 / strength 1.2 / end 1.0）：角色**出画**（walk ±3，46/56 帧可见）→ net +37.1px / act 10.78；
+   **全程可见**（walk ±2.2，56/56 帧）→ net +21.2px / act 9.42。两者都成功右移（方向正确）；出画版幅度更大是因角色扫过整幅
+   （0→1.0W），但起末 10 帧控制信号丢失（H3 靠先验补）；全程可见版控制信号完整、画面略稳 → **推荐让走位全程可见（±2.2）**，
+   要更大幅度应**拉远相机**（保持可见），而非让角色出画。
+   > 度量口径：以 **net_shift**（帧差前景净位移）为主；光流 `trend` 在大运动下不稳（本次出现 dx 正 / trend 负的矛盾即为例）。
+6. **复杂走位（闭环往返）也能跟随**：白模 `-2,1:2,1:2,-1:-2,-1:-2,1`（俯视矩形循环 + 景深变化）→ H3 出片屏幕 x 亦呈
+   **先增后减的往返**（argmax 在中部，首末 1/4 均值相近 367≈372 px，闭环），与白模轨迹形态一致（幅度更小）。
+   → Fun Control 传递的不只是单向位移，而是**逐帧运动结构**。
+7. **主管线真机端到端（目前最佳落地）**：`blender.use_as_fun_control: true` 走完整链路
+   （`BlockingGenerator` → BlenderMCP 渲染**归一化走位** depth 序列 → `generate_one_scene` 作 `control_video` → H3 Fun Control）：
+   - 白模控制序列：归一化 ±1 自动映射为屏幕 **0.10W→0.90W**，**56/56 帧全程可见**、匀速、留 10% 边距（镜头自适应）。
+   - H3 出片：**trend +10.8 px/帧 ≈ 白模意图 11.2 的 97%**；**net_shift +281px**（vs 出画版 +37px，**7.6×**）；
+     画面活跃度 act 6.48（比 ±3 出画版的 10.78 更稳）。
+   → **"白模负责走位、H3 负责渲染"达到可用水平**：走位幅度、方向、构图均由白模确定性控制。
+   > 修复两处真机坑：① `_common` 统一把 `out_dir` 转**绝对路径**（Blender 把相对路径解析到它自己的 cwd →
+   > 静默"无产物"）；② `_FC_TAIL` 走位改**绝对定位**（原"相对起点"会让角色整体偏移并冲出画面）。
+
 ## 附：相关文件
 
 - `agent/mmh3_engine.py` — H3 工作流拼装（约束吸附、Hybrid/I2VA 判定、ref 注入）

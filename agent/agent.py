@@ -63,9 +63,11 @@ class MovieAgent:
         self.keyframe_gen = KeyframeGenerator(for_stage(config, "D"), workdir)
         # Blender 白模分镜（远程重构新增，未就绪自动跳过）
         self.blocking = BlockingGenerator(config, workdir)
-        # 白模资产缓存（出片时接入引擎：控制图 -> ref_images / 灰模动画 -> ref_video）
+        # 白模资产缓存（出片时接入引擎：控制图 -> ref_images / 灰模动画 -> ref_video /
+        # 走位 depth 序列 -> Fun Control 的 control_video）
         self.blocking_control: list = []
         self.blocking_anim: list = []
+        self.blocking_fc: list = []
         self.image_prompts: list[str] = []
         self.keyframe_images: list[str] = []
 
@@ -134,6 +136,16 @@ class MovieAgent:
             if isinstance(ctrl, dict):
                 cands = [ctrl.get(k) for k in ("depth", "normal", "line")]
                 ref_images = [p for p in cands if p and os.path.exists(p)] or None
+        # 白模首帧(I2V start)是灰模，必须配角色锚定图作 ref_image(Hybrid)，否则 H3 会
+        # 把灰模渲染成灰色角色。「use_as_i2v_start 开启」即表示本镜首帧已是白模 previs。
+        if bcfg.get("use_as_i2v_start"):
+            _anchor = ((self.config.get("series", {}) or {}).get("character_anchor")
+                       or "outputs/anchor/mira_anchor.png")
+            if not os.path.isabs(_anchor):
+                _anchor = os.path.join(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__))), _anchor)
+            if os.path.exists(_anchor) and _anchor not in (ref_images or []):
+                ref_images = (ref_images or []) + [_anchor]
         if bcfg.get("use_as_ref_video"):
             anim = self.blocking_anim[n] if n < len(self.blocking_anim) else None
             if anim and str(anim).lower().endswith(".mp4") and os.path.exists(anim):
@@ -147,6 +159,12 @@ class MovieAgent:
                         f"（把 blender.anim_frames 设为 auto 可修）")
                 else:
                     ref_video = anim
+        # Fun Control 走位控制视频（白模 depth 序列，来自 blocking.render_assets 的 fcvideos）
+        control_video = None
+        if bcfg.get("use_as_fun_control"):
+            fc = self.blocking_fc[n] if n < len(self.blocking_fc) else None
+            if fc and str(fc).lower().endswith(".mp4") and os.path.exists(fc):
+                control_video = fc
         extra = {}
         try:
             params = inspect.signature(self.engine.generate).parameters
@@ -154,6 +172,14 @@ class MovieAgent:
                 extra["ref_images"] = ref_images
             if ref_video and "ref_video" in params:
                 extra["ref_video"] = ref_video
+            # Fun Control 白模走位：depth 走位序列 -> H3 逐帧注入（真正能控走位；ref_video 已证无效）
+            if control_video and "control_video" in params:
+                extra["control_video"] = control_video
+                if "fc_strength" in params:
+                    try:
+                        extra["fc_strength"] = float(bcfg.get("fun_control_strength", 1.2))
+                    except (TypeError, ValueError):
+                        pass
         except (TypeError, ValueError):
             pass
         if extra:
@@ -212,12 +238,14 @@ class MovieAgent:
                     blk = self.blocking.render_assets(self.image_prompts)
                 except Exception as e:
                     log(f"[agent] 白模渲染异常，跳过（不影响出片）: {e}")
-                    blk = {"previews": [], "controls": [], "anims": []}
+                    blk = {"previews": [], "controls": [], "anims": [], "fcvideos": []}
                 self.state["blocking_previs"] = blk["previews"]
                 self.state["blocking_control"] = blk["controls"]
                 self.state["blocking_anim"] = blk["anims"]
+                self.state["blocking_fc"] = blk.get("fcvideos", [])
                 self.blocking_control = blk["controls"]
                 self.blocking_anim = blk["anims"]
+                self.blocking_fc = blk.get("fcvideos", [])
                 if self.config.get("blender", {}).get("use_as_i2v_start") and blk["previews"]:
                     merged = list(self.keyframe_images)
                     for i, p in enumerate(blk["previews"]):

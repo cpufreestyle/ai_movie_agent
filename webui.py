@@ -46,6 +46,12 @@ MEDIA = {
     "ep1_vo": os.path.join(WORKDIR, "ep1_vo.mp4"),
 }
 
+# 白模续集自包含播放页（EP4/EP5），由 _mk_player.py 生成；/white/<ep> 直接回传
+WHITE_PAGES = {
+    "ep4": os.path.join(WORKDIR, "ep4_white_model", "ep4_film.html"),
+    "ep5": os.path.join(WORKDIR, "ep5", "ep5_film.html"),
+}
+
 # WebUI 编辑分镜/解说后的保存位置；生成脚本检测到它就覆盖内置分镜
 STORYBOARD_PATH = os.path.join(WORKDIR, "storyboard.json")
 
@@ -707,6 +713,133 @@ def api_media():
     return send_file(path, mimetype="video/mp4" if path.endswith(".mp4") else "image/png")
 
 
+# ---------------- 白模续集（EP4/EP5 自包含播放页） ----------------
+@app.route("/white/<name>")
+def api_white(name):
+    path = WHITE_PAGES.get(name)
+    if not path or not os.path.isfile(path):
+        return json_resp({"error": f"无白模播放页: {name}"}, status=404)
+    return send_file(path, mimetype="text/html")
+
+
+# ---------------- 白模模块（Blender blocking → H3 Fun Control） ----------------
+_BLOCK_MEDIA = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".mp4": "video/mp4"}
+
+
+def _blocking_artifacts(limit: int = 80) -> list:
+    """outputs/blocking 下的白模产物（图/视频），按修改时间倒序。"""
+    base = os.path.join(WORKDIR, "blocking")
+    items = []
+    if os.path.isdir(base):
+        for path in glob.glob(os.path.join(base, "**", "*"), recursive=True):
+            if not os.path.isfile(path):
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in _BLOCK_MEDIA:
+                continue
+            items.append({
+                "name": os.path.relpath(path, base).replace("\\", "/"),
+                "kind": "video" if ext == ".mp4" else "image",
+                "size_kb": round(os.path.getsize(path) / 1024, 1),
+                "mtime": os.path.getmtime(path),
+            })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items[:limit]
+
+
+@app.route("/api/blocking")
+def api_blocking():
+    try:
+        agent = get_agent()
+    except RuntimeError as e:
+        return json_resp({"agent_error": str(e)}, status=200)
+    blk = agent.blocking
+    cfg = load_config().get("blender", {}) or {}
+    return json_resp({
+        "enabled": bool(blk.enabled),
+        "ready": bool(blk.is_ready()),
+        "host": blk.host,
+        "port": blk.port,
+        "out_dir": os.path.relpath(blk.out_dir, HERE).replace("\\", "/"),
+        "engine": blk.engine,
+        "samples": blk.samples,
+        "width": blk.width,
+        "height": blk.height,
+        "anim_frames": blk.anim_frames,
+        "fc_enabled": bool(blk.fc_enabled),
+        "fc_walk": blk.fc_walk,
+        "fc_frames": blk.fc_frames,
+        "fc_size": f"{blk.fc_w}×{blk.fc_h}",
+        "switches": {k: bool(cfg.get(k, False)) for k in (
+            "use_as_i2v_start", "use_as_ref_images", "use_as_ref_video", "use_as_fun_control")},
+        "artifacts": _blocking_artifacts(),
+    })
+
+
+@app.route("/api/blocking/parse", methods=["POST"])
+def api_blocking_parse():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        agent = get_agent()
+        return json_resp({"ok": True, "spec": agent.blocking.parse_spec(str(body.get("beat") or ""))})
+    except RuntimeError as e:
+        return json_resp({"ok": False, "error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        return json_resp({"ok": False, "error": str(e)}, status=500)
+
+
+@app.route("/api/blocking/run", methods=["POST"])
+def api_blocking_run():
+    if _state["running"]:
+        return json_resp({"ok": False, "error": "已有任务在运行"}, status=409)
+    body = request.get_json(force=True, silent=True) or {}
+    beat = str(body.get("beat") or "").strip()
+    mode = str(body.get("mode") or "block")
+    frames = body.get("frames")
+
+    def _job():
+        agent = get_agent()
+        blk = agent.blocking
+        if not blk.is_ready():
+            raise RuntimeError("Blender 未就绪：请安装 Blender + BlenderMCP 并启动 MCP Server(9876)")
+        spec = blk.parse_spec(beat)
+        print(f"[blocking] spec={spec}")
+        if mode == "anim":
+            d = os.path.join(blk.out_dir, "anim")
+            blk.render_animation(spec, d, int(frames) if frames else blk.anim_frames)
+            blk.export_anim_video(d)
+            return {"ok": True, "mode": mode, "out": os.path.relpath(d, HERE)}
+        if mode == "fc":
+            d = os.path.join(blk.out_dir, "fc")
+            blk.render_fc_anim(spec, d, int(frames) if frames else blk.fc_frames)
+            blk.export_fc_video(d)
+            return {"ok": True, "mode": mode, "out": os.path.relpath(d, HERE)}
+        if mode == "previs":
+            out = blk.render_previs(spec, os.path.join(blk.out_dir, "preview.png"))
+            return {"ok": True, "mode": mode, "out": os.path.relpath(out, HERE)}
+        res = blk.render_block(spec, blk.out_dir)
+        return {"ok": True, "mode": mode,
+                "out": {k: os.path.relpath(v, HERE) for k, v in res.items()}}
+
+    run_in_background(_job)
+    return json_resp({"ok": True, "msg": f"已启动白模渲染（{mode}），看下方日志"})
+
+
+@app.route("/api/blocking/file")
+def api_blocking_file():
+    name = request.args.get("name", "")
+    base = os.path.join(WORKDIR, "blocking")
+    path = os.path.normpath(os.path.join(base, name))
+    if path != base and not path.startswith(base + os.sep):
+        return json_resp({"error": "非法路径"}, status=400)
+    if not os.path.isfile(path):
+        return json_resp({"error": "文件不存在"}, status=404)
+    mime = _BLOCK_MEDIA.get(os.path.splitext(path)[1].lower())
+    if not mime:
+        return json_resp({"error": "不支持的媒体类型"}, status=400)
+    return send_file(path, mimetype=mime, conditional=True)
+
+
 # ---------------- 成片：列表 / 播放 / 分镜编辑 / 重新生成 ----------------
 def film_candidates() -> list[dict]:
     """outputs 下的成片 mp4，按修改时间倒序。"""
@@ -717,6 +850,15 @@ def film_candidates() -> list[dict]:
             "size_mb": round(os.path.getsize(path) / 2 ** 20, 2),
             "mtime": os.path.getmtime(path),
         })
+    # 白模续集（EP4/EP5）成片在子目录，单独纳入 picker（name 用相对路径）
+    for rel in ("ep5/ep5_film.mp4", "ep4_white_model/ep4_film.mp4"):
+        p = os.path.join(WORKDIR, rel)
+        if os.path.isfile(p):
+            items.append({
+                "name": rel,
+                "size_mb": round(os.path.getsize(p) / 2 ** 20, 2),
+                "mtime": os.path.getmtime(p),
+            })
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items
 
@@ -745,11 +887,14 @@ def api_films():
 
 @app.route("/api/film/play")
 def api_film_play():
-    """播放 outputs 下任意成片（只取文件名，防路径穿越）。conditional 支持拖动进度。"""
-    name = os.path.basename(request.args.get("name", ""))
+    """播放 outputs 下任意成片（支持子目录相对路径，带穿越防护）。conditional 支持拖动进度。"""
+    name = request.args.get("name", "")
     if not name.endswith(".mp4"):
         return json_resp({"error": "仅支持 mp4"}, status=400)
-    path = os.path.join(WORKDIR, name)
+    path = os.path.normpath(os.path.join(WORKDIR, name))
+    # 防路径穿越：必须落在 WORKDIR 内
+    if path != WORKDIR and not path.startswith(WORKDIR + os.sep):
+        return json_resp({"error": "非法路径"}, status=400)
     if not os.path.isfile(path):
         return json_resp({"error": f"影片不存在: {name}"}, status=404)
     return send_file(path, mimetype="video/mp4", conditional=True)
