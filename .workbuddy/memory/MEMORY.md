@@ -65,7 +65,9 @@
 - `agent/preflight.py` + `cli.py preflight` 投稿前静态体检；`cli.py publish` / WebUI 投稿。
 
 ## 九、WebUI 结构 / 外观 / tooltip
-- 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py`，现 39 条）。服务层：`services/{blocking,anchor,pipeline}.py`；视图层：`views/{core,run,pipeline,film,bili,media,blocking,anchor}.py`。
+- 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py`，现 41 条，新增即改 `EXPECTED`）。服务层：`services/{blocking,anchor,pipeline,series}.py`；视图层：`views/{core,run,pipeline,film,bili,media,blocking,anchor,series}.py`。
+- **成片页（分镜）**：`POST /api/storyboard` 会跑 `services/pipeline.validate_storyboard` —— 错误级（空镜/描述重复，忽略大小写与空白）400 拒；告警级（镜数≠18、解说多于镜头、描述含中文、单条解说>60 字）200 带 `warnings`。**「只重渲指定镜」= 逐镜 `run_ltx25_multishot.py --shot N --force` 再 `--concat`**；`--force` 必需，否则 `--shot N` 命中 `ltx25_manifest.json` 缓存直接跳过、根本不重出。镜号解析用 `pipeline.normalize_shot_indices()`（分隔符 `,，、;；\s`，丢 ≤0，排序去重）。
+- **系列连贯出片页签（尾帧续写）**：`services/series.py`（纯函数 `build_argv/validate`，**刻意不 import `run_series`**——它顶层 import 会建目录/探 ffmpeg）+ `views/series.py`（`GET /api/series` 选项与已有 `ep*_series_film.mp4`、`POST /api/series/run` 校验→忙锁 409→后台）。对应 `run_series.py` 的 `--i2v/--anchor-mode/--only/--force/--ep`；**默认不勾 `--i2v`**（首帧权重过高会让镜头收敛/无视提示词），默认 `anchor_mode=first`。
 - **锚定资产页签**（2026-09-15）：`services/anchor.py`（`SHOT_SPECS` 清单 + `default_names()`=三视图）+ `views/anchor.py`（`/api/anchor`、`/api/anchor/run` 名称白名单 + 忙锁、`/api/anchor/file`、`/api/anchor/index`）+ `gen_anchor_assets.py --force`。服务层**刻意不 import 生成脚本**（其顶层 `import run_series` 会建目录/探 ffmpeg），两份条目清单由 `tests/test_anchor_assets.py` 断言同名同序兜漂移。生成脚本产出的 `index.html` **必须经路由回传**，别在 HTML 里写 `/outputs/...`（无路由 → 404）。
 - **路径穿越防护统一用 `state.safe_under(base, name)`**：**先 `\`→`/` 归一化再 `normpath`**。反斜杠在 Windows 是分隔符、在 POSIX 只是普通文件名字符，不归一化会导致同一 guard 在 CI 放行、本机拒绝（`/api/anchor/file` 就这么红过一次）。`views/blocking.py` 与 `services/anchor.py` 共用它。
 - 外观：`webui/pipeline.html` 里有三块 `<style>`（基础 / `#ui-aesthetic` 打磨层 / `#ui-theming` 主题化）；主题/密度/强调色走 `html[data-theme|data-density|data-accent]` + `localStorage(ui-*)`，`<head>` 里有防 FOUC 的早期脚本。`/timeline` 只跟随不自带控件。
