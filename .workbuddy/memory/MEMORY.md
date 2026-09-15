@@ -67,7 +67,7 @@
 - `agent/preflight.py` + `cli.py preflight` 投稿前静态体检；`cli.py publish` / WebUI 投稿。
 
 ## 九、WebUI 结构 / 外观 / tooltip
-- 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py`，现 **42 条**，新增即改 `EXPECTED`）。服务层：`services/{blocking,anchor,pipeline,series,hw}.py`；视图层：`views/{core,run,pipeline,film,bili,media,blocking,anchor,series,hw}.py`。
+- 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py`，现 **46 条**，新增即改 `EXPECTED`）。服务层：`services/{blocking,anchor,pipeline,series,hw}.py`；视图层：`views/{core,run,pipeline,film,bili,media,blocking,anchor,series,hw}.py`。
 - **硬件档位选择已进设置页（2026-09-15）**：`services/hw.py`（`tier_options/profiles/current/detect/payload`）+ `views/hw.py`（`GET /api/hw`，**默认只读、仅 `?detect=1` 才探硬件**，避免开页面白卡 1~2s）；前端「部署 · 硬件档位」块 = `set-tier` 下拉 + `set-autohw` 复选 + `hw-preview` 只读覆盖预览，保存**复用既有 `POST /api/config`**（设/删 `hw_tier` 与 `auto_hardware`）。`current()` 用 `normalize_tier()` 归一别名，无法识别时返回 `unknown`+`raw` 由前端插一项提示。
 - **成片页（分镜）**：`POST /api/storyboard` 会跑 `services/pipeline.validate_storyboard` —— 错误级（空镜/描述重复，忽略大小写与空白）400 拒；告警级（镜数≠18、解说多于镜头、描述含中文、单条解说>60 字）200 带 `warnings`。**「只重渲指定镜」= 逐镜 `run_ltx25_multishot.py --shot N --force` 再 `--concat`**；`--force` 必需，否则 `--shot N` 命中 `ltx25_manifest.json` 缓存直接跳过、根本不重出。镜号解析用 `pipeline.normalize_shot_indices()`（分隔符 `,，、;；\s`，丢 ≤0，排序去重）。
 - **系列连贯出片页签（尾帧续写）**：`services/series.py`（纯函数 `build_argv/validate`，**刻意不 import `run_series`**——它顶层 import 会建目录/探 ffmpeg）+ `views/series.py`（`GET /api/series` 选项与已有 `ep*_series_film.mp4`、`POST /api/series/run` 校验→忙锁 409→后台）。对应 `run_series.py` 的 `--i2v/--anchor-mode/--only/--force/--ep`；**默认不勾 `--i2v`**（首帧权重过高会让镜头收敛/无视提示词），默认 `anchor_mode=first`。
@@ -120,7 +120,8 @@
 - **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 `5db6a82`（CI run #54 / `34980375326`）**。
 - **无 gh CLI 查 CI**：`GET /actions/runs?per_page=10`（按 sha 找 run，**sha 必须传完整 40 位**，传短 sha 会匹配不到、误判「还没有 run」）、`GET /actions/runs/<id>/jobs`（看**每个 step** 的 conclusion，比整体红绿有用得多）；日志 `/actions/jobs/<id>/logs` 会 302 到 Azure 签名 URL，**跳转时必须摘掉 Authorization** 否则 403，且单 job 返回纯文本、多 job 是 zip。**完整步骤见 skill `github-release-no-gh` 第 7 节**。
 - 坑：`git …push | tail` 会因 shim 缺 `tail` 报错并可能吞掉输出 → 一律重定向到文件再 Read。
-- **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest `v0.11.0`（2026-09-15）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用 `## 亮点` + `## 工程 / 质量`。**完整流程见 skill `github-release-no-gh`**。
+- **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest **`v0.12.0`**（2026-09-15，tag→`85bca4b`）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用「开头一句话统计 + `## 亮点` + `## 工程 / 质量` + `## 升级提示`」。**完整流程见 skill `github-release-no-gh`**。
+- ⚠️ **写 notes 前必须用 tag 区间取事实**：`git log <prev-tag>..HEAD` / `git diff --shortstat <prev-tag>..HEAD` / `--name-status`。**别拿工作区观感代替 tag 内容** —— 已踩过：v0.11.0 的 notes 把「复杂度治理 / config.yaml 出库 / 测试 128 例」都算进去了，但这些提交并不在 v0.11.0 的 tag（`32f1e8d`）里，实际落在 v0.12.0 区间（`merge-base --is-ancestor` 判定）。另 `--diff-filter=A` 会漏掉**重命名**的文件（`config.yaml`→`config.example.yaml` 记为 `R`），要按 tag 逐个 `git cat-file -e` 确认。
 
 ## 十三、已知隐患 / 待办
 - ~~记忆分叉~~ **已解决（2026-09-15）**：`.codebuddy/memory` 的 13 天历史已并入 `.workbuddy/memory`，重叠的 09-14/09-15 以「附」区保留，`.codebuddy/` 已停止跟踪（文件仍在磁盘）。**权威目录 = `.workbuddy/memory/`**。
