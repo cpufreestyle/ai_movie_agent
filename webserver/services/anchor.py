@@ -14,7 +14,7 @@ from __future__ import annotations
 import glob
 import os
 
-from ..state import WORKDIR, load_config
+from ..state import WORKDIR, load_config, safe_under
 
 #: ComfyUI 地址兜底（config.engine.comfyui_mmH3.api 未配时用）
 DEFAULT_API = "http://127.0.0.1:8188"
@@ -164,14 +164,10 @@ def has_index() -> bool:
 def safe_path(name: str) -> str:
     """把 WebUI 传来的相对文件名解析到 anchor 目录内；越界（如 ../）返回空串。
 
-    与 views/blocking.py 的 /api/blocking/file 同款防护：normalize 之后必须仍
-    落在 base 之内。调用方据此回 400。
+    复用 `state.safe_under`（已归一化反斜杠）—— 与 views/blocking.py 的
+    /api/blocking/file 同一套防护。调用方据此回 400。
     """
-    base = anchor_dir()
-    path = os.path.normpath(os.path.join(base, name or ""))
-    if path != base and not path.startswith(base + os.sep):
-        return ""
-    return path
+    return safe_under(anchor_dir(), name)
 
 
 __all__ = [

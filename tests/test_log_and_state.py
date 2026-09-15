@@ -197,3 +197,26 @@ def test_previs_merged_keyframes_are_persisted():
     merged[0] = "previs.png"
     m.keyframe_images = merged                      # 与 agent.py 里的写法一致
     assert m.state["keyframe_images"] == ["previs.png"]
+
+
+def test_safe_under_rejects_traversal_after_backslash_normalization():
+    """反斜杠必须先归一化：同一份代码在 Linux(CI) 与 Windows 上要得出同一结论。
+
+    不归一化时 `..\\config.yaml` 在 Windows 被 normpath 解成越界（拒绝），
+    在 POSIX 上只是个含反斜杠的普通文件名（放行）—— 这正是 CI 抓到的那条。
+    """
+    from webserver.state import safe_under
+
+    base = os.path.join(tempfile.gettempdir(), "anchor_demo")
+    for evil in ("../x", "..\\x", "sub/../../x", "/etc/passwd", "../", ""):
+        got = safe_under(base, evil)
+        if evil == "":
+            continue                    # 空串解析到 base 本身，由调用方的 isfile 兜住
+        assert got == "", f"{evil!r} 未被拦截：{got}"
+
+    ok = safe_under(base, "mira_front.png")
+    assert os.path.basename(ok) == "mira_front.png"
+    assert os.path.dirname(ok) == os.path.normpath(base)
+    assert safe_under(base, "sub/mira_front.png") == \
+        os.path.normpath(os.path.join(base, "sub", "mira_front.png"))
+

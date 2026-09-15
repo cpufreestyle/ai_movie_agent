@@ -64,6 +64,21 @@ TIMELINE_PATH = os.path.join(WORKDIR, "timeline.json")
 # 三集剧集标题（series_script.json 缺失时的兜底）
 EP_TITLES = {1: "进城", 2: "觉醒", 3: "对抗"}
 
+
+def safe_under(base: str, name: str) -> str:
+    """把客户端传来的相对文件名解析到 `base` 目录内；越界（`../`、绝对路径）返回空串。
+
+    **先归一化反斜杠再 normpath**：`\\` 在 Windows 上是路径分隔符、在 POSIX 上只是
+    普通文件名字符，不归一化的话同一条越界串在 Linux（CI）与 Windows（本机）上会得出
+    相反结论 —— 这正是 `/api/anchor/file` 被 CI 抓到的那个 bug。
+    调用方据此回 400。
+    """
+    rel = (name or "").replace("\\", "/")
+    path = os.path.normpath(os.path.join(base, rel))
+    if path != base and not path.startswith(base + os.sep):
+        return ""
+    return path
+
 _state = {
     "agent": None,
     "agent_error": None,

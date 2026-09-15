@@ -6,7 +6,8 @@ import os
 from flask import Blueprint, request, send_file
 
 from ..services.blocking import blocking_artifacts, media_mime
-from ..state import HERE, WORKDIR, _state, get_agent, json_resp, load_config, run_in_background
+from ..state import (HERE, WORKDIR, _state, get_agent, json_resp, load_config,
+                     run_in_background, safe_under)
 
 bp = Blueprint("blocking", __name__)
 
@@ -93,8 +94,8 @@ def api_blocking_run():
 def api_blocking_file():
     name = request.args.get("name", "")
     base = os.path.join(WORKDIR, "blocking")
-    path = os.path.normpath(os.path.join(base, name))
-    if path != base and not path.startswith(base + os.sep):
+    path = safe_under(base, name)
+    if not path:
         return json_resp({"error": "非法路径"}, status=400)
     if not os.path.isfile(path):
         return json_resp({"error": "文件不存在"}, status=404)
