@@ -11,29 +11,40 @@ This project has been installed for native Windows use. It does not require WSL.
 
 ## Ollama
 
-Ollama is configured at `http://127.0.0.1:11434/v1`, but is disabled because
-no model is installed. To enable local writing, run:
+The default LLM profile points at `http://127.0.0.1:11434/v1` with model
+`qwen2.5:3b` and `llm.disabled: false`. To use a larger local model, run:
 
 ```bat
 ollama pull qwen2.5:7b
 ```
 
-Then set `llm.disabled` to `false` in `config.yaml`. Do not run MinimaxH3 and
-an Ollama model at the same time on a 16GB GPU unless you have confirmed enough
-free VRAM.
+then set `llm.model` in `config.yaml` (or add a profile in the WebUI's
+「接口与模型设置」 tab). Do not run MiniMax H3 and an Ollama model at the same
+time on a 16GB GPU unless you have confirmed enough free VRAM.
 
-## MinimaxH3 integration
+## Engine (G stage)
 
-MinimaxH3's ComfyUI server can supply the D-stage keyframes. In its ComfyUI
-page, save a text-to-image workflow in API format, then enter that JSON file's
-absolute Windows path in `image_prompt.comfyui.workflow` in `config.yaml`.
+The video engine is selected by `engine.backend`; the default is
+`comfyui_mmH3` — MiniMax H3 running on ComfyUI at `http://127.0.0.1:8188` —
+so `run` and `pipeline` produce final generated video out of the box.
+`comfyui_ltx` (LTX-2.5) and `skyreels` (SkyReels-V2) are also available.
 
-The repository's G-stage engine calls SkyReels-V2's
-`generate_video_df.py`. MinimaxH3 is not a drop-in SkyReels engine, so `run`
-and `pipeline` will not create final generated video until the engine is
-adapted to a specific MinimaxH3 ComfyUI video workflow. The WebUI,
-world-building, storyboard, prompt generation, and concept-demo rendering work
-without SkyReels.
+H3 parameters and model filenames live under `engine.comfyui_mmH3` in
+`config.yaml`; fetch the weights with `python download_mmh3_models.py`
+(`download_ltx_models.py` for LTX-2.5). `python make_mmh3_workflow.py`
+regenerates the ComfyUI workflow JSON (`workflows/mmh3_turbo_4v8a_ui.json`).
+
+D-stage keyframes come from the same ComfyUI server: save a text-to-image
+workflow in API format and point `image_prompt.comfyui.workflow` at its
+absolute Windows path.
+
+## Blender white-model (blocking) pipeline
+
+`blender.enabled` is `true` by default and wires the Blender blocking renderer
+(MCP on `127.0.0.1:9876`) into the video engine: preview / line / depth /
+normal control images plus a blocking walk sequence are fed to H3's Fun Control
+to lock character blocking. See `docs/h3_blocking_guide.md`; drive it from the
+WebUI 「白模模块」 tab, `python cli.py blender`, or `python cli.py mmh3`.
 
 ## Useful commands
 
