@@ -80,11 +80,15 @@
 - ⚠️ **曾出现工作树内 `webui/pipeline.html`、`webui/timeline.html` 无故从磁盘消失**（内容在 git 里完好，`git checkout --` 即恢复）。提交前务必 `git status` 检查是否有意外 `D`，别盲目 `git add -A`。
 
 ## 十一、Lint / 测试门槛（ruff.toml 已入库）
-- 根目录 `ruff.toml`：line-length 100、target py310、select = `E9,F63,F7,F82` + **F 全类**（暂不开 E4/E7：E402 与项目「刻意延迟 import 重依赖」的设计冲突）；exclude 含 legacy/outputs。CI 跑 `ruff check .`，无 continue-on-error。
+- 根目录 `ruff.toml`：line-length 100、target py310、select = `E9,F63,F7,F82` + **F 全类** + **`C901`**（暂不开 E4/E7：E402 与项目「刻意延迟 import 重依赖」的设计冲突）；exclude 含 legacy/outputs。
+- **`[lint.mccabe] max-complexity = 10`（2026-09-15 起纳入）**；`[lint.per-file-ignores]` 只放行两个不受本项目维护链路约束的文件：`tools/blender_mcp_addon.py`（上游 vendored）、`deploy/sol_h3_spark/sol_h3_server.py`（远程部署脚本）。
 - ⚠️ **`tools/blender_server.py` 的 `import bpy` 必须保留**（`_exec()` 是 `exec(code, globals())`，远端脚本依赖模块全局的 `bpy`），已加 `# noqa: F401`。
-- 复杂度热点用 `ruff check . --select C901` 查。已治理：cli.main 74→<10、anime_stable.main 30→<10、agent.generate_one_scene 26→<10、agent.run 18→<10。
-- 测试基线：`pytest -q tests/` **230 passed**；`python tests/smoke_test.py` 亦在 CI 跑。
+- 复杂度现状：**全仓 C901 = 0**（治理前 48 处；9 处曾列的 `preflight.check 22`、`ltx_engine._inject 20`、`concept_video.render_concept_video 19`、`_strip_cloud_prompt_branch 17`、`publisher.upload 15`、`mmh3_engine._build_workflow 14`、`_write_mp4 12`、`_encode_frames 11`、`_validate_control_video 11` 全部拆完）。查热点：`ruff check . --select C901`。
+- 测试基线：`pytest -q tests/ --basetemp=.pytest_tmp` **230 passed**；`python tests/smoke_test.py` 50 pass 也在 CI 跑。
+- **`.gitignore` 的 `_*.py` 会吃掉 `__init__.py`**（`*` 能匹配 `_init`）→ 已加 `!**/__init__.py` 取反。血的教训：`webserver/{,services/,views/}__init__.py` 因此**长期未入库**，本地有文件所以绿、CI 全新克隆必 ImportError。**新增包后必须 `git check-ignore -v <path>` 逐个确认**（被忽略的文件在 `git status` 里根本不出现）。
 - 重构等价性验证法：`git show HEAD:<file>` 存到**仓库内**临时文件（放仓库外会因同目录 import 失败产生假差异），与新版同 argv 跑，stdout/stderr/rc 折叠空白后逐字比对。
+- **判断「CI 红灯是不是自己引入的」**：`git archive --format=zip -o out.zip HEAD` → 解到干净目录 → 用托管 Python 跑 CI 同款命令。等价全新克隆，比 `git stash` 可靠（后者受本地残留文件影响 —— 上述两个 bug 都是「本地绿 / CI 红」）。
+- 黄金指纹样本（`tests/fixtures/mmh3_wf_fingerprint.json`）**必须跨平台可复现**：工作流含 `ref_video`/`fc_video` 的真实绝对路径，`_norm` 需把**整个临时目录前缀**置换为 `TMPDIR` 并统一 `\`→`/`（只掩 `golden_xxx` 随机后缀不够，父目录 `E:\Temp` vs `/tmp`、分隔符都会导致 Linux 必红）。改工作流结构后重生成：`python tests/test_node_ids.py --update`。
 
 ## 十二、Git 同步 / Release
 - 仓库实际路径：`C:\Users\michael\CodeBuddy\ai_movie_agent` 是 Junction → `D:\ai sheare\repo\ai_movie_agent`（show-toplevel 落在 D:）。
@@ -96,11 +100,15 @@
   - 看报错判代理状态：`schannel ...` / `CONNECT tunnel failed 502` / `Could not connect` = 代理不通；`could not read Username` = 隧道通但没带凭据（去掉 `-c credential.helper=`）。PowerShell 的 `curl` 是别名，用 `curl.exe`。
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
-- 提交习惯：`_*.py/_*.ps1/_*.bat`、`outputs/`、`.venv/`、`config.yaml` 均 gitignore；每个独立变更批次单独 commit。
+- 提交习惯：`_*.py/_*.ps1/_*.bat/_*.txt`、`outputs/`、`.pytest_tmp/`、`.venv/`、`config.yaml` 均 gitignore；每个独立变更批次单独 commit。
+- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，7 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 修复后全绿**。
+- **无 gh CLI 查 CI**：`GET /actions/runs?per_page=10`（按 sha 找 run）、`GET /actions/runs/<id>/jobs`（看**每个 step** 的 conclusion，比整体红绿有用得多）；日志 `/actions/jobs/<id>/logs` 会 302 到 Azure 签名 URL，**跳转时必须摘掉 Authorization** 否则 403，且单 job 返回纯文本、多 job 是 zip。**完整步骤见 skill `github-release-no-gh` 第 7 节**。
+- 坑：`git …push | tail` 会因 shim 缺 `tail` 报错并可能吞掉输出 → 一律重定向到文件再 Read。
 - **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest `v0.11.0`（2026-09-15）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用 `## 亮点` + `## 工程 / 质量`。**完整流程见 skill `github-release-no-gh`**。
 
 ## 十三、已知隐患 / 待办
 - ~~记忆分叉~~ **已解决（2026-09-15）**：`.codebuddy/memory` 的 13 天历史已并入 `.workbuddy/memory`，重叠的 09-14/09-15 以「附」区保留，`.codebuddy/` 已停止跟踪（文件仍在磁盘）。**权威目录 = `.workbuddy/memory/`**。
 - ~~config.yaml 入库~~ **已解决（2026-09-15）**：已 `git rm --cached` + gitignore，改跟踪 `config.example.yaml`，并加了缺失回退。
-- 9 处圈复杂度 >10 待拆：`preflight.check` 22、`ltx_engine._inject` 20、`concept_video.render_concept_video` 19、`ltx_engine._strip_cloud_prompt_branch` 17、`publisher.upload` 15、`mmh3_engine._build_workflow` 14、`concept_video._write_mp4` 12、`_encode_frames` 11、`mmh3_engine._validate_control_video` 11。
+- ~~圈复杂度 >10~~ **已解决（2026-09-15）**：48 处 → 0，C901(max=10) 已进 `ruff.toml` + CI 门槛（见「十一」）。
+- ~~CI 长期红~~ **已解决（2026-09-15，两处串联的隐藏失败）**：① `.gitignore` 的 `_*.py` 吃掉 `webserver/__init__.py` 等 3 个包声明文件 → 全新克隆 ImportError；② 黄金指纹样本把 Windows 临时目录/分隔符写死 → Linux 必不匹配。**教训：前一步失败会让后一步 `skipped`，「lint 绿」不代表测试跑了 —— 看 CI 必须看到每个 step。**
 - 文档引用检查**必须**先按仓库相对路径匹配、再退化为 basename 全局匹配，否则会产出大量误报（曾误报 63 处）。
