@@ -23,6 +23,36 @@ import urllib.parse
 
 from .llmutil import log
 
+#: 中文数字 -> 阿拉伯数字（用于从旧标题「第X集」反推集数）
+_CN_EPISODE_MAP = dict(zip("一二三四五六七八九", range(1, 10)))
+
+
+def _truncate_dynamic(dynamic: str) -> str:
+    """B 站 dynamic 限 233 字，超长截断（保留末尾话题标签更友好）。"""
+    if len(dynamic) <= 233:
+        return dynamic
+    tail = dynamic[-120:]
+    return dynamic[:233 - len(tail) - 1].rstrip() + "…" + tail
+
+
+def _infer_episode(old_title: str) -> int | None:
+    """从旧标题里的「第X集」反推集数（支持阿拉伯与中文数字），失败返回 None。"""
+    m = re.search(r"第([0-9一二三四五六七八九十百]+)集", old_title)
+    if not m:
+        return None
+    token = m.group(1)
+    if token.isdigit():
+        return int(token)
+    if token in _CN_EPISODE_MAP:
+        return _CN_EPISODE_MAP[token]
+    if token.startswith("十"):
+        rest = token[1:]
+        return 10 + (_CN_EPISODE_MAP.get(rest, 0) if rest else 0)
+    if "十" in token:
+        tens, _, unit = token.partition("十")
+        return _CN_EPISODE_MAP.get(tens, 0) * 10 + (_CN_EPISODE_MAP.get(unit, 0) if unit else 0)
+    return None
+
 
 class Publisher:
     def __init__(self, config: dict, workdir: str):
@@ -68,41 +98,58 @@ class Publisher:
         return s
 
     # ---------- 核心：上传 ----------
-    def upload(self, video_path: str, episode: int | None = None,
-               title: str | None = None, logline: str = "", desc: str | None = None,
-               tags=None, dynamic: str | None = None, source: str | None = None,
-               cover: str | None = None, submit: bool = False,
-               film_title: str | None = None) -> dict:
+    def _check_upload_inputs(self, video_path: str) -> dict | None:
+        """投稿前的基础校验：视频存在/非空 + biliup 就绪。通过返回 None。"""
         if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
             return {"ok": False, "error": f"视频不存在或为空: {video_path}"}
         if not self.is_ready():
             return {"ok": False, "error": f"未找到 biliup 可执行文件 '{self.binary}'。"
                                           "请先安装 biliup-rs 并在 config 设置 publish.binary。"}
+        return None
 
-        ep = episode if episode is not None else 1
-        title_text = title or self._fill(
-            self.cfg.get("title_template", "{title} · 第{n}集"),
-            title="未命名", n=ep,
-        )
-        # 标题准确性门禁（2026-09-04 规则：标题要准确才发）
-        gate_err = self.validate_title(title_text, episode=episode, film_title=film_title)
-        if gate_err:
-            return {"ok": False,
-                    "error": f"标题校验未通过，已阻断投稿: {gate_err}（标题: {title_text}）"}
-        desc_text = desc or self._fill(
+    def _resolve_title(self, title: str | None, ep: int) -> str:
+        """标题：显式值优先，否则按 title_template 生成。"""
+        return title or self._fill(
+            self.cfg.get("title_template", "{title} · 第{n}集"), title="未命名", n=ep)
+
+    def _resolve_desc(self, desc: str | None, title: str | None, ep: int,
+                      logline: str) -> str:
+        """简介：显式值优先，否则按 desc_template 生成。"""
+        return desc or self._fill(
             self.cfg.get("desc_template", "由本地 AI 电影 Agent 自动生成。"),
-            title=title or "", n=ep, logline=logline,
-        )
+            title=title or "", n=ep, logline=logline)
+
+    def _resolve_tags(self, tags) -> str:
+        """标签：None 取 config 默认，list/tuple 收敛为逗号分隔字符串。"""
         if tags is None:
             tags = self.cfg.get("tags", "AI影视,人工智能,AIGC")
         if isinstance(tags, (list, tuple)):
             tags = ",".join(str(t) for t in tags)
-        tid = int(self.cfg.get("tid", 171))
-        source = self.cfg.get("source", "") if source is None else source
-        dynamic = self.cfg.get("dynamic", "") if dynamic is None else dynamic
-        cover = self.cfg.get("cover", "") if cover is None else cover
-        dtime = int(self.cfg.get("dtime", 0))
+        return tags
 
+    def _cfg_or(self, key: str, value):
+        """显式值优先，否则取 config.publish 里的默认值。"""
+        return self.cfg.get(key, "") if value is None else value
+
+    def _publish_env(self) -> dict:
+        """biliup 的运行环境变量（显式塞代理）。
+
+        biliup-rs 的 Rust reqwest 在 Windows 上不会自动读 WinHTTP 系统代理（7897），
+        直连会被网络拦截、表现为上传前 oauth2/info 调用 TLS handshake eof。
+        因此显式塞 HTTP(S)_PROXY：优先 config.publish.proxy，其次环境变量，
+        最后回退 127.0.0.1:7897。
+        """
+        env = os.environ.copy()
+        proxy = (self.cfg.get("proxy") or os.environ.get("HTTPS_PROXY")
+                 or os.environ.get("HTTP_PROXY") or "http://127.0.0.1:7897")
+        env["HTTP_PROXY"] = env["HTTPS_PROXY"] = env["ALL_PROXY"] = proxy
+        return env
+
+    def _build_upload_cmd(self, video_path: str, title_text: str, desc_text: str,
+                          tags: str, source: str = "", dynamic: str = "",
+                          cover: str = "", dtime: int = 0,
+                          submit: bool = False) -> list:
+        """组装 biliup upload 命令行。"""
         cmd = [self._resolve_binary()]
         if self.account:
             cmd += ["-u", self.account]
@@ -110,15 +157,11 @@ class Publisher:
                 "--title", title_text,
                 "--desc", desc_text,
                 "--tag", tags,
-                "--tid", str(tid)]
+                "--tid", str(int(self.cfg.get("tid", 171)))]
         if source:
             cmd += ["--source", source]
         if dynamic:
-            # B 站 dynamic 限 233 字，超长截断（保留末尾话题标签更友好）
-            if len(dynamic) > 233:
-                tail = dynamic[-120:]
-                dynamic = dynamic[:233 - len(tail) - 1].rstrip() + "…" + tail
-            cmd += ["--dynamic", dynamic]
+            cmd += ["--dynamic", _truncate_dynamic(dynamic)]
         if cover and os.path.exists(cover):
             cmd += ["--cover", cover]
         if dtime:
@@ -126,20 +169,39 @@ class Publisher:
         # biliup-rs 的 --submit 需取值(client/app/web)，显式指定即真正投稿
         if submit:
             cmd += ["--submit", "client"]
+        return cmd
+
+    def upload(self, video_path: str, episode: int | None = None,
+               title: str | None = None, logline: str = "", desc: str | None = None,
+               tags=None, dynamic: str | None = None, source: str | None = None,
+               cover: str | None = None, submit: bool = False,
+               film_title: str | None = None) -> dict:
+        bad = self._check_upload_inputs(video_path)
+        if bad:
+            return bad
+
+        ep = episode if episode is not None else 1
+        title_text = self._resolve_title(title, ep)
+        # 标题准确性门禁（2026-09-04 规则：标题要准确才发）
+        gate_err = self.validate_title(title_text, episode=episode, film_title=film_title)
+        if gate_err:
+            return {"ok": False,
+                    "error": f"标题校验未通过，已阻断投稿: {gate_err}（标题: {title_text}）"}
+        desc_text = self._resolve_desc(desc, title, ep, logline)
+        tags = self._resolve_tags(tags)
+
+        cmd = self._build_upload_cmd(
+            video_path, title_text, desc_text, tags,
+            source=self._cfg_or("source", source),
+            dynamic=self._cfg_or("dynamic", dynamic),
+            cover=self._cfg_or("cover", cover),
+            dtime=int(self.cfg.get("dtime", 0)), submit=submit)
 
         log(f"  [publish] 投稿到 B 站: {title_text}")
         try:
             # 注意：biliup 输出为 UTF-8，Windows 默认 GBK 解码会崩，故捕获字节后手动解码
-            # biliup-rs 的 Rust reqwest 在 Windows 上不会自动读 WinHTTP 系统代理（7897），
-            # 直连会被网络拦截、表现为上传前 oauth2/info 调用 TLS handshake eof。
-            # 因此显式塞 HTTP(S)_PROXY：优先 config.publish.proxy，其次环境变量，最后回退 127.0.0.1:7897。
-            run_env = os.environ.copy()
-            proxy = self.cfg.get("proxy") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") \
-                or "http://127.0.0.1:7897"
-            run_env["HTTP_PROXY"] = proxy
-            run_env["HTTPS_PROXY"] = proxy
-            run_env["ALL_PROXY"] = proxy
-            proc = subprocess.run(cmd, cwd=self.workdir, capture_output=True, env=run_env)
+            proc = subprocess.run(cmd, cwd=self.workdir, capture_output=True,
+                                  env=self._publish_env())
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -348,46 +410,54 @@ class Publisher:
         m = re.search(r"\b([a-z0-9]{20,40})\b", text)
         return m.group(1) if m else None
 
+    def _fetch_edit_context(self, bvid: str) -> tuple:
+        """拉取稿件详情 + cid + 服务端文件名；失败返回 (err_dict, None)。"""
+        detail = self.get_video_detail(bvid)
+        if detail.get("code") != 0:
+            return {"ok": False,
+                    "error": f"拉取稿件信息失败: {detail.get('message', '')}"}, None
+        d = detail.get("data") or {}
+        pages = d.get("pages") or []
+        cid = pages[0].get("cid") if pages else None
+        server_fn = self._bili_server_filename(bvid)
+        if not cid or not server_fn:
+            return {"ok": False,
+                    "error": "缺少 cid 或服务端文件名（biliup show），无法编辑"}, None
+        return None, (d, cid, server_fn)
+
+    def _post_edit(self, ctx: dict, form: dict) -> dict:
+        """提交创作中心 edit 请求，返回 {ok, body} 或 {ok:False, error}。"""
+        import requests
+        try:
+            r = requests.post(
+                f"https://member.bilibili.com/x/vu/web/edit?csrf={ctx['csrf']}",
+                json=form, headers=ctx["headers"], proxies=ctx["proxies"], timeout=30)
+        except Exception as e:
+            return {"ok": False, "error": f"编辑请求失败: {e}"}
+        try:
+            return {"ok": True, "body": r.json()}
+        except Exception:
+            return {"ok": False,
+                    "error": f"编辑接口返回非 JSON（HTTP {r.status_code}）: {r.text[:200]}"}
+
     def update_video(self, bvid: str, title: str | None = None,
                      desc: str | None = None, tag: str | None = None) -> dict:
         """编辑已投稿的标题/简介/标签（创作中心 edit 接口，2026-09-04 验证可用）。
 
         标题走 validate_title 门禁（episode 由现有标题推断）。
         """
-        import requests
         ctx = self._bili_request_ctx()
         if not ctx:
             return {"ok": False, "error": "未找到 B 站登录态（outputs/cookies.json）"}
-        detail = self.get_video_detail(bvid)
-        if detail.get("code") != 0:
-            return {"ok": False,
-                    "error": f"拉取稿件信息失败: {detail.get('message', '')}"}
-        d = detail.get("data") or {}
+        err, fetched = self._fetch_edit_context(bvid)
+        if err:
+            return err
+        d, cid, server_fn = fetched
         old_title = d.get("title", "")
-        pages = d.get("pages") or []
-        cid = pages[0].get("cid") if pages else None
-        server_fn = self._bili_server_filename(bvid)
-        if not cid or not server_fn:
-            return {"ok": False, "error": "缺少 cid 或服务端文件名（biliup show），无法编辑"}
 
         new_title = title if title is not None else old_title
         # 从旧标题推断集数，交给门禁校验（改标题也不允许把集数改丢）
-        m = re.search(r"第([0-9一二三四五六七八九十百]+)集", old_title)
-        episode = None
-        if m:
-            token = m.group(1)
-            cn_map = dict(zip("一二三四五六七八九", range(1, 10)))
-            if token.isdigit():
-                episode = int(token)
-            elif token in cn_map:
-                episode = cn_map[token]
-            elif token.startswith("十"):
-                rest = token[1:]
-                episode = 10 + (cn_map.get(rest, 0) if rest else 0)
-            elif "十" in token:
-                tens, _, unit = token.partition("十")
-                episode = cn_map.get(tens, 0) * 10 + (cn_map.get(unit, 0) if unit else 0)
-        gate_err = self.validate_title(new_title, episode=episode,
+        gate_err = self.validate_title(new_title, episode=_infer_episode(old_title),
                                        film_title=self._series_title(old_title))
         if gate_err:
             return {"ok": False,
@@ -403,17 +473,10 @@ class Publisher:
             "dtime": 0, "mission_id": 0,
             "videos": [{"filename": server_fn, "title": "movie_final", "cid": cid}],
         }
-        try:
-            r = requests.post(
-                f"https://member.bilibili.com/x/vu/web/edit?csrf={ctx['csrf']}",
-                json=form, headers=ctx["headers"], proxies=ctx["proxies"], timeout=30)
-        except Exception as e:
-            return {"ok": False, "error": f"编辑请求失败: {e}"}
-        try:
-            body = r.json()
-        except Exception:
-            return {"ok": False,
-                    "error": f"编辑接口返回非 JSON（HTTP {r.status_code}）: {r.text[:200]}"}
+        res = self._post_edit(ctx, form)
+        if not res.get("ok"):
+            return res
+        body = res["body"]
         if body.get("code") == 0:
             log(f"  [publish] 已更新稿件标题: {new_title}")
             return {"ok": True, "bvid": bvid, "title": new_title, "raw": body}
@@ -460,6 +523,70 @@ class Publisher:
                            desc=desc, tags=tags, dynamic=dynamic, source=source,
                            cover=cover, submit=submit)
     # ---------- 便捷：把创意/规划渲染成视频 demo 并投稿 ----------
+    def _concept_bible(self, state) -> dict:
+        """取概念企划：优先 state.bible，退化为整个 state。"""
+        concept = (state or {}).get("bible") or {}
+        return concept or (state or {})
+
+    def _load_keyframes(self) -> list:
+        """D 阶段关键帧列表（目录不存在时返回 []）。"""
+        kf_dir = os.path.join(self.workdir, "keyframes")
+        if not os.path.isdir(kf_dir):
+            return []
+        return sorted(os.path.join(kf_dir, f) for f in os.listdir(kf_dir)
+                      if f.lower().endswith((".png", ".jpg", ".jpeg")))
+
+    def _select_bgm(self, bgm, auto_bgm: bool):
+        """自动配乐（#7）：未显式给 bgm 时自动选曲（ffmpeg/BGM 缺失则跳过）。"""
+        if not (auto_bgm and bgm is None):
+            return bgm
+        try:
+            from agent import audio_mix as _am
+            if _am.is_ready():
+                sel = _am.select_bgm(self.workdir)
+                if sel:
+                    log(f"  [publish] 自动配乐：{os.path.basename(sel)}")
+                    return sel
+        except Exception as e:
+            log(f"  [publish] 自动配乐跳过: {e}")
+        return bgm
+
+    def _render_concept_cover(self, concept: dict, keyframes: list,
+                              cover_path: str) -> str:
+        """生成竖版封面（B 站投稿用）；失败返回 ""。"""
+        try:
+            from agent.concept_video import render_cover
+            render_cover(concept, keyframes, cover_path)
+            return cover_path
+        except Exception as e:
+            log(f"  [publish] 封面生成失败（忽略）: {e}")
+            return ""
+
+    @staticmethod
+    def _concept_title(title: str | None, state, concept: dict) -> str:
+        """概念视频标题：显式 > state.title > 概念 logline > 兜底。"""
+        return (title or (state or {}).get("title") or concept.get("logline")
+                or "AI 电影创意")
+
+    @staticmethod
+    def _concept_default_desc(title: str) -> str:
+        """概念视频的默认简介（含标签话题）。"""
+        return (
+            f"片名《{title}》——一部由本地 AI 电影 Agent 自动企划、生成的概念短片 demo。\n\n"
+            "这个 Agent 能做什么：\n"
+            "· 持续创作 / 无限时长：基于 SkyReels-V2 的 Diffusion Forcing 续写，影片可一直生长；\n"
+            "· 全链路自动化：素材采集 → 知识沉淀 → 概念企划 → 关键帧 → 剧本 → 去 AI 味润色 → 视频导演 → 自动投稿 B 站；\n"
+            "· 本地 LLM 自动写剧本（无模型也能跑通模板兜底）。\n\n"
+            "用 AI 提前看见未来——让 Agent 把一句话创意变成可投稿的影像。\n"
+            "#魔搭社区 #Qoder #AI无限开发者创作大赛 #用AI提前看见未来 #AIGC"
+        )
+
+    @staticmethod
+    def _concept_default_tags(concept: dict) -> list:
+        """概念视频的默认标签。"""
+        return ["AI电影Agent", "开源项目", "AIGC", "AI影视", "短片",
+                "打赏", concept.get("theme") or "AI电影", "创意策划"]
+
     def publish_concept(self, out_path: str | None = None,
                         title: str | None = None, desc: str | None = None,
                         tags: list[str] | None = None, submit: bool = False,
@@ -473,34 +600,16 @@ class Publisher:
         from agent.concept_video import render_concept_video
 
         state = self._load_state()
-        concept = (state or {}).get("bible") or {}
-        if not concept:
-            concept = state or {}
-        # 关键帧图（D 阶段产物，可选）
-        kf_dir = os.path.join(self.workdir, "keyframes")
-        keyframes = (sorted(
-            os.path.join(kf_dir, f) for f in os.listdir(kf_dir)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ) if os.path.isdir(kf_dir) else [])
+        concept = self._concept_bible(state)
+        keyframes = self._load_keyframes()
         if not out_path:
             os.makedirs(os.path.join(self.workdir, "scenes"), exist_ok=True)
             out_path = os.path.join(self.workdir, "scenes", "concept_demo.mp4")
 
         # 白模分镜预视图（Blender 生成，可选）：优先用于分镜卡与视觉参考
         blocking_previs = (state or {}).get("blocking_previs") or None
-        # 自动配乐（#7）：未显式给 bgm 时自动选曲并混入（ffmpeg/BGM 缺失则跳过）
-        if bgm is None and auto_bgm:
-            try:
-                from agent import audio_mix as _am
-                if _am.is_ready():
-                    sel = _am.select_bgm(self.workdir)
-                    if sel:
-                        bgm = sel
-                        log(f"  [publish] 自动配乐：{os.path.basename(bgm)}")
-            except Exception as e:
-                log(f"  [publish] 自动配乐跳过: {e}")
-        video = render_concept_video(concept, keyframes, out_path,
-                                     xfade=xfade, bgm=bgm,
+        bgm = self._select_bgm(bgm, auto_bgm)
+        video = render_concept_video(concept, keyframes, out_path, xfade=xfade, bgm=bgm,
                                      blocking_images=blocking_previs)
         log(f"  [publish] 创意/规划视频已生成: {video}")
         if not self.is_ready():
@@ -508,29 +617,13 @@ class Publisher:
             return video
 
         # 竖版封面（B 站投稿用）
-        cover_path = os.path.join(self.workdir, "scenes", "concept_cover.png")
-        try:
-            from agent.concept_video import render_cover
-            render_cover(concept, keyframes, cover_path)
-        except Exception as e:
-            log(f"  [publish] 封面生成失败（忽略）: {e}")
-            cover_path = ""
+        cover_path = self._render_concept_cover(
+            concept, keyframes,
+            os.path.join(self.workdir, "scenes", "concept_cover.png"))
 
-        if not title:
-            title = (state or {}).get("title") or concept.get("logline") or "AI 电影创意"
-        if not desc:
-            desc = (
-                f"片名《{title}》——一部由本地 AI 电影 Agent 自动企划、生成的概念短片 demo。\n\n"
-                "这个 Agent 能做什么：\n"
-                "· 持续创作 / 无限时长：基于 SkyReels-V2 的 Diffusion Forcing 续写，影片可一直生长；\n"
-                "· 全链路自动化：素材采集 → 知识沉淀 → 概念企划 → 关键帧 → 剧本 → 去 AI 味润色 → 视频导演 → 自动投稿 B 站；\n"
-                "· 本地 LLM 自动写剧本（无模型也能跑通模板兜底）。\n\n"
-                "用 AI 提前看见未来——让 Agent 把一句话创意变成可投稿的影像。\n"
-                "#魔搭社区 #Qoder #AI无限开发者创作大赛 #用AI提前看见未来 #AIGC"
-            )
-        if not tags:
-            tags = ["AI电影Agent", "开源项目", "AIGC", "AI影视", "短片",
-                    "打赏", concept.get("theme") or "AI电影", "创意策划"]
+        title = self._concept_title(title, state, concept)
+        desc = desc or self._concept_default_desc(title)
+        tags = tags or self._concept_default_tags(concept)
         return self.upload(video, title=title, desc=desc, tags=tags,
                            source=source, dynamic=desc, cover=cover_path,
                            submit=submit)

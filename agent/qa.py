@@ -191,36 +191,55 @@ def score_video(path: str, policy: dict | None = None, *,
     return out
 
 
+def _num(score: dict, key: str, default=0.0) -> float:
+    """把 score[key] 安全转 float（缺失/非数值一律回落到 default）。"""
+    try:
+        v = score.get(key)
+        return float(v if v is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+# (策略键, 指标键, 方向, 文案模板)；lt = 低于阈值判不合格，gt = 高于阈值判不合格
+_RANGE_CHECKS = (
+    ("min_sharpness", "sharpness", "lt", "画面偏糊(sharpness={v:.1f}<{t})"),
+    ("min_motion", "motion", "lt", "近乎静帧/卡死(motion={v:.2f}<{t})"),
+    ("max_motion", "motion", "gt", "帧间抖动过大(motion={v:.1f}>{t})"),
+    ("min_brightness", "brightness", "lt", "画面过暗/全黑(brightness={v:.1f})"),
+    ("max_brightness", "brightness", "gt", "画面过曝/全白(brightness={v:.1f})"),
+)
+
+
+def _threshold_reasons(score: dict, pol: dict, reasons: list) -> None:
+    """数值区间类判据：清晰度 / 运动量 / 亮度（表驱动，避免 if 分支堆积）。"""
+    for key, metric, direction, fmt in _RANGE_CHECKS:
+        limit = pol.get(key)
+        if not limit:
+            continue
+        value = _num(score, metric)
+        bad = value < float(limit) if direction == "lt" else value > float(limit)
+        if bad:
+            reasons.append(fmt.format(v=value, t=limit))
+
+
+def _face_reasons(score: dict, pol: dict, reasons: list) -> None:
+    """人脸类判据：检出率 / 身份相似度（仅在 face_check 且是人物镜时调用）。"""
+    fr = score.get("face_ratio")
+    if fr is not None and float(fr) < float(pol.get("min_face_ratio") or 0):
+        reasons.append(f"人脸检出率低(face_ratio={fr})")
+    sim = score.get("identity_sim")
+    if sim is not None and float(sim) < float(pol.get("min_identity") or 0):
+        reasons.append(f"身份相似度低(identity_sim={sim})")
+
+
 def evaluate(score: dict, policy: dict | None = None,
              is_char_shot: bool = False) -> tuple:
     """按策略判定是否达标，返回 (ok, reasons)。"""
     pol = {**DEFAULTS, **(policy or {})}
     reasons: list = []
-
-    def num(key, default=0.0):
-        try:
-            return float(score.get(key) if score.get(key) is not None else default)
-        except (TypeError, ValueError):
-            return default
-
-    sh, mo, br = num("sharpness"), num("motion"), num("brightness")
-    if pol.get("min_sharpness") and sh < float(pol["min_sharpness"]):
-        reasons.append(f"画面偏糊(sharpness={sh:.1f}<{pol['min_sharpness']})")
-    if pol.get("min_motion") and mo < float(pol["min_motion"]):
-        reasons.append(f"近乎静帧/卡死(motion={mo:.2f}<{pol['min_motion']})")
-    if pol.get("max_motion") and mo > float(pol["max_motion"]):
-        reasons.append(f"帧间抖动过大(motion={mo:.1f}>{pol['max_motion']})")
-    if pol.get("min_brightness") and br < float(pol["min_brightness"]):
-        reasons.append(f"画面过暗/全黑(brightness={br:.1f})")
-    if pol.get("max_brightness") and br > float(pol["max_brightness"]):
-        reasons.append(f"画面过曝/全白(brightness={br:.1f})")
+    _threshold_reasons(score, pol, reasons)
     if pol.get("face_check") and is_char_shot:
-        if score.get("face_ratio") is not None and \
-                float(score["face_ratio"]) < float(pol.get("min_face_ratio") or 0):
-            reasons.append(f"人脸检出率低(face_ratio={score['face_ratio']})")
-        if score.get("identity_sim") is not None and \
-                float(score["identity_sim"]) < float(pol.get("min_identity") or 0):
-            reasons.append(f"身份相似度低(identity_sim={score['identity_sim']})")
+        _face_reasons(score, pol, reasons)
     return (not reasons), reasons
 
 

@@ -71,76 +71,92 @@ def parse_face_rate(stdout):
     return res
 
 
-def main():
+def _wait_driver_done() -> bool:
+    """等驱动打出 ALL DONE；超时或驱动异常退出返回 False。"""
     log("[monitor] 启动，等待驱动 ALL DONE ...")
     waited = 0
-    done = False
     while waited < 6 * 3600:
         if driver_done():
             log("[monitor] 检测到驱动 ALL DONE")
-            done = True
-            break
+            return True
         if not pid_alive(read_pid()):
             log("[monitor] 驱动进程已退出")
             if driver_done():
-                done = True
-                break
+                return True
             log("[monitor] 警告：驱动退出但未 ALL DONE（可能异常），停止")
-            return
+            return False
         time.sleep(60)
         waited += 60
-    if not done:
-        log("[monitor] 超时未收到 ALL DONE，停止")
-        return
+    log("[monitor] 超时未收到 ALL DONE，停止")
+    return False
 
-    # 校验产出
+
+def _produced_videos():
+    """校验三集动漫视频均就绪；缺失/过小返回 None。"""
     videos = {e: f"outputs/videos/ep{e}_vo_anime_mmh3.mp4" for e in EPS}
     missing = [e for e in EPS
                if not os.path.exists(videos[e]) or os.path.getsize(videos[e]) < 1_000_000]
     if missing:
         log(f"[monitor] 缺失/过小的动漫视频: ep{missing}，停止上传")
-        return
+        return None
     log("[monitor] 三集动漫视频均就绪")
+    return videos
 
-    # 人脸复检
+
+def _face_rate_gate(videos: dict) -> bool:
+    """人脸复检分档门禁：全 0% 返回 True（可上传），否则 False。"""
     log("[monitor] 运行 diag_face_rate 复检（目标 0%）")
     try:
         r = subprocess.run([PY, "diag_face_rate.py", *[videos[e] for e in EPS]],
                            capture_output=True, text=True, timeout=900)
     except Exception as e:
         log(f"[monitor] face-rate 异常: {e}")
-        return
+        return False
     log(r.stdout)
     rates = parse_face_rate(r.stdout)
     log(f"[monitor] 检出率/置信: {rates}")
     # 分档门禁（ buffalo_l 默认阈值~0.5；真人脸置信通常 0.9+ ）
-    GRAY_PCT, GRAY_CONF = 10, 0.85
-    real = [e for e in EPS if rates.get(e, (0, 0))[0] > GRAY_PCT
-            or rates.get(e, (0, 0))[1] > GRAY_CONF]
-    gray = [e for e in EPS if 0 < rates.get(e, (0, 0))[0] <= GRAY_PCT
-            and rates.get(e, (0, 0))[1] <= GRAY_CONF]
+    gray_pct, gray_conf = 10, 0.85
+    real = [e for e in EPS if rates.get(e, (0, 0))[0] > gray_pct
+            or rates.get(e, (0, 0))[1] > gray_conf]
+    gray = [e for e in EPS if 0 < rates.get(e, (0, 0))[0] <= gray_pct
+            and rates.get(e, (0, 0))[1] <= gray_conf]
     if real:
         log(f"[monitor] 疑似真脸(ep{real})，暂停上传并告警")
-        return
+        return False
     if gray:
         log(f"[monitor] 灰区：ep{gray} 仅低置信少量检出(动漫误报噪声，非真脸)，"
             f"暂停自动上传，等待人工确认")
-        return
+        return False
     log("[monitor] 全 0%，开始上传")
+    return True
 
-    # 上传
+
+def _run_upload() -> None:
+    """调用上传脚本并转发 stdout / stderr。"""
     try:
         r2 = subprocess.run([PY, "_bili_upload_anime.py"],
                             capture_output=True, text=True, timeout=3600)
-        log("[monitor] === upload stdout ===")
-        log(r2.stdout)
-        if r2.stderr:
-            log("[monitor] === upload stderr (tail) ===")
-            log(r2.stderr[-3000:])
     except Exception as e:
         log(f"[monitor] 上传脚本异常: {e}")
         return
+    log("[monitor] === upload stdout ===")
+    log(r2.stdout)
+    if r2.stderr:
+        log("[monitor] === upload stderr (tail) ===")
+        log(r2.stderr[-3000:])
     log("[monitor] 上传流程结束")
+
+
+def main():
+    if not _wait_driver_done():
+        return
+    videos = _produced_videos()
+    if not videos:
+        return
+    if not _face_rate_gate(videos):
+        return
+    _run_upload()
 
 
 if __name__ == "__main__":

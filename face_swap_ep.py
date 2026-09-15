@@ -74,6 +74,164 @@ def prescan(app, path: str, src_emb, thresh: float, sample: int = 12,
     return hit
 
 
+def _global_pick(faces, src_emb, sim_thresh):
+    """全局检测里挑与锚定图最相似的脸；不足阈值返回 None。"""
+    if not faces:
+        return None
+    best = max(faces, key=lambda x: cos(x.normed_embedding, src_emb))
+    return best if cos(best.normed_embedding, src_emb) >= sim_thresh else None
+
+
+def _local_track(f, prev_bbox, app, sw, source, src_emb, w: int, h: int):
+    """全局漏检时，围绕上一帧 bbox 放大范围做局部检测并换脸。
+
+    返回 (换脸后的帧, 新 bbox)；未命中返回 (None, None)。
+    """
+    if prev_bbox is None:
+        return None, None
+    x1, y1, x2, y2 = prev_bbox
+    padx = int((x2 - x1) * 0.6)
+    pady = int((y2 - y1) * 0.6)
+    ax1 = max(0, int(x1 - padx))
+    ay1 = max(0, int(y1 - pady))
+    ax2 = min(w, int(x2 + padx))
+    ay2 = min(h, int(y2 + pady))
+    crop = f[ay1:ay2, ax1:ax2]
+    if not crop.size:
+        return None, None
+    cf = app.get(crop)
+    if not cf:
+        return None, None
+    cb = max(cf, key=lambda x: cos(x.normed_embedding, src_emb))
+    if cos(cb.normed_embedding, src_emb) < LOCAL_SIM:
+        return None, None
+    out = f.copy()
+    out[ay1:ay2, ax1:ax2] = sw.get(crop, cb, source)
+    return out, np.array(cb.bbox) + np.array([ax1, ay1, ax1, ay1])
+
+
+def _mux_back(tmp: str, src: str, dst: str) -> None:
+    """把换脸后的静音片混回原音轨，并清理临时文件。"""
+    subprocess.run([rs.FFMPEG, "-y", "-i", tmp, "-i", src,
+                    "-c:v", "copy", "-c:a", "copy",
+                    "-map", "0:v:0", "-map", "1:a:0", dst], check=True)
+    os.remove(tmp)
+
+
+def swap_video(src: str, dst: str, app, sw, source, src_emb,
+               sim_thresh: float) -> int:
+    """逐帧换脸 + 跨帧 Mira 跟踪，确保整镜脸持续锁定、不闪原脸。
+
+    策略:
+      1) 全局检测取「与锚定图最相似」的脸 = Mira（相似度 >= sim_thresh）即换；
+      2) 若全局没命中，用上一帧 Mira 的 bbox 在周围扩大区域做局部检测
+         （姿态剧变/侧脸导致全局漏检时，局部仍能抓到），相似度 >= LOCAL_SIM 即换；
+      3) 两者都失败（极端漏检）则保留原帧（极少发生）。
+    这样 Mira 的脸在整镜/整片持续出现，不再因检测抖动或姿态变化露出原脸。
+    """
+    cap = cv2.VideoCapture(src)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w, h = int(cap.get(3)), int(cap.get(4))
+    tmp = dst + ".v.mp4"
+    vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    n = int(cap.get(7))
+    i = swapped = tracked = 0
+    prev_bbox = None  # 上一帧确认的 Mira 全局 bbox(numpy)
+    while True:
+        ret, f = cap.read()
+        if not ret:
+            break
+        fout = f.copy()
+        mira = _global_pick(app.get(f), src_emb, sim_thresh)
+        if mira is None:
+            lf, lbbox = _local_track(f, prev_bbox, app, sw, source, src_emb, w, h)
+            if lf is not None:
+                prev_bbox = lbbox
+                swapped += 1
+                tracked += 1
+                vw.write(lf)
+                i += 1
+                if i % 15 == 0:
+                    print(f"  帧 {i}/{n} 已换 {swapped} (track {tracked})")
+                continue
+        if mira is not None:
+            fout = sw.get(f, mira, source)
+            prev_bbox = np.array(mira.bbox)
+            swapped += 1
+        vw.write(fout)
+        i += 1
+        if i % 15 == 0:
+            print(f"  帧 {i}/{n} 已换 {swapped} (track {tracked})")
+    cap.release()
+    vw.release()
+    if swapped == 0:
+        print(f"  [warn] {os.path.basename(src)} 整镜未换脸（首帧即漏检？）")
+    _mux_back(tmp, src, dst)
+    return swapped
+
+
+def _build_swapper() -> tuple:
+    """初始化人脸分析 / 换脸模型与锚定图身份，返回 (app, sw, source, src_emb)。"""
+    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=0, det_size=(640, 640))
+    sw = INSwapper(SW_MODEL)
+    anchor = cv2.imread(ANCHOR)
+    sf = app.get(anchor)
+    assert sf, "锚定图未检出人脸"
+    source = sf[0]
+    return app, sw, source, source.normed_embedding
+
+
+def _fill_auto_dims(a) -> None:
+    """帧数/帧率未显式给定时，从第 1 镜自动探测（ep1 实测 90 帧，按 56 拼会错位）。"""
+    if a.frames and a.fps:
+        return
+    src0 = os.path.join(rs.WORK, f"ep{a.ep}_shot1.mp4")
+    n0 = f0 = 0
+    if os.path.exists(src0):
+        cap = cv2.VideoCapture(src0)
+        n0, f0 = int(cap.get(7)), int(cap.get(5) or 0)
+        cap.release()
+    a.frames = a.frames or n0 or 56
+    a.fps = a.fps or f0 or 24
+
+
+def _swap_or_copy(app, sw, source, src, dst, src_emb, thresh, prompt, key) -> None:
+    """预扫命中 Mira 则换脸，否则原样复制。"""
+    hit = prescan(app, src, src_emb, thresh, prompt=prompt)
+    if hit:
+        print(f"[SWAP] {key}  预扫命中 {hit}/12  ({prompt[:50]}...)")
+        n = swap_video(src, dst, app, sw, source, src_emb, thresh)
+        print(f"  -> 实际换脸 {n} 帧")
+        return
+    print(f"[COPY] {key}  无 Mira，原样保留")
+    shutil.copy(src, dst)
+
+
+def _process_shots(a, app, sw, source, src_emb, only, fs_dir: str) -> list:
+    """逐镜换脸/复制，返回待拼接的镜头文件列表。"""
+    prompts = rs.load_json(rs.SHOTS_FILE)[f"ep{a.ep}"]
+    files = []
+    for i, p in enumerate(prompts):
+        idx = i + 1
+        key = f"ep{a.ep}_shot{idx}"
+        src = os.path.join(rs.WORK, f"{key}.mp4")
+        dst = os.path.join(fs_dir, f"{key}.mp4")
+        if not os.path.exists(src):
+            print("跳过(无文件)", src)
+            continue
+        if a.concat_only:
+            if not os.path.exists(dst):
+                shutil.copy(src, dst)
+        elif os.path.exists(dst) and not a.force and not (only and idx in only):
+            print(f"[SKIP] {key} 已换脸（续跑）")
+        else:
+            # dst 不存在，或 --force：执行换脸/复制（swap_video 内部会覆盖已存在的 dst）
+            _swap_or_copy(app, sw, source, src, dst, src_emb, a.sim_thresh, p, key)
+        files.append(dst)
+    return files
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ep", type=int, default=1, help="处理第几集（默认 1）")
@@ -96,123 +254,14 @@ def main():
             if x.strip().isdigit()} or None
 
     rs.set_workspace("mmh3")
-    src0 = os.path.join(rs.WORK, f"ep{a.ep}_shot1.mp4")
-    if not a.frames or not a.fps:
-        n0 = f0 = 0
-        if os.path.exists(src0):
-            cap = cv2.VideoCapture(src0)
-            n0, f0 = int(cap.get(7)), int(cap.get(5) or 0)
-            cap.release()
-        a.frames = a.frames or n0 or 56
-        a.fps = a.fps or f0 or 24
+    _fill_auto_dims(a)
     print(f"[cfg] 单镜 {a.frames} 帧 @ {a.fps}fps = {a.frames / a.fps:.3f}s  sim>={a.sim_thresh}")
     ENG = rs.build_engine(a.width, a.height, a.frames, a.fps, "mmh3")
+    app, sw, source, src_emb = _build_swapper()
 
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-    app.prepare(ctx_id=0, det_size=(640, 640))
-    sw = INSwapper(SW_MODEL)
-    anchor = cv2.imread(ANCHOR)
-    sf = app.get(anchor)
-    assert sf, "锚定图未检出人脸"
-    source = sf[0]
-    src_emb = source.normed_embedding
-
-    def swap_video(src: str, dst: str) -> int:
-        """逐帧换脸 + 跨帧 Mira 跟踪，确保整镜脸持续锁定、不闪原脸。
-
-        策略:
-          1) 全局检测取「与锚定图最相似」的脸 = Mira（相似度 >= sim_thresh）即换；
-          2) 若全局没命中，用上一帧 Mira 的 bbox 在周围扩大区域做局部检测
-             （姿态剧变/侧脸导致全局漏检时，局部仍能抓到），相似度 >= LOCAL_SIM 即换；
-          3) 两者都失败（极端漏检）则保留原帧（极少发生）。
-        这样 Mira 的脸在整镜/整片持续出现，不再因检测抖动或姿态变化露出原脸。
-        """
-        cap = cv2.VideoCapture(src)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        w, h = int(cap.get(3)), int(cap.get(4))
-        tmp = dst + ".v.mp4"
-        vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-        n = int(cap.get(7))
-        i = swapped = tracked = 0
-        prev_bbox = None  # 上一帧确认的 Mira 全局 bbox(numpy)
-        while True:
-            ret, f = cap.read()
-            if not ret:
-                break
-            fout = f.copy()
-            faces = app.get(f)
-            mira = None
-            if faces:
-                best = max(faces, key=lambda x: cos(x.normed_embedding, src_emb))
-                if cos(best.normed_embedding, src_emb) >= a.sim_thresh:
-                    mira = best
-            if mira is None and prev_bbox is not None:
-                x1, y1, x2, y2 = prev_bbox
-                padx = int((x2 - x1) * 0.6); pady = int((y2 - y1) * 0.6)
-                ax1 = max(0, int(x1 - padx)); ay1 = max(0, int(y1 - pady))
-                ax2 = min(w, int(x2 + padx)); ay2 = min(h, int(y2 + pady))
-                crop = f[ay1:ay2, ax1:ax2]
-                if crop.size:
-                    cf = app.get(crop)
-                    if cf:
-                        cb = max(cf, key=lambda x: cos(x.normed_embedding, src_emb))
-                        if cos(cb.normed_embedding, src_emb) >= LOCAL_SIM:
-                            sc = sw.get(crop, cb, source)
-                            fout[ay1:ay2, ax1:ax2] = sc
-                            prev_bbox = np.array(cb.bbox) + np.array([ax1, ay1, ax1, ay1])
-                            swapped += 1; tracked += 1
-                            vw.write(fout); i += 1
-                            if i % 15 == 0:
-                                print(f"  帧 {i}/{n} 已换 {swapped} (track {tracked})")
-                            continue
-            if mira is not None:
-                fout = sw.get(f, mira, source)
-                prev_bbox = np.array(mira.bbox)
-                swapped += 1
-            vw.write(fout)
-            i += 1
-            if i % 15 == 0:
-                print(f"  帧 {i}/{n} 已换 {swapped} (track {tracked})")
-        cap.release()
-        vw.release()
-        if swapped == 0:
-            print(f"  [warn] {os.path.basename(src)} 整镜未换脸（首帧即漏检？）")
-        subprocess.run([rs.FFMPEG, "-y", "-i", tmp, "-i", src,
-                        "-c:v", "copy", "-c:a", "copy",
-                        "-map", "0:v:0", "-map", "1:a:0", dst], check=True)
-        os.remove(tmp)
-        return swapped
-
-    data = rs.load_json(rs.SHOTS_FILE)
-    prompts = data[f"ep{a.ep}"]
     fs_dir = os.path.join(ROOT, "outputs", "series_shots_mmh3_fs")
     os.makedirs(fs_dir, exist_ok=True)
-    files = []
-    for i, p in enumerate(prompts):
-        idx = i + 1
-        key = f"ep{a.ep}_shot{idx}"
-        src = os.path.join(rs.WORK, f"{key}.mp4")
-        dst = os.path.join(fs_dir, f"{key}.mp4")
-        if not os.path.exists(src):
-            print("跳过(无文件)", src)
-            continue
-        if a.concat_only:
-            if not os.path.exists(dst):
-                shutil.copy(src, dst)
-        elif (os.path.exists(dst) and not a.force
-              and not (only and idx in only)):
-            print(f"[SKIP] {key} 已换脸（续跑）")
-        else:
-            # dst 不存在，或 --force：执行换脸/复制（swap_video 内部会覆盖已存在的 dst）
-            hit = prescan(app, src, src_emb, a.sim_thresh, prompt=p)
-            if hit:
-                print(f"[SWAP] {key}  预扫命中 {hit}/12  ({p[:50]}...)")
-                n = swap_video(src, dst)
-                print(f"  -> 实际换脸 {n} 帧")
-            else:
-                print(f"[COPY] {key}  无 Mira，原样保留")
-                shutil.copy(src, dst)
-        files.append(dst)
+    files = _process_shots(a, app, sw, source, src_emb, only, fs_dir)
 
     film = os.path.join(ROOT, "outputs", f"ep{a.ep}_series_film_mmh3_fs.mp4")
     if not rs.concat_shots(ENG, files, film):

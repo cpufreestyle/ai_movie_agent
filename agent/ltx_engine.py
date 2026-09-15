@@ -43,6 +43,139 @@ from .llmutil import log
 from .video_engine import VideoEngine
 
 
+# ---------- workflow 注入用的纯函数（放模块级，避免嵌套函数堆高圈复杂度） ----------
+
+def _pick_node(wf: dict, nodes_cfg: dict, role: str,
+               *class_types: str) -> dict | None:
+    """按配置的语义名取节点；未配置时按 class_type 兜底找第一个匹配节点。"""
+    nid = nodes_cfg.get(role)
+    if nid and nid in wf:
+        return wf[nid]
+    for ct in class_types:
+        for nd in wf.values():
+            if isinstance(nd, dict) and nd.get("class_type") == ct:
+                return nd
+    return None
+
+
+def _set_in(node: dict | None, key: str, value) -> None:
+    """给节点的 inputs[key] 赋值（节点为 None 时静默跳过）。"""
+    if node is not None:
+        node.setdefault("inputs", {})[key] = value
+
+
+def _inject_unet(wf: dict, nodes_cfg: dict, gguf: str, checkpoint: str) -> None:
+    """transformer 注入：配了 unet_gguf 就换成 UnetLoaderGGUF，否则 UNETLoader。
+
+    GGUF 节点只接受 unet_name，故整体替换 inputs，避免遗留 UNETLoader 字段。
+    """
+    nd = _pick_node(wf, nodes_cfg, "unet", "UNETLoader")
+    if nd is None:
+        return
+    if gguf:
+        nd["class_type"] = "UnetLoaderGGUF"
+        nd["inputs"] = {"unet_name": gguf}
+    else:
+        _set_in(nd, "unet_name", checkpoint)
+
+
+def _inject_clip(wf: dict, nodes_cfg: dict, gguf: str, text_encoder: str) -> None:
+    """文本编码器注入：配了 clip_gguf 换 CLIPLoaderGGUF，否则 CLIPLoader + int8。"""
+    nd = _pick_node(wf, nodes_cfg, "clip_12b", "CLIPLoader")
+    if nd is None:
+        return
+    if gguf:
+        nd["class_type"] = "CLIPLoaderGGUF"
+        nd["inputs"] = {"clip_name": gguf,
+                        "type": (nd.get("inputs") or {}).get("type", "ltx")}
+    else:
+        _set_in(nd, "clip_name", text_encoder)
+
+
+def _inject_resolution(wf: dict, nodes_cfg: dict, resolution: str, snap) -> None:
+    """分辨率注入：吸附到 32 整除并提示。
+
+    LTX-2.5 要求宽高被 32 整除，非法值会到 ComfyUI 才报错；这里先吸附并提示，
+    避免「提交成功但出片尺寸不对」的隐蔽问题。
+    """
+    try:
+        rw, rh = (int(x) for x in resolution.lower().split("x"))
+    except Exception:
+        return
+    if not (rw and rh):
+        return
+    srw, srh = snap(rw), snap(rh)
+    if (srw, srh) != (rw, rh):
+        log(f"  [ltx] 分辨率 {rw}x{rh} 非 32 整除，已吸附为 {srw}x{srh}")
+    latent = _pick_node(wf, nodes_cfg, "latent", "EmptyLTXVLatentVideo")
+    _set_in(latent, "width", srw)
+    _set_in(latent, "height", srh)
+
+
+def _cloud_branch_nodes(wf: dict, nodes_cfg: dict) -> set:
+    """云端/增强提示词分支的全部节点 ID（编码器 + 相关开关 + 2B 编码器）。"""
+    delete = {nid for nid, n in wf.items()
+              if n.get("class_type") in ("GemmaAPITextEncode",
+                                         "TextGenerateLTX2Prompt")}
+    delete |= _upstream_switch_ids(wf, delete)
+    delete |= _named_ids(wf, nodes_cfg, "clip_2b", "prompt_switch")
+    return delete
+
+
+def _upstream_switch_ids(wf: dict, targets: set) -> set:
+    """找出 on_true/on_false 指向 targets 的 ComfySwitchNode。"""
+    out: set = set()
+    for nid, n in wf.items():
+        if n.get("class_type") != "ComfySwitchNode":
+            continue
+        for k in ("on_true", "on_false"):
+            v = (n.get("inputs") or {}).get(k)
+            if isinstance(v, list) and len(v) == 2 and str(v[0]) in targets:
+                out.add(nid)
+    return out
+
+
+def _named_ids(wf: dict, nodes_cfg: dict, *keys: str) -> set:
+    """按语义名取节点 ID，仅保留确实存在于 wf 的。"""
+    out: set = set()
+    for key in keys:
+        nid = nodes_cfg.get(key)
+        if nid and nid in wf:
+            out.add(nid)
+    return out
+
+
+def _dangling(node: dict, key: str, delete: set) -> bool:
+    """node.inputs[key] 是否指向被删除的节点（或压根没接）。"""
+    src = (node.get("inputs") or {}).get(key)
+    if src is None:
+        return True
+    return isinstance(src, list) and len(src) == 2 and str(src[0]) in delete
+
+
+def _rewire_guider(wf: dict, cond) -> None:
+    """CFGGuider 的 positive/negative 改接本地 conditioning。"""
+    if not cond:
+        return
+    for n in wf.values():
+        if n.get("class_type") == "CFGGuider":
+            n["inputs"]["positive"] = [cond, 0]
+            n["inputs"]["negative"] = [cond, 0]
+
+
+def _rewire_after_strip(wf: dict, delete: set, prompt_id: str) -> None:
+    """把删掉云端分支后悬空的连线重接到本地提示词/conditioning。"""
+    cond = next((nid for nid, n in wf.items()
+                 if n.get("class_type") == "LTXVConditioning"), None)
+    _rewire_guider(wf, cond)
+    # 提示词来源与 PreviewAny 重指到本地提示词，避免悬空引用
+    for n in wf.values():
+        if n.get("class_type") == "CLIPTextEncode" and _dangling(n, "text", delete):
+            n["inputs"]["text"] = [prompt_id, 0]
+        elif n.get("class_type") == "PreviewAny" and _dangling(n, "source", delete):
+            n["inputs"]["source"] = [prompt_id, 0]
+
+
 class LTXEngine(VideoEngine):
     TAG = "ltx"
     #: LTX-2.5 是 T2V/I2V 引擎，白模条件（参考图/参考视频/Fun Control）全不支持。
@@ -176,44 +309,16 @@ class LTXEngine(VideoEngine):
 
     def _inject(self, wf: dict, prompt: str, seed: int | None,
                 image: str | None) -> dict:
-        """按 config.comfyui_ltx.nodes 的节点 ID 注入参数（兼容无映射时按类型兜底）。"""
+        """按 config.comfyui_ltx.nodes 的节点 ID 注入参数（兼容无映射时按类型兜底）。
+
+        各参数的注入细节拆到模块级 _inject_* 里；本函数只做编排。
+        """
         wf = copy.deepcopy(wf)
         seed = seed if seed is not None else self.seed
         nodes_cfg = self.ltx.get("nodes") or {}
 
-        def get_node(role: str, *class_types: str) -> dict | None:
-            nid = nodes_cfg.get(role)
-            if nid and nid in wf:
-                return wf[nid]
-            for ct in class_types:
-                for nd in wf.values():
-                    if isinstance(nd, dict) and nd.get("class_type") == ct:
-                        return nd
-            return None
-
-        def set_in(node: dict | None, key: str, value):
-            if node is not None:
-                node.setdefault("inputs", {})[key] = value
-
-        # transformer：配了 unet_gguf 就换成 UnetLoaderGGUF(ComfyUI-GGUF)，否则 UNETLoader
-        unet_nd = get_node("unet", "UNETLoader")
-        if unet_nd is not None:
-            if self.unet_gguf:
-                # GGUF 节点只接受 unet_name，整体替换 inputs 避免遗留 UNETLoader 字段
-                unet_nd["class_type"] = "UnetLoaderGGUF"
-                unet_nd["inputs"] = {"unet_name": self.unet_gguf}
-            else:
-                set_in(unet_nd, "unet_name", self.checkpoint)
-
-        # 文本编码器：配了 clip_gguf 换 CLIPLoaderGGUF，否则 CLIPLoader + int8
-        clip_nd = get_node("clip_12b", "CLIPLoader")
-        if clip_nd is not None:
-            if self.clip_gguf:
-                clip_nd["class_type"] = "CLIPLoaderGGUF"
-                clip_nd["inputs"] = {"clip_name": self.clip_gguf,
-                                     "type": (clip_nd.get("inputs") or {}).get("type", "ltx")}
-            else:
-                set_in(clip_nd, "clip_name", self.text_encoder)
+        _inject_unet(wf, nodes_cfg, self.unet_gguf, self.checkpoint)
+        _inject_clip(wf, nodes_cfg, self.clip_gguf, self.text_encoder)
 
         # 音视频 VAE：两个 VAELoader 必须分别填各自权重（不能都落默认值 pixel_space）
         vae_nodes = self._resolve_vae_nodes(wf)
@@ -223,30 +328,20 @@ class LTXEngine(VideoEngine):
             wf[vae_nodes["video"]].setdefault("inputs", {})["vae_name"] = self.video_vae
 
         # 提示词 / 负向提示词（PrimitiveStringMultiline.value）
-        set_in(get_node("prompt", "PrimitiveStringMultiline"), "value", prompt)
-        set_in(get_node("negative", "PrimitiveStringMultiline"), "value", self.negative or "")
+        _set_in(_pick_node(wf, nodes_cfg, "prompt", "PrimitiveStringMultiline"),
+                "value", prompt)
+        _set_in(_pick_node(wf, nodes_cfg, "negative", "PrimitiveStringMultiline"),
+                "value", self.negative or "")
 
         # 帧率 / 时长（秒）= 帧数 / fps
-        set_in(get_node("fps", "PrimitiveFloat"), "value", self.fps)
-        set_in(get_node("duration", "PrimitiveFloat"),
-               "value", round(self.num_frames / self.fps, 3))
+        _set_in(_pick_node(wf, nodes_cfg, "fps", "PrimitiveFloat"), "value", self.fps)
+        _set_in(_pick_node(wf, nodes_cfg, "duration", "PrimitiveFloat"),
+                "value", round(self.num_frames / self.fps, 3))
 
         # 随机种子
-        set_in(get_node("seed", "RandomNoise"), "noise_seed", seed)
+        _set_in(_pick_node(wf, nodes_cfg, "seed", "RandomNoise"), "noise_seed", seed)
 
-        # 分辨率：LTX-2.5 要求宽高被 32 整除，非法值会到 ComfyUI 才报错；
-        # 这里先吸附并提示，避免"提交成功但出片尺寸不对"的隐蔽问题。
-        try:
-            rw, rh = (int(x) for x in self.resolution.lower().split("x"))
-        except Exception:
-            rw = rh = None
-        if rw and rh:
-            srw, srh = self._snap_dim(rw), self._snap_dim(rh)
-            if (srw, srh) != (rw, rh):
-                log(f"  [ltx] 分辨率 {rw}x{rh} 非 32 整除，已吸附为 {srw}x{srh}")
-            rw, rh = srw, srh
-            set_in(get_node("latent", "EmptyLTXVLatentVideo"), "width", rw)
-            set_in(get_node("latent", "EmptyLTXVLatentVideo"), "height", rh)
+        _inject_resolution(wf, nodes_cfg, self.resolution, self._snap_dim)
 
         # 帧数：latent 的总帧数 = length(或 frames_number) × batch_size。
         # 本 workflow 把视频/音频两个 latent 的 batch_size 都硬编码成 121
@@ -256,28 +351,41 @@ class LTXEngine(VideoEngine):
         # 这里把两个 latent 的 batch_size 都强制为 1，使总帧数 == config.num_frames。
         # 注意必须同时改两个：只改视频会让 AV 拼接形状不匹配而报
         # "Sizes of tensors must match ... Expected size 1 but got size 121"。
-        set_in(get_node("latent", "EmptyLTXVLatentVideo"), "batch_size", 1)
-        set_in(get_node("audio_latent", "LTXVEmptyLatentAudio"), "batch_size", 1)
+        _set_in(_pick_node(wf, nodes_cfg, "latent", "EmptyLTXVLatentVideo"),
+                "batch_size", 1)
+        _set_in(_pick_node(wf, nodes_cfg, "audio_latent", "LTXVEmptyLatentAudio"),
+                "batch_size", 1)
 
         # 图像分支：I2V 用真实起始帧；T2V 上传占位图仅用于让 LoadImage 通过校验
-        # （图像链由 bypass 控制，T2V 下 bypass=True，占位图不影响成片）
-        limg = get_node("load_image", "LoadImage")
+        self._inject_image_branch(wf, nodes_cfg, image)
+        # 提示词来源：始终走本地提示词（5508），不依赖 Gemma API（需 api_key）
+        _set_in(_pick_node(wf, nodes_cfg, "prompt_switch", "ComfySwitchNode"),
+                "switch", False)
+        return wf
+
+    def _inject_image_branch(self, wf: dict, nodes_cfg: dict,
+                             image: str | None) -> bool:
+        """图像分支注入，返回是否使用真实起始帧（I2V）。
+
+        I2V：上传真实起始帧；T2V：上传占位图（图像链由 bypass 控制，占位图不影响成片）。
+        """
+        limg = _pick_node(wf, nodes_cfg, "load_image", "LoadImage")
         has_img = bool(image and os.path.exists(image))
         if limg is not None:
-            if has_img:
-                meta = self.client.upload_image(image)
-            else:
-                ph = os.path.join(tempfile.gettempdir(), "ltx_placeholder.png")
-                self._make_placeholder_png(ph)
-                meta = self.client.upload_image(ph)
+            meta = self.client.upload_image(image) if has_img else self._upload_placeholder()
             img_name = (meta or {}).get("name") or (meta or {}).get("filename")
             if img_name:
                 limg.setdefault("inputs", {})["image"] = img_name
         # I2V 使能：有图=True（使用起始帧），无图=False（T2V bypass）
-        set_in(get_node("i2v_enable", "PrimitiveBoolean"), "value", has_img)
-        # 提示词来源：始终走本地提示词（5508），不依赖 Gemma API（需 api_key）
-        set_in(get_node("prompt_switch", "ComfySwitchNode"), "switch", False)
-        return wf
+        _set_in(_pick_node(wf, nodes_cfg, "i2v_enable", "PrimitiveBoolean"),
+                "value", has_img)
+        return has_img
+
+    def _upload_placeholder(self) -> dict:
+        """上传 1x1 占位图（T2V 下让 LoadImage 通过 ComfyUI 校验）。"""
+        ph = os.path.join(tempfile.gettempdir(), "ltx_placeholder.png")
+        self._make_placeholder_png(ph)
+        return self.client.upload_image(ph)
 
     def _apply_post(self, wf: dict) -> dict:
         """在最终视频保存节点前插入质量后处理（超分 + 锐化）。
@@ -334,46 +442,13 @@ class LTXEngine(VideoEngine):
         输入；剔除后管线只依赖 transformer(nvfp4) + 12B 文本编码器，更省显存/下载，
         且与“本地 LLM 写提示词”的目标一致（无需云 api_key / 额外大模型）。
         """
-        gemma = [nid for nid, n in wf.items()
-                 if n.get("class_type") == "GemmaAPITextEncode"]
-        textgen = [nid for nid, n in wf.items()
-                   if n.get("class_type") == "TextGenerateLTX2Prompt"]
-        delete: set[str] = set(gemma) | set(textgen)
-        # 上游开关：on_true/on_false 指向被删节点的 ComfySwitchNode
-        for nid, n in wf.items():
-            if n.get("class_type") == "ComfySwitchNode":
-                for k in ("on_true", "on_false"):
-                    v = n["inputs"].get(k)
-                    if isinstance(v, list) and len(v) == 2 and str(v[0]) in delete:
-                        delete.add(nid)
-        # 2B 文本编码器（只喂 textgen）与 prompt_switch（输出由本地提示词直连替代）
-        for key in ("clip_2b", "prompt_switch"):
-            nid = self.ltx.get("nodes", {}).get(key)
-            if nid and nid in wf:
-                delete.add(nid)
+        nodes_cfg = self.ltx.get("nodes") or {}
+        delete = _cloud_branch_nodes(wf, nodes_cfg)
         if not delete:
             return wf
-
         # 重接：本地 conditioning -> CFGGuider；本地提示词 -> CLIPTextEncode
-        cond = next((nid for nid, n in wf.items()
-                     if n.get("class_type") == "LTXVConditioning"), None)
-        for nid, n in wf.items():
-            if n.get("class_type") == "CFGGuider" and cond:
-                n["inputs"]["positive"] = [cond, 0]
-                n["inputs"]["negative"] = [cond, 0]
-        prompt_id = self.ltx.get("nodes", {}).get("prompt", "5508")
-        for nid, n in wf.items():
-            if n.get("class_type") == "CLIPTextEncode":
-                src = n["inputs"].get("text")
-                if src is None or (isinstance(src, list) and len(src) == 2
-                                   and str(src[0]) in delete):
-                    n["inputs"]["text"] = [prompt_id, 0]
-        # PreviewAny 重指到本地提示词，避免悬空引用
-        for nid, n in wf.items():
-            if n.get("class_type") == "PreviewAny":
-                src = n["inputs"].get("source")
-                if isinstance(src, list) and len(src) == 2 and str(src[0]) in delete:
-                    n["inputs"]["source"] = [prompt_id, 0]
+        prompt_id = nodes_cfg.get("prompt", "5508")
+        _rewire_after_strip(wf, delete, prompt_id)
         for nid in delete:
             wf.pop(nid, None)
         return wf

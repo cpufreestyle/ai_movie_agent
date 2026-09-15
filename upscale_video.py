@@ -92,6 +92,70 @@ def concat_videos(ff, parts, out):
         pass
 
 
+def _remove_quiet(paths) -> None:
+    """尽力删除中间文件（失败忽略）。"""
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _run_full(a, client, ff, base: str, out_dir: str, total: int, fps: int,
+              final: str) -> None:
+    """整片分段超分：逐段跑 → 拼接 → 只混回一次原生立体声（避免多段接缝）。"""
+    chunk = a.chunk
+    stem = os.path.splitext(base)[0]
+    segs = []
+    start, idx = 0, 0
+    while start < total:
+        lim = min(chunk, total - start)
+        seg = os.path.join(out_dir, f".{stem}_seg{idx:03d}.mp4")
+        if (not a.force) and os.path.exists(seg):
+            print(f"[info] 分段 {idx} 已存在, 跳过 (start={start})", flush=True)
+        else:
+            print(f"[info] 分段 {idx} start={start} limit={lim} ...", flush=True)
+            silent = run_one(client, base, out_dir, fps, start, lim,
+                             a.model, a.sharpen, a.crf)
+            shutil.move(silent, seg)
+            print(f"[info] 分段 {idx} 完成 -> {seg}", flush=True)
+        segs.append(seg)
+        start += lim
+        idx += 1
+    print(f"[info] 拼接 {len(segs)} 段静音超分片...", flush=True)
+    silent_full = os.path.join(out_dir, f".{stem}_silent.mp4")
+    concat_videos(ff, segs, silent_full)
+    cmd = [ff, "-y", "-i", silent_full, "-i", a.src,
+           "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
+           "-shortest", final]
+    print(f"[info] 混音: {' '.join(cmd)}", flush=True)
+    subprocess.run(cmd, check=False)
+    _remove_quiet([*segs, silent_full])
+    print("done", final)
+
+
+def _run_single(a, client, ff, base: str, out_dir: str, fps: int,
+                final: str) -> None:
+    """单段超分（原逻辑）：跑工作流 → 混回原片对应片段的原生立体声音轨。"""
+    wf = build_workflow(base, a.model, a.sharpen, fps, a.limit, a.start, a.crf)
+    print("[info] 提交超分工作流...", flush=True)
+    paths = client.run_workflow(wf, out_dir, timeout=1800)
+    videos = [p for p in paths if p.lower().endswith((".mp4", ".webm", ".mov"))]
+    if not videos:
+        print("[err] 未产出超分视频")
+        raise SystemExit(1)
+    silent = max(videos, key=os.path.getmtime)
+    print(f"[info] 超分静音片: {silent}", flush=True)
+    seg_args = (["-ss", f"{a.start / fps:.3f}", "-t", f"{(a.limit or 1e9) / fps:.3f}"]
+                if (a.start or a.limit) else [])
+    cmd = [ff, "-y", "-i", silent] + seg_args + ["-i", a.src,
+            "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
+            "-shortest", final]
+    print(f"[info] 混音: {' '.join(cmd)}", flush=True)
+    subprocess.run(cmd, check=False)
+    print("done", final)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
@@ -131,68 +195,11 @@ def main():
     ff = imageio_ffmpeg.get_ffmpeg_exe()
     out_dir = os.path.dirname(os.path.abspath(a.dst))
     os.makedirs(out_dir, exist_ok=True)
-    final = a.dst
 
     if a.full:
-        chunk = a.chunk
-        stem = os.path.splitext(base)[0]
-        segs = []
-        start, idx = 0, 0
-        while start < total:
-            lim = min(chunk, total - start)
-            seg = os.path.join(out_dir, f".{stem}_seg{idx:03d}.mp4")
-            if (not a.force) and os.path.exists(seg):
-                print(f"[info] 分段 {idx} 已存在, 跳过 (start={start})", flush=True)
-                segs.append(seg)
-                start += lim
-                idx += 1
-                continue
-            print(f"[info] 分段 {idx} start={start} limit={lim} ...", flush=True)
-            silent = run_one(client, base, out_dir, fps, start, lim,
-                             a.model, a.sharpen, a.crf)
-            shutil.move(silent, seg)
-            segs.append(seg)
-            print(f"[info] 分段 {idx} 完成 -> {seg}", flush=True)
-            start += lim
-            idx += 1
-        print(f"[info] 拼接 {len(segs)} 段静音超分片...", flush=True)
-        silent_full = os.path.join(out_dir, f".{stem}_silent.mp4")
-        concat_videos(ff, segs, silent_full)
-        # 整片只混回一次原生立体声，避免多段音频接缝
-        cmd = [ff, "-y", "-i", silent_full, "-i", a.src,
-               "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
-               "-shortest", final]
-        print(f"[info] 混音: {' '.join(cmd)}", flush=True)
-        subprocess.run(cmd, check=False)
-        for s in segs:
-            try: os.remove(s)
-            except OSError: pass
-        try: os.remove(silent_full)
-        except OSError: pass
-        print("done", final)
+        _run_full(a, client, ff, base, out_dir, total, fps, a.dst)
         return
-
-    # 单段模式（原逻辑）
-    wf = build_workflow(base, a.model, a.sharpen, fps, a.limit, a.start, a.crf)
-    print("[info] 提交超分工作流...", flush=True)
-    paths = client.run_workflow(wf, out_dir, timeout=1800)
-    videos = [p for p in paths if p.lower().endswith((".mp4", ".webm", ".mov"))]
-    if not videos:
-        print("[err] 未产出超分视频")
-        raise SystemExit(1)
-    silent = max(videos, key=os.path.getmtime)
-    print(f"[info] 超分静音片: {silent}", flush=True)
-
-    # 混回原片对应片段的原生立体声音轨
-    seg_args = []
-    if a.start or a.limit:
-        seg_args = ["-ss", f"{a.start / fps:.3f}", "-t", f"{(a.limit or 1e9) / fps:.3f}"]
-    cmd = [ff, "-y", "-i", silent] + seg_args + ["-i", a.src,
-            "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
-            "-shortest", final]
-    print(f"[info] 混音: {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, check=False)
-    print("done", final)
+    _run_single(a, client, ff, base, out_dir, fps, a.dst)
 
 
 if __name__ == "__main__":

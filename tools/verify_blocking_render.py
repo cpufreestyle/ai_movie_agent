@@ -54,17 +54,49 @@ def _instrument(code: str) -> str:
     return code
 
 
+def _clean_dir(out: str) -> None:
+    """清空输出目录里的旧产物（失败忽略）。"""
+    for f in os.listdir(out):
+        try:
+            os.remove(os.path.join(out, f))
+        except OSError:
+            pass
+
+
+def _parse_vtimes(stdout: str) -> dict:
+    """从渲染 stdout 里抽取每张图的耗时（VTIME 行）。"""
+    times = {}
+    for ln in (stdout or "").splitlines():
+        if ln.startswith("VTIME"):
+            _, name, sec = ln.split()[:3]
+            times[name] = float(sec)
+            print(f"[verify]   {name:<7} {sec:>6}s")
+    return times
+
+
+def _check_artifacts(out: str) -> list:
+    """校验 4 张产物存在且非空，返回缺失列表（打印大小与 sha256）。"""
+    bad = []
+    for nm in NAMES:
+        p = os.path.join(out, nm)
+        if not os.path.exists(p) or os.path.getsize(p) < 512:
+            bad.append(nm)
+            print(f"[verify]   {nm:<11} MISSING/EMPTY")
+            continue
+        with open(p, "rb") as f:
+            b = f.read()
+        print(f"[verify]   {nm:<11} {len(b):>8}B  "
+              f"sha256={hashlib.sha256(b).hexdigest()[:16]}")
+    return bad
+
+
 def cmd_render(a) -> int:
     from agent.blocking import BlockingGenerator
     from tools.blender_mcp import BlenderMCP
 
     out = os.path.join(OUTBASE, a.tag)
     os.makedirs(out, exist_ok=True)
-    for f in os.listdir(out):
-        try:
-            os.remove(os.path.join(out, f))
-        except OSError:
-            pass
+    _clean_dir(out)
 
     w, h = (int(v) for v in a.size.lower().split("x"))
     cfg = {"blender": {"enabled": True, "engine": a.engine, "width": w, "height": h,
@@ -88,26 +120,11 @@ def cmd_render(a) -> int:
     if not res["ok"]:
         print("[verify] error =", (res["error"] or "")[:2000], file=sys.stderr)
         return 1
-    times = {}
-    for ln in (res["stdout"] or "").splitlines():
-        if ln.startswith("VTIME"):
-            _, name, sec = ln.split()[:3]
-            times[name] = float(sec)
-            print(f"[verify]   {name:<7} {sec:>6}s")
+    times = _parse_vtimes(res["stdout"])
     if times:
         print(f"[verify]   {'TOTAL':<7} {sum(times.values()):>6.2f}s")
     print("[verify] --- 产物 ---")
-    bad = []
-    for nm in NAMES:
-        p = os.path.join(out, nm)
-        if not os.path.exists(p) or os.path.getsize(p) < 512:
-            bad.append(nm)
-            print(f"[verify]   {nm:<11} MISSING/EMPTY")
-            continue
-        with open(p, "rb") as f:
-            b = f.read()
-        print(f"[verify]   {nm:<11} {len(b):>8}B  "
-              f"sha256={hashlib.sha256(b).hexdigest()[:16]}")
+    bad = _check_artifacts(out)
     if bad:
         print(f"[verify] 失败：这些产物缺失或过小 {bad}", file=sys.stderr)
         return 1

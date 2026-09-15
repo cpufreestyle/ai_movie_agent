@@ -188,19 +188,132 @@ def resolve_scheme(cfg: dict, args) -> dict:
     }
 
 
+def _docker_steps(sch: dict, gpu: str, comfyui_local: bool, engine: str) -> list:
+    """docker 部署的步骤（起容器 + 拉 LLM 模型）。"""
+    up = ["docker", "compose", "up", "-d"]
+    gpu_profile = comfyui_local and gpu != "none" and engine != "sol_h3"
+    if gpu_profile:
+        up = (["docker", "compose", "-f", "docker-compose.yml",
+               "-f", "docker-compose.amd.yml", "--profile", "gpu", "up", "-d"]
+              if gpu == "amd"
+              else ["docker", "compose", "--profile", "gpu", "up", "-d"])
+    return [
+        {
+            "title": "启动容器（agent + ollama" + (" + comfyui" if gpu_profile else "") + "）",
+            "cmds": [("docker compose up", up)],
+            "runnable": True,
+            "manual": "",
+        },
+        {
+            "title": "拉取 LLM 模型（容器内 Ollama）",
+            "cmds": [("ollama pull", ["docker", "compose", "exec", "ollama",
+                                      "ollama", "pull", sch["llm_model"]])],
+            "runnable": False,  # 属模型下载，按约定不自动跑
+            "manual": "",
+        },
+    ]
+
+
+def _native_steps(sch: dict, gpu: str, comfyui_local: bool) -> list:
+    """原生部署的步骤（建 venv + 装依赖 + Ollama / ComfyUI 提示）。"""
+    vpy = venv_python()
+    steps = [
+        {
+            "title": "创建虚拟环境并安装依赖",
+            "cmds": [
+                ("创建 venv", [sys.executable, "-m", "venv", ".venv"]),
+                ("安装依赖", [vpy, "-m", "pip", "install", "-U", "pip"]),
+                ("安装依赖", [vpy, "-m", "pip", "install", "-r", "requirements.txt"]),
+            ],
+            "runnable": True,
+            "manual": "",
+        },
+        {
+            "title": "安装并启动 Ollama（需自行装，非 pip 包）",
+            "cmds": [],
+            "runnable": False,
+            "manual": f"装好 Ollama 后执行：  ollama pull {sch['llm_model']}",
+        },
+    ]
+    if comfyui_local and gpu != "none":
+        steps.append({
+            "title": "启动本机 ComfyUI（需自行装，非 pip 包）",
+            "cmds": [],
+            "runnable": False,
+            "manual": "在显卡机上启动 ComfyUI，并确认引擎节点（LTX-2.5 / MiniMax H3）已装。",
+        })
+    return steps
+
+
+def _webui_step(sch: dict, method: str) -> dict:
+    """启动 WebUI 步骤（长驻进程，只打印不自动跑）。"""
+    start_cmd = ("浏览器打开 http://localhost:8000" if method == "docker"
+                 else (".\\start_webui_windows.bat" if sch["os"] == "windows"
+                       else "./start_webui.sh"))
+    return {"title": "启动 WebUI", "cmds": [], "runnable": False, "manual": start_cmd}
+
+
+def _weights_step(sch: dict, args, gpu: str, engine: str,
+                  comfyui_local: bool) -> dict:
+    """视频权重下载步骤（按引擎 / 是否有本地 ComfyUI 分档）。"""
+    if engine == "sol_h3":
+        return {
+            "title": "视频权重（DGX Spark 远程 Sol-H3）",
+            "cmds": [],
+            "runnable": False,
+            "manual": "权重在 DGX Spark 本地，由 deploy/sol_h3_spark/deploy_sol_h3_spark.sh "
+                      "在其上执行 download_checkpoints.py。本机只跑 agent，"
+                      f"通过 engine.sol_h3.api 指向 DGX 上的 sol_h3_server.py（{sch['api']}）。",
+        }
+    if comfyui_local and gpu != "none":
+        dl_script = ("download_mmh3_models.py" if engine == "comfyui_mmH3"
+                     else "download_ltx_models.py")
+        models_dir = args.models_dir or default_models_dir(sch["os"])
+        dl = ["python", dl_script, "--gpu", gpu, "--models-dir", models_dir]
+        return {
+            "title": f"下载视频权重（{engine} / {gpu}）",
+            "cmds": [("下载权重", dl)],
+            "runnable": bool(args.with_weights),  # 默认不跑，需 --with-weights 授权
+            "manual": "" if args.with_weights else "需授权：加 --with-weights --models-dir <ComfyUI/models 路径>",
+        }
+    if not comfyui_local:
+        return {
+            "title": "视频权重（远程 ComfyUI）",
+            "cmds": [],
+            "runnable": False,
+            "manual": f"ComfyUI 指向远程 {sch['api']}，权重在远程显卡机按上节下载，本机不用下。",
+        }
+    return {
+        "title": "视频权重",
+        "cmds": [],
+        "runnable": False,
+        "manual": "本机无独显，无法本地出视频；请把 COMFYUI_API 指向远程有显卡的 ComfyUI。",
+    }
+
+
+def _blender_step() -> dict:
+    """Blender 白模提示步骤。"""
+    return {
+        "title": "Blender 白模（已启用，需手动装）",
+        "cmds": [],
+        "runnable": False,
+        "manual": "Blender 白模已启用：需在 Blender 里装 blender_mcp_addon 并启用 auto_start，"
+                  "deploy 不自动装 Blender。详见 docs/wsl2_deploy_plan.md。",
+    }
+
+
 def build_steps(sch: dict, args) -> list:
     """返回步骤列表：每步 {title, cmds:[(label,argv)], runnable, manual}。"""
-    steps = []
     method, gpu, engine = sch["method"], sch["gpu"], sch["engine"]
     comfyui_local, blender = sch["comfyui_local"], sch["blender"]
 
     # 1) .env（apply 时由脚本写；这里给出内容）
-    steps.append({
+    steps = [{
         "title": "生成 .env",
         "cmds": [],
         "runnable": True,
         "manual": "（deploy 自动写入 .env，内容见上方「.env 内容」）",
-    })
+    }]
 
     if engine == "sol_h3":
         steps.append({
@@ -214,113 +327,12 @@ def build_steps(sch: dict, args) -> list:
                       "并把 engine.backend 设为 sol_h3（或 stage_profiles.G.engine=sol_h3）。",
         })
 
-    if method == "docker":
-        # docker compose up 命令
-        up = ["docker", "compose", "up", "-d"]
-        amd = gpu == "amd"
-        if comfyui_local and gpu != "none" and engine != "sol_h3":
-            if amd:
-                up = ["docker", "compose", "-f", "docker-compose.yml",
-                      "-f", "docker-compose.amd.yml", "--profile", "gpu", "up", "-d"]
-            else:
-                up = ["docker", "compose", "--profile", "gpu", "up", "-d"]
-        steps.append({
-            "title": "启动容器（agent + ollama" + (" + comfyui" if (comfyui_local and gpu != "none" and engine != "sol_h3") else "") + "）",
-            "cmds": [("docker compose up", up)],
-            "runnable": True,
-            "manual": "",
-        })
-        steps.append({
-            "title": "拉取 LLM 模型（容器内 Ollama）",
-            "cmds": [("ollama pull", ["docker", "compose", "exec", "ollama",
-                                       "ollama", "pull", sch["llm_model"]])],
-            "runnable": False,  # 属模型下载，按约定不自动跑
-            "manual": "",
-        })
-    else:
-        # 原生：建 venv + 装依赖
-        vpy = venv_python()
-        steps.append({
-            "title": "创建虚拟环境并安装依赖",
-            "cmds": [
-                ("创建 venv", [sys.executable, "-m", "venv", ".venv"]),
-                ("安装依赖", [vpy, "-m", "pip", "install", "-U", "pip"]),
-                ("安装依赖", [vpy, "-m", "pip", "install", "-r", "requirements.txt"]),
-            ],
-            "runnable": True,
-            "manual": "",
-        })
-        steps.append({
-            "title": "安装并启动 Ollama（需自行装，非 pip 包）",
-            "cmds": [],
-            "runnable": False,
-            "manual": f"装好 Ollama 后执行：  ollama pull {sch['llm_model']}",
-        })
-        if comfyui_local and gpu != "none":
-            steps.append({
-                "title": "启动本机 ComfyUI（需自行装，非 pip 包）",
-                "cmds": [],
-                "runnable": False,
-                "manual": "在显卡机上启动 ComfyUI，并确认引擎节点（LTX-2.5 / MiniMax H3）已装。",
-            })
-
-    # 启动 WebUI（长驻进程，只打印不自动跑）
-    if method == "docker":
-        start_cmd = "浏览器打开 http://localhost:8000"
-    else:
-        start_cmd = (".\\start_webui_windows.bat" if sch["os"] == "windows"
-                     else "./start_webui.sh")
-    steps.append({
-        "title": "启动 WebUI",
-        "cmds": [],
-        "runnable": False,
-        "manual": start_cmd,
-    })
-
-    # 视频权重下载（需授权）
-    if engine == "sol_h3":
-        steps.append({
-            "title": "视频权重（DGX Spark 远程 Sol-H3）",
-            "cmds": [],
-            "runnable": False,
-            "manual": "权重在 DGX Spark 本地，由 deploy/sol_h3_spark/deploy_sol_h3_spark.sh "
-                      "在其上执行 download_checkpoints.py。本机只跑 agent，"
-                      f"通过 engine.sol_h3.api 指向 DGX 上的 sol_h3_server.py（{sch['api']}）。",
-        })
-    elif comfyui_local and gpu != "none":
-        dl_script = "download_mmh3_models.py" if engine == "comfyui_mmH3" else "download_ltx_models.py"
-        models_dir = args.models_dir or default_models_dir(sch["os"])
-        dl = ["python", dl_script, "--gpu", gpu, "--models-dir", models_dir]
-        steps.append({
-            "title": f"下载视频权重（{engine} / {gpu}）",
-            "cmds": [("下载权重", dl)],
-            "runnable": bool(args.with_weights),  # 默认不跑，需 --with-weights 授权
-            "manual": "" if args.with_weights else "需授权：加 --with-weights --models-dir <ComfyUI/models 路径>",
-        })
-    elif not comfyui_local:
-        steps.append({
-            "title": "视频权重（远程 ComfyUI）",
-            "cmds": [],
-            "runnable": False,
-            "manual": f"ComfyUI 指向远程 {sch['api']}，权重在远程显卡机按上节下载，本机不用下。",
-        })
-    else:  # gpu none + 本机：无显卡无法本地出片
-        steps.append({
-            "title": "视频权重",
-            "cmds": [],
-            "runnable": False,
-            "manual": "本机无独显，无法本地出视频；请把 COMFYUI_API 指向远程有显卡的 ComfyUI。",
-        })
-
-    # Blender 提示
+    steps += (_docker_steps(sch, gpu, comfyui_local, engine) if method == "docker"
+              else _native_steps(sch, gpu, comfyui_local))
+    steps.append(_webui_step(sch, method))
+    steps.append(_weights_step(sch, args, gpu, engine, comfyui_local))
     if blender:
-        steps.append({
-            "title": "Blender 白模（已启用，需手动装）",
-            "cmds": [],
-            "runnable": False,
-            "manual": "Blender 白模已启用：需在 Blender 里装 blender_mcp_addon 并启用 auto_start，"
-                      "deploy 不自动装 Blender。详见 docs/wsl2_deploy_plan.md。",
-        })
+        steps.append(_blender_step())
     return steps
 
 

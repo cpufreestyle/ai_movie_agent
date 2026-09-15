@@ -72,57 +72,94 @@ def list_gguf(repo):
     return ok
 
 
+def _probe_source(repo, src, total):
+    """HEAD 探测总大小与最终直链；失败返回 (None, None)。
+
+    total 已给定时直接沿用，并构造默认直链（不额外发 HEAD）。
+    """
+    url = f"{MIRROR}/{repo}/resolve/main/{requests.utils.quote(src)}"
+    if total is not None:
+        return total, url
+    try:
+        h = requests.head(url, allow_redirects=True, timeout=30)
+    except Exception as e:
+        log(f"[FAIL] HEAD {repo}/{src}: {type(e).__name__}: {str(e)[:80]}")
+        return None, None
+    if h.status_code != 200:
+        log(f"[FAIL] HEAD {repo}/{src} -> HTTP {h.status_code}")
+        return None, None
+    return int(h.headers.get("Content-Length", 0) or 0), h.url
+
+
+def _stream_to_file(r, dst, mode, offset, total, dstname) -> int:
+    """把响应流写入文件，返回写入总字节数（每 512MB 打一次进度）。"""
+    written = offset
+    t0 = time.time()
+    with open(dst, mode) as f:
+        for ch in r.iter_content(CHUNK):
+            if not ch:
+                continue
+            f.write(ch)
+            written += len(ch)
+            if written % (512 * 1024 * 1024) < CHUNK:
+                el = time.time() - t0
+                spd = written / 1e6 / el if el else 0
+                pct = written / total * 100 if total else 0
+                log(f"  {dstname}: {written / 1e9:.2f}/{total / 1e9:.2f} GB "
+                    f"({pct:.1f}%) {spd:.1f} MB/s")
+    return written
+
+
+def _open_stream(url, offset, total, dstname, attempt):
+    """建立（可续传的）下载连接；返回 (响应, 写模式, 实际起点) 或 None。"""
+    mode = "ab" if offset else "wb"
+    hdr = {"Range": f"bytes={offset}-"} if offset else {}
+    log(f"[GET ] {dstname} attempt {attempt}: {offset}/{total} bytes")
+    r = requests.get(url, headers=hdr, stream=True, timeout=60, allow_redirects=True)
+    if r.status_code not in (200, 206):
+        log(f"[FAIL] GET -> {r.status_code}")
+        return None
+    if r.status_code == 200 and offset:
+        mode, offset = "wb", 0
+    return r, mode, offset
+
+
+def _download_once(url, dst, dstname, attempt, total):
+    """一次下载尝试；返回 True=完成、False=放弃、None=需重试。"""
+    offset = os.path.getsize(dst) if os.path.exists(dst) else 0
+    if total and offset >= total:
+        log(f"[SKIP] {dstname} 已完整 ({offset} bytes)")
+        return True
+    try:
+        opened = _open_stream(url, offset, total, dstname, attempt)
+        if opened is None:
+            return False
+        r, mode, offset = opened
+        written = _stream_to_file(r, dst, mode, offset, total, dstname)
+    except Exception as e:
+        log(f"[ERR ] {dstname} attempt {attempt}: {type(e).__name__}: {str(e)[:110]}")
+        return None
+    if written >= total:
+        log(f"[DONE] {dstname}: {written} bytes -> {dst}")
+        return True
+    log(f"[PART] {dstname}: {written}/{total}, retry")
+    return None
+
+
 def fetch(repo, src, dstdir, dstname, total=None):
     """单源下载，内部做 Range 续传 + 断连重试。"""
     os.makedirs(dstdir, exist_ok=True)
-    url = f"{MIRROR}/{repo}/resolve/main/{requests.utils.quote(src)}"
+    total, url = _probe_source(repo, src, total)
     if total is None:
-        try:
-            h = requests.head(url, allow_redirects=True, timeout=30)
-        except Exception as e:
-            log(f"[FAIL] HEAD {repo}/{src}: {type(e).__name__}: {str(e)[:80]}")
-            return False
-        if h.status_code != 200:
-            log(f"[FAIL] HEAD {repo}/{src} -> HTTP {h.status_code}")
-            return False
-        total = int(h.headers.get("Content-Length", 0) or 0)
-        url = h.url
+        return False
     log(f"[SRC ] {repo}/{src}  ({total / 1e9:.2f} GB)")
     dst = os.path.join(dstdir, dstname)
     for attempt in range(1, MAX_RETRY + 1):
-        offset = os.path.getsize(dst) if os.path.exists(dst) else 0
-        if total and offset >= total:
-            log(f"[SKIP] {dstname} 已完整 ({offset} bytes)")
+        res = _download_once(url, dst, dstname, attempt, total)
+        if res is True:
             return True
-        mode = "ab" if offset else "wb"
-        hdr = {"Range": f"bytes={offset}-"} if offset else {}
-        try:
-            log(f"[GET ] {dstname} attempt {attempt}: {offset}/{total} bytes")
-            r = requests.get(url, headers=hdr, stream=True, timeout=60, allow_redirects=True)
-            if r.status_code not in (200, 206):
-                log(f"[FAIL] GET -> {r.status_code}")
-                return False
-            if r.status_code == 200 and offset:
-                mode, offset = "wb", 0
-            written = offset
-            t0 = time.time()
-            with open(dst, mode) as f:
-                for ch in r.iter_content(CHUNK):
-                    if not ch:
-                        continue
-                    f.write(ch)
-                    written += len(ch)
-                    if written % (512 * 1024 * 1024) < CHUNK:
-                        el = time.time() - t0
-                        spd = written / 1e6 / el if el else 0
-                        pct = written / total * 100 if total else 0
-                        log(f"  {dstname}: {written / 1e9:.2f}/{total / 1e9:.2f} GB ({pct:.1f}%) {spd:.1f} MB/s")
-            if written >= total:
-                log(f"[DONE] {dstname}: {written} bytes -> {dst}")
-                return True
-            log(f"[PART] {dstname}: {written}/{total}, retry")
-        except Exception as e:
-            log(f"[ERR ] {dstname} attempt {attempt}: {type(e).__name__}: {str(e)[:110]}")
+        if res is False:
+            return False
         time.sleep(5)
     log(f"[GAVEUP] {dstname}")
     return False

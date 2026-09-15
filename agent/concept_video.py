@@ -193,9 +193,13 @@ def _mux_bgm(video: str, audio: str, out: str) -> bool:
         return False
 
 
-def _encode_frames(seq: list[Image.Image], out_path: str, fps: int) -> str:
-    """把帧序列编码为 mp4（OpenCV → imageio → PNG 序列 退化）。返回路径。"""
-    # 1) OpenCV
+def _nonempty(path: str) -> bool:
+    """文件存在且非空。"""
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def _try_cv2_encode(seq: list[Image.Image], out_path: str, fps: int) -> str | None:
+    """OpenCV 编码；不可用/失败返回 None（交由下一档兜底）。"""
     try:
         import cv2  # type: ignore
         import numpy as np
@@ -205,36 +209,105 @@ def _encode_frames(seq: list[Image.Image], out_path: str, fps: int) -> str:
         for f in seq:
             vw.write(cv2.cvtColor(np.array(f), cv2.COLOR_RGB2BGR))
         vw.release()
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            return out_path
     except Exception as e:
         log(f"  [concept-video] OpenCV 编码失败，尝试其它方式: {e}")
-    # 2) imageio
+        return None
+    return out_path if _nonempty(out_path) else None
+
+
+def _try_imageio_encode(seq: list[Image.Image], out_path: str,
+                        fps: int) -> str | None:
+    """imageio 编码；不可用/失败返回 None（交由下一档兜底）。"""
     try:
         import imageio.v2 as imageio  # imageio>=2.9
     except Exception:
         try:
             import imageio
         except Exception:
-            imageio = None
-    if imageio is not None:
-        try:
-            writer = imageio.get_writer(out_path, fps=fps, macro_block_size=None,
-                                         codec="libx264", quality=7)
-            for f in seq:
-                writer.append_data(f)
-            writer.close()
-            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                return out_path
-        except Exception as e:
-            log(f"  [concept-video] imageio 编码失败，退化 PNG 序列: {e}")
-    # 3) 退化：PNG 序列
-    base = os.path.splitext(out_path)[0]
-    outdir = base + "_frames"
+            return None
+    try:
+        writer = imageio.get_writer(out_path, fps=fps, macro_block_size=None,
+                                    codec="libx264", quality=7)
+        for f in seq:
+            writer.append_data(f)
+        writer.close()
+    except Exception as e:
+        log(f"  [concept-video] imageio 编码失败，退化 PNG 序列: {e}")
+        return None
+    return out_path if _nonempty(out_path) else None
+
+
+def _dump_png_frames(seq: list[Image.Image], out_path: str) -> str:
+    """最后兜底：把帧序列存成 PNG 目录，返回目录路径。"""
+    outdir = os.path.splitext(out_path)[0] + "_frames"
     os.makedirs(outdir, exist_ok=True)
     for i, f in enumerate(seq):
         f.save(os.path.join(outdir, f"frame_{i:04d}.png"))
     return outdir
+
+
+def _encode_frames(seq: list[Image.Image], out_path: str, fps: int) -> str:
+    """把帧序列编码为 mp4（OpenCV → imageio → PNG 序列 退化）。返回路径。"""
+    return (_try_cv2_encode(seq, out_path, fps)
+            or _try_imageio_encode(seq, out_path, fps)
+            or _dump_png_frames(seq, out_path))
+
+
+def _xfade_sequence(seq: list[Image.Image], n_hold: int,
+                    n_x: int) -> list[Image.Image]:
+    """把卡片帧序列展开成含交叉淡入转场的连续帧序列。"""
+    if n_x <= 0 or len(seq) <= 1:
+        return [f.copy() for f in seq for _ in range(n_hold)]
+    final: list[Image.Image] = [seq[0].copy() for _ in range(n_hold)]
+    for card in seq[1:]:
+        cf = [card.copy() for _ in range(n_hold)]
+        if len(final) >= n_x:
+            for k in range(n_x):
+                idx = len(final) - n_x + k
+                alpha = (k + 1) / (n_x + 1)
+                final[idx] = Image.blend(final[idx], cf[k], alpha)
+            final.extend(cf[n_x:])
+        else:
+            final.extend(cf)
+    return final
+
+
+def _resolve_bgm_audio(bgm, out_path: str, duration: float) -> str | None:
+    """确定 BGM 音轨文件：现成文件直接用，否则合成环境音；失败返回 None。"""
+    if isinstance(bgm, str) and os.path.exists(bgm):
+        return bgm
+    wav = out_path + ".wav"
+    return wav if _make_ambient_wav(wav, duration) else None
+
+
+def _try_mux_bgm(out_path: str, audio: str) -> bool:
+    """把 audio 混入 out_path（原地替换）。返回是否成功。"""
+    if not _ffmpeg_exe():
+        log("  [concept-video] 无 ffmpeg，跳过 BGM（仅转场）")
+        return False
+    tmp = out_path + ".bgm.mp4"
+    if not _mux_bgm(out_path, audio, tmp):
+        log("  [concept-video] ffmpeg 不可用，跳过 BGM（仅转场）")
+        return False
+    try:
+        os.remove(out_path)
+    except Exception:
+        pass
+    os.replace(tmp, out_path)
+    log("  [concept-video] 已混入 BGM")
+    return True
+
+
+def _apply_bgm(out_path: str, bgm, duration: float) -> None:
+    """BGM 混流入口：条件不满足或任何异常都静默降级（仅保留转场）。"""
+    if not (bgm and os.path.exists(out_path)):
+        return
+    try:
+        audio = _resolve_bgm_audio(bgm, out_path, duration)
+        if audio:
+            _try_mux_bgm(out_path, audio)
+    except Exception as e:
+        log(f"  [concept-video] BGM 处理跳过: {e}")
 
 
 def _write_mp4(frames: list[Image.Image], out_path: str, fps: int,
@@ -247,48 +320,12 @@ def _write_mp4(frames: list[Image.Image], out_path: str, fps: int,
     n_x = max(0, int(fps * xfade))
     seq = [f.convert("RGB") for f in frames]
 
-    # 组装含转场的帧序列
-    if n_x > 0 and len(seq) > 1:
-        final: list[Image.Image] = [seq[0].copy() for _ in range(n_hold)]
-        for card in seq[1:]:
-            cf = [card.copy() for _ in range(n_hold)]
-            if len(final) >= n_x:
-                for k in range(n_x):
-                    idx = len(final) - n_x + k
-                    alpha = (k + 1) / (n_x + 1)
-                    final[idx] = Image.blend(final[idx], cf[k], alpha)
-                final.extend(cf[n_x:])
-            else:
-                final.extend(cf)
-    else:
-        final = [f.copy() for f in seq for _ in range(n_hold)]
-
+    final = _xfade_sequence(seq, n_hold, n_x)
     result = _encode_frames(final, out_path, fps)
 
-    # BGM：仅当成功产出 mp4 且有 ffmpeg 时混入
-    if bgm and result == out_path and os.path.exists(out_path):
-        try:
-            if isinstance(bgm, str) and os.path.exists(bgm):
-                audio = bgm
-            else:
-                audio = out_path + ".wav"
-                audio = audio if _make_ambient_wav(audio, len(final) / fps) else None
-            if audio:
-                if _ffmpeg_exe():
-                    tmp = out_path + ".bgm.mp4"
-                    if _mux_bgm(out_path, audio, tmp):
-                        try:
-                            os.remove(out_path)
-                        except Exception:
-                            pass
-                        os.replace(tmp, out_path)
-                        log("  [concept-video] 已混入 BGM")
-                    else:
-                        log("  [concept-video] ffmpeg 不可用，跳过 BGM（仅转场）")
-                else:
-                    log("  [concept-video] 无 ffmpeg，跳过 BGM（仅转场）")
-        except Exception as e:
-            log(f"  [concept-video] BGM 处理跳过: {e}")
+    # BGM：仅当成功产出 mp4 时尝试混入
+    if result == out_path:
+        _apply_bgm(out_path, bgm, len(final) / fps)
     return result
 
 
@@ -346,41 +383,46 @@ def _contact_sheet(width: int, height: int, images: list[str],
     return img
 
 
-def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
-                         fps: int = 24, hold: float = 3.0, xfade: float = 0.4,
-                         bgm=None, width: int = 1280, height: int = 720,
-                         blocking_images: list[str] | None = None) -> str:
-    """把概念企划渲染成更详细的视频 demo（或 PNG 序列），返回输出路径。
+def _bib_default(bib: dict, *keys: str, default: str = "") -> str:
+    """按优先级取第一个非空字段（用于 title/logline 这类可互换字段）。"""
+    for k in keys:
+        v = bib.get(k)
+        if v:
+            return v
+    return default
 
-    卡组：封面 → 项目介绍 → 世界观设定 → 人物小传(C+真实数据) → 叙事结构
-    → 分镜(逐镜/概念规划) → 视觉参考(关键帧九宫格) → 制作链路 → 结尾。
-    卡片间交叉淡入转场；可选 BGM（需 ffmpeg）。字段缺失以派生文案兜底。
-    """
-    bib = concept if isinstance(concept, dict) else {}
-    title = bib.get("title") or bib.get("logline") or "未命名短片"
-    logline = bib.get("logline", "")
-    outline = bib.get("outline", []) or []
-    setting = bib.get("setting", "")
-    protagonist = bib.get("protagonist", "")
-    tone = bib.get("tone", "")
+
+def _append_labeled(lines: list, label: str, value) -> None:
+    """有值才追加「标签：值」一行，避免出现「主题：」空行。"""
+    if value:
+        lines.append(f"{label}：{value}")
+
+
+def _resolve_art_style(bib: dict) -> str:
+    """美术风格兜底：显式字段 > 视觉母题 > 基调化的视觉语言；都没有返回 ""。"""
+    style = bib.get("visual_style", "")
+    if style:
+        return style
     motif = bib.get("visual_motif", "")
-    theme = bib.get("theme", "")
-    visual_style = bib.get("visual_style", "")
-    three_act = bib.get("three_act") or []
-    characters = bib.get("characters") or []
-    refs = bib.get("world_refs") or []
+    if motif:
+        return motif
+    tone = bib.get("tone", "")
+    return f"{tone} 化的视觉语言" if tone else ""
 
-    cards: list[Image.Image] = []
 
-    # 1) 封面卡（片名 + 一句话梗概 + 主角提示：这是 Agent 的作品）
-    cover_lines = [logline] if logline else []
+def _cover_card(width: int, height: int, title: str, logline: str,
+                tone: str) -> Image.Image:
+    """封面卡：片名 + 一句话梗概 + 基调 + Agent 署名。"""
+    lines = [logline] if logline else []
     if tone:
-        cover_lines.append(f"基调：{tone}")
-    cover_lines.append("由本地 AI 电影 Agent 自动企划 · 全链路生成")
-    cards.append(_card(width, height, title, cover_lines, accent=(120, 200, 255)))
+        lines.append(f"基调：{tone}")
+    lines.append("由本地 AI 电影 Agent 自动企划 · 全链路生成")
+    return _card(width, height, title, lines, accent=(120, 200, 255))
 
-    # 2) ★重点：我做的 AI 电影 Agent 是什么（前置，作为视频主角）
-    agent_what = [
+
+def _agent_what_card(width: int, height: int) -> Image.Image:
+    """★重点：介绍「我做的 AI 电影 Agent 是什么」（视频主角）。"""
+    lines = [
         "我做了一个本地运行的「AI 电影 Agent」——",
         "给它一句话创意，它就能自动写出世界观、人物、分镜，",
         "再生成画面、续写成片，最后一键投稿。",
@@ -390,11 +432,13 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         "② 全自动流水线：从选题到投稿一条龙，几乎不用人动手。",
         "本届目标：用 AI 提前看见未来——让 Agent 把创意变成影像。",
     ]
-    cards.append(_card(width, height, "我做的 AI 电影 Agent · 是什么", agent_what,
-                       accent=(255, 196, 92)))
+    return _card(width, height, "我做的 AI 电影 Agent · 是什么", lines,
+                 accent=(255, 196, 92))
 
-    # 3) ★重点：全链路 A→H 流水线（逐段展开，这是 Agent 的「肌肉」）
-    pipeline_stages = [
+
+def _pipeline_card(width: int, height: int) -> Image.Image:
+    """★重点：全链路 A→H 流水线（Agent 的「肌肉」）。"""
+    lines = [
         "A 资料采集：Crawl4AI 抓取素材，沉淀灵感；",
         "B 知识沉淀：RAGFlow 本地知识库，检索与企划回填；",
         "C 概念企划：自动产出世界观 / 人物 / 三幕结构；",
@@ -404,79 +448,99 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         "G 视频导演：SkyReels / DF 做 I2V 运动生成与续写；",
         "H 自动发布：biliup-rs 一键投稿 B 站。",
     ]
-    cards.append(_card(width, height, "全链路 A→H · Agent 自动跑完", pipeline_stages,
-                       accent=(120, 200, 255)))
+    return _card(width, height, "全链路 A→H · Agent 自动跑完", lines,
+                 accent=(120, 200, 255))
 
-    # 4) 世界观设定卡（作品本身，作为 Agent 的产出示例）
-    setting_lines: list[str] = []
-    if setting:
-        setting_lines.append(f"场景 / 时代：{setting}")
-    if protagonist:
-        setting_lines.append(f"主角：{protagonist}")
-    if tone:
-        setting_lines.append(f"基调：{tone}")
-    if motif:
-        setting_lines.append(f"视觉母题：{motif}")
-    if theme:
-        setting_lines.append(f"主题：{theme}")
-    if visual_style:
-        setting_lines.append(f"美术风格：{visual_style}")
-    elif motif or tone:
-        style = "美术风格：" + (motif if motif else f"{tone} 化的视觉语言")
-        setting_lines.append(style)
-    if tone:
-        setting_lines.append(f"声音基调：以「{tone}」为底，配乐留白与电子质感交织。")
-    if not setting_lines:
-        setting_lines.append("（由 Agent 基于创意自动派生，此处为占位。）")
-    cards.append(_card(width, height, "Agent 的产出 · 世界观设定", setting_lines))
 
-    # 5) 人物小传卡（C+ 真实数据，最多 3 个）
+def _setting_card(width: int, height: int, bib: dict) -> Image.Image:
+    """世界观设定卡（作品本身，作为 Agent 的产出示例）。"""
+    lines: list[str] = []
+    _append_labeled(lines, "场景 / 时代", bib.get("setting", ""))
+    _append_labeled(lines, "主角", bib.get("protagonist", ""))
+    _append_labeled(lines, "基调", bib.get("tone", ""))
+    _append_labeled(lines, "视觉母题", bib.get("visual_motif", ""))
+    _append_labeled(lines, "主题", bib.get("theme", ""))
+    _append_labeled(lines, "美术风格", _resolve_art_style(bib))
+    tone = bib.get("tone", "")
+    if tone:
+        lines.append(f"声音基调：以「{tone}」为底，配乐留白与电子质感交织。")
+    if not lines:
+        lines.append("（由 Agent 基于创意自动派生，此处为占位。）")
+    return _card(width, height, "Agent 的产出 · 世界观设定", lines)
+
+
+def _character_lines(ch, ci: int) -> tuple:
+    """单个人物的小传文案；非 dict 时退化为纯文本。"""
+    if not isinstance(ch, dict):
+        return f"人物 {ci + 1}", [str(ch)]
+    cname = ch.get("name", f"人物 {ci + 1}")
+    clines = [f"角色：{ch['role']}"] if ch.get("role") else []
+    clines += [f"性格：{ch.get('personality', '')}",
+               f"动机：{ch.get('motivation', '')}",
+               f"弧光：{ch.get('arc', '')}"]
+    return cname, [c for c in clines if c]
+
+
+def _character_cards(width: int, height: int, characters: list) -> list:
+    """人物小传卡（最多 3 个）。"""
+    cards = []
     for ci, ch in enumerate(characters[:3]):
-        if isinstance(ch, dict):
-            cname = ch.get("name", f"人物 {ci + 1}")
-            clines = [f"角色：{ch['role']}" for _ in [0] if ch.get("role")]
-            clines += [f"性格：{ch.get('personality', '')}",
-                       f"动机：{ch.get('motivation', '')}",
-                       f"弧光：{ch.get('arc', '')}"]
-        else:
-            cname = f"人物 {ci + 1}"
-            clines = [str(ch)]
-        clines = [c for c in clines if c]
+        cname, clines = _character_lines(ch, ci)
         cards.append(_card(width, height, f"人物小传 · {cname}", clines))
+    return cards
 
-    # 6) 叙事结构卡（三幕）：优先用 enrich 产出的 three_act
+
+def _structure_card(width: int, height: int, three_act: list,
+                    logline: str, outline: list) -> tuple:
+    """叙事结构卡（三幕）：返回 (结构文案, 卡片)，文案供分镜兜底复用。"""
     if three_act:
         structure = [t if isinstance(t, str) else json.dumps(t, ensure_ascii=False)
                      for t in three_act]
     else:
         structure = _build_structure(logline, outline)
-    cards.append(_card(width, height, "叙事结构 · 三幕", structure))
+    return structure, _card(width, height, "叙事结构 · 三幕", structure)
 
-    # 7) 分镜卡：有 outline 逐镜展示；否则给出概念阶段规划
-    #    分镜卡配图优先用 Blender 白模预视图（blocking_images），其次关键帧
-    if outline:
-        for i, beat in enumerate(outline):
-            beat_text = beat if isinstance(beat, str) else json.dumps(beat, ensure_ascii=False)
-            kf = None
-            if blocking_images and i < len(blocking_images) and blocking_images[i]:
-                kf = blocking_images[i]
-            elif keyframes and i < len(keyframes):
-                kf = keyframes[i]
-            cards.append(_card(width, height, f"分镜 {i + 1} / {len(outline)}",
-                               [beat_text], image=kf if kf else None))
-    else:
-        cards.append(_card(width, height, "分镜规划（概念阶段）", structure))
 
-    # 8) 视觉参考卡：优先用白模分镜预视图，其次关键帧九宫格
-    visual_refs = blocking_images if (blocking_images and any(blocking_images)) else keyframes
-    ref_title = "视觉参考 · 白模分镜" if blocking_images else "视觉参考 · 关键帧"
-    ref_note = ("白模(Blender)分镜预视：锁定机位 / 景别 / 角色站位，供 AI 出图与视频参考。"
-                if blocking_images else
-                "关键帧将在 D 阶段由 ComfyUI / SDXL 生成，此处为占位。")
-    cards.append(_contact_sheet(width, height, visual_refs, ref_title, note=ref_note))
+def _pick_frame(i: int, blocking_images: list | None,
+                keyframes: list | None):
+    """分镜配图：白模预视优先，其次关键帧，都没有返回 None。"""
+    if blocking_images and i < len(blocking_images) and blocking_images[i]:
+        return blocking_images[i]
+    if keyframes and i < len(keyframes):
+        return keyframes[i]
+    return None
 
-    # 9) 技术栈卡（开源工具链，呼应流水线）
-    stack = [
+
+def _storyboard_cards(width: int, height: int, outline: list, structure: list,
+                      keyframes: list | None,
+                      blocking_images: list | None) -> list:
+    """分镜卡：有 outline 逐镜展示；否则给出概念阶段规划。"""
+    if not outline:
+        return [_card(width, height, "分镜规划（概念阶段）", structure)]
+    cards = []
+    for i, beat in enumerate(outline):
+        beat_text = beat if isinstance(beat, str) else json.dumps(beat, ensure_ascii=False)
+        cards.append(_card(width, height, f"分镜 {i + 1} / {len(outline)}",
+                           [beat_text],
+                           image=_pick_frame(i, blocking_images, keyframes)))
+    return cards
+
+
+def _visual_ref_card(width: int, height: int, blocking_images: list | None,
+                     keyframes: list | None) -> Image.Image:
+    """视觉参考卡：白模分镜优先，其次关键帧九宫格。"""
+    refs = blocking_images if (blocking_images and any(blocking_images)) else keyframes
+    title = "视觉参考 · 白模分镜" if blocking_images else "视觉参考 · 关键帧"
+    note = ("白模(Blender)分镜预视：锁定机位 / 景别 / 角色站位，供 AI 出图与视频参考。"
+            if blocking_images else
+            "关键帧将在 D 阶段由 ComfyUI / SDXL 生成，此处为占位。")
+    return _contact_sheet(width, height, refs, title, note=note)
+
+
+def _stack_card(width: int, height: int, fps: int, n_cards: int,
+                hold: float) -> Image.Image:
+    """技术栈卡（开源工具链，呼应流水线）。"""
+    lines = [
         "技术栈（全本地 / 开源）：",
         "Crawl4AI + RAGFlow  ——  素材与知识；",
         "MetaGPT 式多角色  ——  概念企划；",
@@ -484,17 +548,56 @@ def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
         "SkyReels-V2 / DF  ——  视频续写引擎；",
         "OpenCV / PIL  ——  demo 渲染编码（无 ffmpeg 依赖）；",
         "biliup-rs  ——  一键投稿 B 站；",
-        f"规格：{width}x{height} · {fps}fps · 约 {int(len(cards) * hold)}s demo。",
+        f"规格：{width}x{height} · {fps}fps · 约 {int(n_cards * hold)}s demo。",
     ]
-    cards.append(_card(width, height, "技术栈 · 开源工具链", stack))
+    return _card(width, height, "技术栈 · 开源工具链", lines)
 
-    # 10) 结尾卡（回到 Agent + 求三连/打赏）
-    end_lines = ["本片创意 / 规划由本地 AI 电影 Agent 自动生成。"]
+
+def _ending_card(width: int, height: int, refs: list) -> Image.Image:
+    """结尾卡（回到 Agent + 求三连/打赏）。"""
+    lines = ["本片创意 / 规划由本地 AI 电影 Agent 自动生成。"]
     if refs:
-        end_lines.append(f"知识库参考 {len(refs)} 条（RAGFlow / 本地）。")
-    end_lines.append("用 AI 提前看见未来——一个 Agent 就能拍电影。")
-    end_lines.append("欢迎三连 / 关注 / 打赏，看 Agent 把规划变成成片。")
-    cards.append(_card(width, height, "— 规划 demo 完 —", end_lines, accent=(255, 196, 92)))
+        lines.append(f"知识库参考 {len(refs)} 条（RAGFlow / 本地）。")
+    lines.append("用 AI 提前看见未来——一个 Agent 就能拍电影。")
+    lines.append("欢迎三连 / 关注 / 打赏，看 Agent 把规划变成成片。")
+    return _card(width, height, "— 规划 demo 完 —", lines, accent=(255, 196, 92))
+
+
+def render_concept_video(concept: dict, keyframes: list[str], out_path: str,
+                         fps: int = 24, hold: float = 3.0, xfade: float = 0.4,
+                         bgm=None, width: int = 1280, height: int = 720,
+                         blocking_images: list[str] | None = None) -> str:
+    """把概念企划渲染成更详细的视频 demo（或 PNG 序列），返回输出路径。
+
+    卡组：封面 → 项目介绍 → 世界观设定 → 人物小传(C+真实数据) → 叙事结构
+    → 分镜(逐镜/概念规划) → 视觉参考(关键帧九宫格) → 制作链路 → 结尾。
+    卡片间交叉淡入转场；可选 BGM（需 ffmpeg）。字段缺失以派生文案兜底。
+
+    每张卡片由独立的 _*_card 构造，本函数只负责按顺序编排。
+    """
+    bib = concept if isinstance(concept, dict) else {}
+    title = _bib_default(bib, "title", "logline", default="未命名短片")
+    logline = bib.get("logline", "")
+    outline = bib.get("outline") or []
+    three_act = bib.get("three_act") or []
+    characters = bib.get("characters") or []
+    refs = bib.get("world_refs") or []
+
+    cards: list[Image.Image] = [
+        _cover_card(width, height, title, logline, bib.get("tone", "")),
+        _agent_what_card(width, height),
+        _pipeline_card(width, height),
+        _setting_card(width, height, bib),
+    ]
+    cards += _character_cards(width, height, characters)
+
+    structure, card = _structure_card(width, height, three_act, logline, outline)
+    cards.append(card)
+    cards += _storyboard_cards(width, height, outline, structure, keyframes,
+                               blocking_images)
+    cards.append(_visual_ref_card(width, height, blocking_images, keyframes))
+    cards.append(_stack_card(width, height, fps, len(cards), hold))
+    cards.append(_ending_card(width, height, refs))
 
     result = _write_mp4(cards, out_path, fps=fps, hold=hold, xfade=xfade, bgm=bgm)
     log(f"  [concept-video] 已生成视频素材: {result}")

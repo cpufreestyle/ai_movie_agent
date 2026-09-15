@@ -112,6 +112,111 @@ def api_pipeline_image_prompts():
     return json_resp({"ok": True, "count": len(agent.state["image_prompts"])})
 
 
+# ---------------- A~H 分阶段执行：每个阶段一个纯函数 ----------------
+def _stage_a(agent, topic, body):
+    """A 资料采集。"""
+    items = agent.collector.collect(topic)
+    return {"ok": True, "material_count": len(items)}
+
+
+def _stage_b(agent, topic, body):
+    """B 知识沉淀。"""
+    agent.knowledge.ingest(load_material())
+    path = agent.knowledge.store_path
+    count = sum(1 for _ in open(path, encoding="utf-8")) if os.path.exists(path) else 0
+    return {"ok": True, "chunk_count": count}
+
+
+def _stage_c(agent, topic, body):
+    """C 概念企划。"""
+    material = load_material()
+    if material:
+        agent.knowledge.ingest(material)
+    concept = agent.planner.plan(topic, material, agent.knowledge)
+    agent.state["bible"] = concept
+    save_agent_state(agent)
+    return {"ok": True, "bible": concept}
+
+
+def _stage_d(agent, topic, body):
+    """D 关键帧：提示词 + 出图。"""
+    concept = agent.state.get("bible") or agent.writer.story_bible()
+    prompts = agent.image_prompt.generate(concept)
+    images = agent.keyframe_gen.generate(prompts)
+    agent.state["image_prompts"] = prompts
+    agent.state["keyframe_images"] = images
+    save_agent_state(agent)
+    return {"ok": True, "prompt_count": len(prompts),
+            "keyframe_count": sum(1 for x in images if x)}
+
+
+def _stage_e(agent, topic, body):
+    """E 剧本分镜：生成下一镜草稿。"""
+    beat = agent.writer.next_beat(agent.state.get("bible", {}),
+                                  agent.state.get("beats", []))
+    agent.state["draft_beat"] = beat
+    agent.state["draft_prompt"] = ""
+    save_agent_state(agent)
+    return {"ok": True, "draft_beat": beat}
+
+
+def _stage_f(agent, topic, body):
+    """F 去 AI 味：润色草稿描述。"""
+    beat = dict(agent.state.get("draft_beat") or {})
+    if not beat:
+        raise RuntimeError("请先执行 E 阶段生成分镜草稿")
+    beat["description"] = agent.polisher.polish(beat.get("description", ""))
+    beat["polished"] = True
+    agent.state["draft_beat"] = beat
+    save_agent_state(agent)
+    return {"ok": True, "draft_beat": beat}
+
+
+def _render_g_scene(agent, beat, prompt):
+    """G 阶段真渲染：出镜 → 接续成片 → 更新 state。"""
+    n = agent.state.get("scene_count", 0)
+    keyframes = agent.state.get("keyframe_images", [])
+    keyframe = keyframes[n] if n < len(keyframes) else None
+    tmp = os.path.join(agent.scenes_dir, f"scene_{n + 1:03d}.mp4")
+    prev = agent.film if n > 0 and os.path.exists(agent.film) else None
+    agent.engine.generate(prompt, tmp, prev_clip=prev, image=keyframe)
+    if prev:
+        shutil.copy(agent.film, os.path.join(agent.scenes_dir, f"film_after_{n:03d}.mp4"))
+    shutil.move(tmp, agent.film)
+    agent.state["beats"].append(beat)
+    agent.state["scene_count"] = n + 1
+    agent.state.pop("draft_beat", None)
+    agent.state.pop("draft_prompt", None)
+    save_agent_state(agent)
+    agent._log_beat(beat, prompt, agent.film)
+    return {"ok": True, "scene_count": n + 1}
+
+
+def _stage_g(agent, topic, body):
+    """G 视频导演：先出提示词，body.generate 为真时再真渲染。"""
+    beat = dict(agent.state.get("draft_beat") or {})
+    if not beat:
+        raise RuntimeError("请先执行 E 阶段生成或保存分镜草稿")
+    prompt = agent.director.beat_to_prompt(beat)
+    agent.state["draft_prompt"] = prompt
+    save_agent_state(agent)
+    if not body.get("generate", False):
+        return {"ok": True, "prompt": prompt}
+    return _render_g_scene(agent, beat, prompt)
+
+
+def _stage_h(agent, topic, body):
+    """H 自动发布：封装成片。"""
+    output = agent.finalize()
+    return {"ok": bool(output), "output": output}
+
+
+_STAGE_HANDLERS = {
+    "A": _stage_a, "B": _stage_b, "C": _stage_c, "D": _stage_d,
+    "E": _stage_e, "F": _stage_f, "G": _stage_g, "H": _stage_h,
+}
+
+
 @bp.route("/api/pipeline/stage/<stage>", methods=["POST"])
 def api_pipeline_stage(stage):
     stage = stage.upper()
@@ -121,79 +226,9 @@ def api_pipeline_stage(stage):
 
     def _job():
         agent = get_agent()
-        topic = str(body.get("topic") or
-                    agent.config.get("project", {}).get("theme", ""))
-        if stage == "A":
-            items = agent.collector.collect(topic)
-            return {"ok": True, "material_count": len(items)}
-        if stage == "B":
-            items = load_material()
-            agent.knowledge.ingest(items)
-            return {"ok": True, "chunk_count": sum(
-                1 for _ in open(agent.knowledge.store_path, encoding="utf-8")
-            ) if os.path.exists(agent.knowledge.store_path) else 0}
-        if stage == "C":
-            material = load_material()
-            if material:
-                agent.knowledge.ingest(material)
-            concept = agent.planner.plan(topic, material, agent.knowledge)
-            agent.state["bible"] = concept
-            save_agent_state(agent)
-            return {"ok": True, "bible": concept}
-        if stage == "D":
-            concept = agent.state.get("bible") or agent.writer.story_bible()
-            prompts = agent.image_prompt.generate(concept)
-            images = agent.keyframe_gen.generate(prompts)
-            agent.state["image_prompts"] = prompts
-            agent.state["keyframe_images"] = images
-            save_agent_state(agent)
-            return {"ok": True, "prompt_count": len(prompts),
-                    "keyframe_count": sum(1 for x in images if x)}
-        if stage == "E":
-            beat = agent.writer.next_beat(agent.state.get("bible", {}),
-                                          agent.state.get("beats", []))
-            agent.state["draft_beat"] = beat
-            agent.state["draft_prompt"] = ""
-            save_agent_state(agent)
-            return {"ok": True, "draft_beat": beat}
-        if stage == "F":
-            beat = dict(agent.state.get("draft_beat") or {})
-            if not beat:
-                raise RuntimeError("请先执行 E 阶段生成分镜草稿")
-            beat["description"] = agent.polisher.polish(beat.get("description", ""))
-            beat["polished"] = True
-            agent.state["draft_beat"] = beat
-            save_agent_state(agent)
-            return {"ok": True, "draft_beat": beat}
-        if stage == "G":
-            beat = dict(agent.state.get("draft_beat") or {})
-            if not beat:
-                raise RuntimeError("请先执行 E 阶段生成或保存分镜草稿")
-            prompt = agent.director.beat_to_prompt(beat)
-            agent.state["draft_prompt"] = prompt
-            save_agent_state(agent)
-            if not body.get("generate", False):
-                return {"ok": True, "prompt": prompt}
-            n = agent.state.get("scene_count", 0)
-            keyframes = agent.state.get("keyframe_images", [])
-            keyframe = keyframes[n] if n < len(keyframes) else None
-            tmp = os.path.join(agent.scenes_dir, f"scene_{n + 1:03d}.mp4")
-            prev = agent.film if n > 0 and os.path.exists(agent.film) else None
-            agent.engine.generate(prompt, tmp, prev_clip=prev, image=keyframe)
-            if prev:
-                shutil.copy(agent.film, os.path.join(agent.scenes_dir, f"film_after_{n:03d}.mp4"))
-            shutil.move(tmp, agent.film)
-            agent.state["beats"].append(beat)
-            agent.state["scene_count"] = n + 1
-            agent.state.pop("draft_beat", None)
-            agent.state.pop("draft_prompt", None)
-            save_agent_state(agent)
-            agent._log_beat(beat, prompt, agent.film)
-            return {"ok": True, "scene_count": n + 1}
-        if stage == "H":
-            output = agent.finalize()
-            return {"ok": bool(output), "output": output}
-        raise RuntimeError("未实现的阶段")
+        topic = str(body.get("topic")
+                    or agent.config.get("project", {}).get("theme", ""))
+        return _STAGE_HANDLERS[stage](agent, topic, body)
 
     return start_stage(stage, _job)
 

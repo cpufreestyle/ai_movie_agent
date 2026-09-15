@@ -57,64 +57,79 @@ def _probe_wh(image):
         return None
 
 
+def _check_video(video, errors, warnings):
+    """视频文件：存在性 / 大小 / 时长档位。"""
+    if not os.path.exists(video):
+        errors.append(f"视频文件不存在: {video}")
+        return
+    size = os.path.getsize(video)
+    if size == 0:
+        errors.append("视频文件为空(0 字节)")
+    elif size > BILI["video_size_max"]:
+        errors.append(f"视频超过 8GB 上传上限({size / 1024 ** 3:.1f}GB)")
+    dur = _probe_duration(video)
+    if dur is None:
+        warnings.append("无法探测视频时长（ffprobe 未安装或被防火墙拦截）")
+    elif dur > BILI["video_dur_error"]:
+        errors.append(f"视频超过 4 小时硬上限({int(dur)}s)")
+    elif dur > BILI["video_dur_warn"]:
+        warnings.append(f"时长 {int(dur)}s 超过 15 分钟，需 B 站账号认证才能投")
+
+
+def _check_title(title, errors, warnings):
+    """标题：非空 / 长度 / 集数标记。"""
+    if not title.strip():
+        errors.append("标题为空")
+        return
+    if len(title) > BILI["title_max"]:
+        errors.append(f"标题超长({len(title)}>{BILI['title_max']}字)")
+    if not re.search(r"第[0-9一二三四五六七八九十百]+集", title):
+        warnings.append("标题缺少集数标记(第N集)")
+
+
+def _check_tags(tags, errors, warnings):
+    """标签：数量上限 + 单个长度（字符串按逗号切分）。"""
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    if len(tags) > BILI["tag_max"]:
+        errors.append(f"标签数 {len(tags)} 超过上限 {BILI['tag_max']}")
+    for t in tags:
+        if len(t) > BILI["tag_len_max"]:
+            warnings.append(f"标签「{t}」超过 {BILI['tag_len_max']} 字")
+
+
+def _check_cover(cover, errors, warnings):
+    """封面：存在性 + 建议尺寸（探测不到降级为警告）。"""
+    if not os.path.exists(cover):
+        errors.append(f"封面文件不存在: {cover}")
+        return
+    wh = _probe_wh(cover)
+    if wh is None:
+        warnings.append("无法探测封面尺寸（ffprobe 缺失）")
+    elif wh != (BILI["cover_w"], BILI["cover_h"]):
+        warnings.append(f"封面非建议尺寸 1146x717，当前 {wh[0]}x{wh[1]}")
+
+
 def check(video=None, *, title=None, tags=None, cover=None,
           desc=None, dynamic=None, workdir=None):
     """对投稿素材做静态体检。
 
     返回 {ok, errors:[], warnings:[]}。ok=False 表示有阻断性问题，建议先修。
+
+    各维度校验拆到 _check_* 里，本函数只负责「调度 + 汇总」。
     """
     errors, warnings = [], []
 
     if video:
-        if not os.path.exists(video):
-            errors.append(f"视频文件不存在: {video}")
-        else:
-            size = os.path.getsize(video)
-            if size == 0:
-                errors.append("视频文件为空(0 字节)")
-            elif size > BILI["video_size_max"]:
-                errors.append(f"视频超过 8GB 上传上限({size / 1024 ** 3:.1f}GB)")
-            dur = _probe_duration(video)
-            if dur is None:
-                warnings.append("无法探测视频时长（ffprobe 未安装或被防火墙拦截）")
-            else:
-                if dur > BILI["video_dur_error"]:
-                    errors.append(f"视频超过 4 小时硬上限({int(dur)}s)")
-                elif dur > BILI["video_dur_warn"]:
-                    warnings.append(
-                        f"时长 {int(dur)}s 超过 15 分钟，需 B 站账号认证才能投")
-
+        _check_video(video, errors, warnings)
     if title is not None:
-        if not title.strip():
-            errors.append("标题为空")
-        else:
-            if len(title) > BILI["title_max"]:
-                errors.append(f"标题超长({len(title)}>{BILI['title_max']}字)")
-            if not re.search(r"第[0-9一二三四五六七八九十百]+集", title):
-                warnings.append("标题缺少集数标记(第N集)")
-
+        _check_title(title, errors, warnings)
     if tags is not None:
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
-        if len(tags) > BILI["tag_max"]:
-            errors.append(f"标签数 {len(tags)} 超过上限 {BILI['tag_max']}")
-        for t in tags:
-            if len(t) > BILI["tag_len_max"]:
-                warnings.append(f"标签「{t}」超过 {BILI['tag_len_max']} 字")
-
+        _check_tags(tags, errors, warnings)
     if dynamic and len(dynamic) > BILI["dynamic_max"]:
         warnings.append(f"动态超过 {BILI['dynamic_max']} 字(投稿时会被截断)")
-
     if cover:
-        if not os.path.exists(cover):
-            errors.append(f"封面文件不存在: {cover}")
-        else:
-            wh = _probe_wh(cover)
-            if wh is None:
-                warnings.append("无法探测封面尺寸（ffprobe 缺失）")
-            elif wh != (BILI["cover_w"], BILI["cover_h"]):
-                warnings.append(
-                    f"封面非建议尺寸 1146x717，当前 {wh[0]}x{wh[1]}")
+        _check_cover(cover, errors, warnings)
 
     return {"ok": not errors, "errors": errors, "warnings": warnings}
 

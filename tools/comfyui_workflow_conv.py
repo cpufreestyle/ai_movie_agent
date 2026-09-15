@@ -48,6 +48,20 @@ def normalize_link(l) -> dict:
     return l
 
 
+def _make_resolver(link_by_id: dict, io_provider, local_out: dict):
+    """返回 resolve(lk) -> thunk；真正取值推迟到全部展开完成之后。"""
+    def resolve(lk):
+        l = link_by_id.get(lk)
+        if not l:
+            return lambda: None
+        if l.get("origin_id") == -10:                 # 子图输入槽
+            slot = l.get("origin_slot")
+            return lambda: _force(io_provider(slot))
+        key = (l.get("origin_id"), l.get("origin_slot"))
+        return lambda: _force(local_out.get(key))
+    return resolve
+
+
 class Flattener:
     """递归展开 subgraph，把整个图摊平成普通节点 + 已解析的输入来源。"""
 
@@ -57,66 +71,65 @@ class Flattener:
         self.pending: list[tuple] = []      # (node_id, input_name, thunk)
         self.warnings: list[str] = []
 
+    def _handle_reroute(self, n: dict, resolve, local_out: dict) -> None:
+        """Reroute 只做转发：把它的输出槽直接指向上游来源，不生成实体节点。"""
+        in_link = None
+        for inp in (n.get("inputs") or []):
+            if inp.get("link") is not None:
+                in_link = inp.get("link")
+                break
+        local_out[(n.get("id"), 0)] = (
+            resolve(in_link) if in_link is not None else (lambda: None))
+
+    def _handle_subgraph(self, n: dict, nid: str, resolve,
+                         local_out: dict) -> None:
+        """递归展开子图，把其输出槽挂到本层的 local_out。"""
+        sub = self.subgraphs[n.get("type")]
+        sub_inputs = sub.get("inputs") or []
+        parent_ins = {i.get("name"): i.get("link")
+                      for i in (n.get("inputs") or [])}
+
+        def sub_io(slot, _si=sub_inputs, _pi=parent_ins, _r=resolve):
+            if slot is None or slot >= len(_si):
+                return None
+            name = _si[slot].get("name")
+            lk = _pi.get(name)
+            return _r(lk) if lk is not None else None
+
+        sub_out = self.expand(sub, f"{nid}_", sub_io)
+        for slot, thunk in sub_out.items():
+            local_out[(n.get("id"), slot)] = thunk
+
+    def _handle_plain_node(self, n: dict, nid: str, resolve,
+                           local_out: dict) -> None:
+        """普通节点：登记到 flat，并记录输出槽与待解析连线。"""
+        self.flat[nid] = {"type": n.get("type"), "ins": {},
+                          "wv": list(n.get("widgets_values") or [])}
+        for oi, _o in enumerate(n.get("outputs") or []):
+            local_out[(n.get("id"), oi)] = (nid, oi)
+        for inp in (n.get("inputs") or []):
+            lk = inp.get("link")
+            if lk is None:
+                continue
+            self.pending.append((nid, inp.get("name"), resolve(lk)))
+
     def expand(self, scope: dict, prefix: str, io_provider) -> dict:
         links = [normalize_link(l) for l in (scope.get("links") or [])]
         link_by_id = {l["id"]: l for l in links}
-        nodes = scope.get("nodes") or []
         local_out: dict = {}                # (node_id, slot) -> tuple 或 thunk
+        resolve = _make_resolver(link_by_id, io_provider, local_out)
 
-        def resolve(lk):
-            """返回 thunk；真正取值推迟到全部展开完成之后。"""
-            l = link_by_id.get(lk)
-            if not l:
-                return lambda: None
-            if l.get("origin_id") == -10:                 # 子图输入槽
-                slot = l.get("origin_slot")
-                return lambda: _force(io_provider(slot))
-            key = (l.get("origin_id"), l.get("origin_slot"))
-            return lambda: _force(local_out.get(key))
-
-        for n in nodes:
+        for n in (scope.get("nodes") or []):
             ntype = n.get("type")
             if ntype in SKIP_TYPES:
                 continue
             nid = f"{prefix}{n.get('id')}"
-
             if ntype == "Reroute":
-                # Reroute 只做转发：把它的输出槽直接指向上游来源，不生成实体节点
-                in_link = None
-                for inp in (n.get("inputs") or []):
-                    if inp.get("link") is not None:
-                        in_link = inp.get("link")
-                        break
-                local_out[(n.get("id"), 0)] = (
-                    resolve(in_link) if in_link is not None else (lambda: None))
-                continue
-
-            if ntype in self.subgraphs:
-                sub = self.subgraphs[ntype]
-                sub_inputs = sub.get("inputs") or []
-                parent_ins = {i.get("name"): i.get("link")
-                              for i in (n.get("inputs") or [])}
-
-                def sub_io(slot, _si=sub_inputs, _pi=parent_ins, _r=resolve):
-                    if slot is None or slot >= len(_si):
-                        return None
-                    name = _si[slot].get("name")
-                    lk = _pi.get(name)
-                    return _r(lk) if lk is not None else None
-
-                sub_out = self.expand(sub, f"{nid}_", sub_io)
-                for slot, thunk in sub_out.items():
-                    local_out[(n.get("id"), slot)] = thunk
+                self._handle_reroute(n, resolve, local_out)
+            elif ntype in self.subgraphs:
+                self._handle_subgraph(n, nid, resolve, local_out)
             else:
-                self.flat[nid] = {"type": ntype, "ins": {},
-                                  "wv": list(n.get("widgets_values") or [])}
-                for oi, _o in enumerate(n.get("outputs") or []):
-                    local_out[(n.get("id"), oi)] = (nid, oi)
-                for inp in (n.get("inputs") or []):
-                    lk = inp.get("link")
-                    if lk is None:
-                        continue
-                    self.pending.append((nid, inp.get("name"), resolve(lk)))
+                self._handle_plain_node(n, nid, resolve, local_out)
 
         scope_out: dict = {}
         for l in links:
@@ -227,6 +240,68 @@ def default_value(spec_v):
     return None
 
 
+def _match_widget(spec_v, wq: list, used: list) -> int | None:
+    """在剩余 widgets_values 里按类型贪婪匹配一个值，返回下标；无匹配返回 None。"""
+    for i, v in enumerate(wq):
+        if used[i]:
+            continue
+        if type_matches(spec_v, v):
+            return i
+    return None
+
+
+def _consume_control_after(spec_v, chosen: int, wq_len: int, used: list) -> None:
+    """吃掉 widget 后面紧跟的 control_after_generate 项。"""
+    if has_control_after(spec_v) and chosen + 1 < wq_len:
+        used[chosen + 1] = True
+
+
+def _assign_widget_inputs(widget_specs: list, wq: list, used: list,
+                          inputs: dict) -> None:
+    """按声明顺序把 saved widget 值落到 inputs，匹配不到则取默认值。"""
+    for name, spec_v in widget_specs:
+        chosen = _match_widget(spec_v, wq, used)
+        if chosen is None:
+            inputs[name] = default_value(spec_v)
+            continue
+        inputs[name] = wq[chosen]
+        used[chosen] = True
+        _consume_control_after(spec_v, chosen, len(wq), used)
+
+
+def _assign_dynamic_subinputs(widget_specs: list, wq: list, used: list,
+                              inputs: dict) -> None:
+    """COMFY_DYNAMICCOMBO_V3 的动态子输入（如 longer_size）按类型补位。
+
+    这些子输入不在 input_order 里，要从剩余 widgets_values 按类型补上。
+    """
+    for name, spec_v in widget_specs:
+        if _cfg0(spec_v) != "COMFY_DYNAMICCOMBO_V3":
+            continue
+        sub = dynamic_subinputs(spec_v, inputs.get(name))
+        if not sub:
+            continue
+        for sname, sdef in sub.items():
+            chosen = _match_widget(sdef, wq, used)
+            key = f"{name}.{sname}"
+            if chosen is None:
+                inputs[key] = default_value(sdef)
+                continue
+            inputs[key] = wq[chosen]
+            used[chosen] = True
+            _consume_control_after(sdef, chosen, len(wq), used)
+
+
+def _warn_missing(ctype: str, nid, spec: dict, inputs: dict,
+                  warnings: list) -> None:
+    """缺必填输入（含 autogrow 子键）时追加告警。"""
+    required = (spec.get("input", {}) or {}).get("required", {}) or {}
+    missing = [n for n in required
+               if n not in inputs and not any(k.startswith(n + ".") for k in inputs)]
+    if missing:
+        warnings.append(f"{ctype}({nid}): 缺少必填输入 {missing}")
+
+
 def build_api(flat: dict, obj_info: dict, warnings: list[str]) -> dict:
     api: dict = {}
     for nid, node in flat.items():
@@ -247,56 +322,17 @@ def build_api(flat: dict, obj_info: dict, warnings: list[str]) -> dict:
         #    匹配不到（类型不符/缺失）则取默认值。这样即使示例工作流与已装节点
         #    版本漂移也能正确落位，而不是按位置把 1536 错塞进 scale_method。
         widget_specs = [(n, v) for n, v in input_order(spec) if n not in node["ins"]]
-        for name, spec_v in widget_specs:
-            chosen = None
-            for i, v in enumerate(wq):
-                if used[i]:
-                    continue
-                if type_matches(spec_v, v):
-                    chosen = i
-                    break
-            if chosen is not None:
-                inputs[name] = wq[chosen]
-                used[chosen] = True
-                if has_control_after(spec_v) and chosen + 1 < len(wq):
-                    used[chosen + 1] = True  # 吃掉 control_after_generate 项
-            else:
-                inputs[name] = default_value(spec_v)
+        _assign_widget_inputs(widget_specs, wq, used, inputs)
 
-        # 2b) 动态组合输入（COMFY_DYNAMICCOMBO_V3）的子输入：
-        #     如 ResizeImageMaskNode 选 "scale longer dimension" 时需要 longer_size。
-        #     这些子输入不在 input_order 里，要从剩余 widgets_values 按类型补上。
-        for name, spec_v in widget_specs:
-            if _cfg0(spec_v) == "COMFY_DYNAMICCOMBO_V3":
-                sub = dynamic_subinputs(spec_v, inputs.get(name))
-                if not sub:
-                    continue
-                for sname, sdef in sub.items():
-                    schosen = None
-                    for i, v in enumerate(wq):
-                        if used[i]:
-                            continue
-                        if type_matches(sdef, v):
-                            schosen = i
-                            break
-                    if schosen is not None:
-                        inputs[f"{name}.{sname}"] = wq[schosen]
-                        used[schosen] = True
-                        if has_control_after(sdef) and schosen + 1 < len(wq):
-                            used[schosen + 1] = True
-                    else:
-                        inputs[f"{name}.{sname}"] = default_value(sdef)
+        # 2b) 动态组合输入（COMFY_DYNAMICCOMBO_V3）的子输入
+        _assign_dynamic_subinputs(widget_specs, wq, used, inputs)
 
         # 3) COMFY_AUTOGROW 动态子输入（ComfyMathExpression 的 values.a/b...）
         for name, src in node["ins"].items():
             if name not in inputs:
                 inputs[name] = [str(src[0]), src[1]]
 
-        required = (spec.get("input", {}) or {}).get("required", {}) or {}
-        missing = [n for n in required
-                   if n not in inputs and not any(k.startswith(n + ".") for k in inputs)]
-        if missing:
-            warnings.append(f"{ctype}({nid}): 缺少必填输入 {missing}")
+        _warn_missing(ctype, nid, spec, inputs, warnings)
         api[str(nid)] = {"class_type": ctype, "inputs": inputs}
     return api
 

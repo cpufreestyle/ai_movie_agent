@@ -33,8 +33,20 @@ exclude = [
 # 只开「不会误伤风格偏好」的规则：
 #   E9 / F63 / F7 / F82 —— 语法错误、assert 写成元组、未定义名（CI 原有）
 #   F                   —— 未用导入、未用变量、f-string 无占位符、重复定义
+#   C901                —— 圈复杂度超阈值（阈值见 [lint.mccabe]，默认 10）
 #
 # 暂不开 E4/E7（当前 52 处）：E402(module-import-not-at-top) 与本项目「刻意延迟
 # import 重依赖」的设计冲突（webui 顶层 import agent 会触发全量依赖，必须惰性加载）；
 # E722(裸 except) / E741(含糊变量名) 属风格级，单独立项后再开。
-select = ["E9", "F63", "F7", "F82", "F"]
+select = ["E9", "F63", "F7", "F82", "F", "C901"]
+
+[lint.mccabe]
+# 圈复杂度门槛：>10 视为需要拆分。治理后可维护代码全部达标，靠 per-file-ignores
+# 只对第三方 vendored / 远程部署脚本放行（见下）。
+max-complexity = 10
+
+[lint.per-file-ignores]
+# 上游 vendored 的 Blender MCP addon：随上游同步，不为风格改造分叉。
+"tools/blender_mcp_addon.py" = ["C901"]
+# 部署到远程 GPU 机器的服务端脚本：脱离本仓库运行，不进本项目的维护链路。
+"deploy/sol_h3_spark/sol_h3_server.py" = ["C901"]

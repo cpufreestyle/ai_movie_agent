@@ -277,6 +277,120 @@ def _write_qa_report(entries: list) -> None:
     qa_mod.write_report(WORK, entries)
 
 
+def _pick_start_image(key: str, idx: int, base: str, anchor_map: dict | None,
+                      anchor: str, anchor_mode: str, mira_prev: str | None,
+                      use_i2v: bool, prev_frame: str | None) -> tuple:
+    """确定本镜的 I2V 起始图，返回 (路径|None, 标签)。
+
+    起始图优先级：本镜锚定图（--anchor-map，逐镜精确）> 角色锚定（锁脸）
+              > 上一镜尾帧续写 > 纯 T2V
+    """
+    amap = anchor_map or {}
+    p = amap.get(str(idx)) or amap.get(idx)
+    if p:
+        pth = p if os.path.isabs(p) else os.path.join(ROOT, p)
+        if os.path.exists(pth):
+            return pth, "I2V/锚定图"
+        print(f"[{key}] 锚定图不存在，回退: {pth}")
+    if anchor and _is_char_shot(base):
+        img = anchor if anchor_mode == "first" else (mira_prev or anchor)
+        return img, "I2V/角色锚定"
+    if use_i2v and prev_frame:
+        return prev_frame, "I2V"
+    return None, "T2V"
+
+
+def _roll_generate(eng, key: str, prompt: str, out_path: str, img, tag: str,
+                   ref_images, is_char: bool, anchor: str, base_seed: int,
+                   rolls: int, qa_on: bool, qa_policy: dict, qa_mod,
+                   qa_entries: list) -> tuple:
+    """生成单镜，并在开启质检时按结果换 seed 重 roll。
+
+    返回 (产出路径|None, 实际 seed, 实际 attempt)；生成异常/未产出时路径为 None。
+    """
+    shot, seed, attempt = None, base_seed, 0
+    for attempt in range(rolls):
+        seed = base_seed + attempt * 7919      # 确定性换 seed，便于复现失败样本
+        print(f"[{key}] {tag} generate "
+              f"{eng.resolution} {eng.num_frames}帧@{eng.fps}fps "
+              f"seed={seed}"
+              + (f"（重 roll {attempt}/{rolls - 1}）" if attempt else ""))
+        try:
+            produced = eng.generate(prompt, out_path, seed=seed,
+                                    image=img,
+                                    ref_images=ref_images or None)
+        except Exception as e:
+            print(f"[{key}] 生成失败: {e}")
+            return None, seed, attempt
+        if not produced or not os.path.exists(produced):
+            print(f"[{key}] 未产出文件")
+            return None, seed, attempt
+        if not qa_on:
+            return produced, seed, attempt
+        sc = qa_mod.score_video(produced, qa_policy,
+                                is_char_shot=is_char, anchor=anchor)
+        ok, reasons = qa_mod.evaluate(sc, qa_policy, is_char_shot=is_char)
+        entry = dict(sc)
+        entry.update({"key": key, "attempt": attempt, "seed": seed,
+                      "ok": ok, "reasons": reasons})
+        qa_entries.append(entry)
+        if ok:
+            return produced, seed, attempt
+        if attempt + 1 < rolls:
+            print(f"[{key}] 质检未过：{'；'.join(reasons)} → 换 seed 重 roll")
+        else:
+            print(f"[{key}] 质检仍未过（{'；'.join(reasons)}），采用本次结果继续")
+            shot = produced
+    return shot, seed, attempt
+
+
+def _render_shot(eng, ep: int, key: str, idx: int, base: str, style_anchor: str,
+                 anchor: str, anchor_mode: str, anchor_map: dict | None,
+                 ref_images, use_i2v: bool, prev_frame, mira_prev,
+                 qa_mod, qa_policy: dict, qa_entries: list) -> str | None:
+    """生成单镜：选起始图 → 生成（含质检重 roll）→ 落 manifest 与生成参数。"""
+    prompt = f"{base}, {style_anchor}" if style_anchor else base
+    out_path = os.path.join(WORK, f"{key}.mp4")
+    img, tag = _pick_start_image(key, idx, base, anchor_map, anchor, anchor_mode,
+                                 mira_prev, use_i2v, prev_frame)
+    # 质检 + 自动重 roll：不达标就换 seed 重出（限次），避免人工盯 54 镜。
+    # 判定只在 config.qa 阈值明确越界时触发（默认很保守，见 agent/qa.py）。
+    qa_on = bool(qa_policy.get("enabled", True))
+    rolls = 1 + (max(0, int(qa_policy.get("max_rerolls") or 0)) if qa_on else 0)
+    is_char = _is_char_shot(base)
+    base_seed = BASE_SEED + ep * 1000 + idx
+    shot, seed, attempt = _roll_generate(
+        eng, key, prompt, out_path, img, tag, ref_images, is_char, anchor,
+        base_seed, rolls, qa_on, qa_policy, qa_mod, qa_entries)
+    if not shot:
+        print(f"[{key}] 无可用产出")
+        return None
+    man = load_manifest()
+    man[key] = shot
+    save_manifest(man)
+    # 生成参数全量落盘（可复现 / 供 A/B 与回归）：存到同目录 gen_params.json
+    from agent import record
+    record.save(WORK, key, record.collect(
+        eng, prompt=prompt, seed=seed, attempt=attempt,
+        image=img, ref_images=ref_images,
+        style_anchor=style_anchor, qa_policy=qa_policy))
+    return shot
+
+
+def _finish_episode(eng, ep: int, out_dir: str, shot_files: list,
+                    use_i2v: bool, only) -> str | None:
+    """一集收尾：--only 时跳过拼接；否则拼成片，I2V 模式下额外返回成片尾帧。"""
+    if only:
+        print(f"[only] 已重出镜号 {sorted(only)}，跳过拼接")
+        return None
+    film = os.path.join(out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
+    if not concat_shots(eng, shot_files, film):
+        return None
+    if use_i2v:
+        return last_frame(film, os.path.join(WORK, f"ep{ep}_film_last.png"))
+    return None
+
+
 def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                 prev_frame: str | None, out_dir: str, use_i2v: bool,
                 anchor: str = "", anchor_mode: str = "first",
@@ -308,77 +422,12 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
             continue
         shot = None if (force or only) else man.get(key)
         if not (shot and os.path.exists(shot)):
-            prompt = f"{base}, {style_anchor}" if style_anchor else base
-            out_path = os.path.join(WORK, f"{key}.mp4")
-            # 起始图优先级：本镜锚定图（--anchor-map，逐镜精确）> 角色锚定（锁脸）
-            #              > 上一镜尾帧续写 > 纯 T2V
-            img, tag = None, "T2V"
-            amap = anchor_map or {}
-            p = amap.get(str(idx)) or amap.get(idx)
-            if p:
-                pth = p if os.path.isabs(p) else os.path.join(ROOT, p)
-                if os.path.exists(pth):
-                    img, tag = pth, "I2V/锚定图"
-                else:
-                    print(f"[{key}] 锚定图不存在，回退: {pth}")
-            if img is None and anchor and _is_char_shot(base):
-                img = anchor if anchor_mode == "first" else (mira_prev or anchor)
-                tag = "I2V/角色锚定"
-            elif img is None and use_i2v and prev_frame:
-                img, tag = prev_frame, "I2V"
-            # 质检 + 自动重 roll：不达标就换 seed 重出（限次），避免人工盯 54 镜。
-            # 判定只在 config.qa 阈值明确越界时触发（默认很保守，见 agent/qa.py）。
-            qa_on = bool((qa_policy or {}).get("enabled", True))
-            rolls = 1 + (max(0, int(qa_policy.get("max_rerolls") or 0)) if qa_on else 0)
-            is_char = _is_char_shot(base)
-            base_seed = BASE_SEED + ep * 1000 + idx
-            shot = None
-            for attempt in range(rolls):
-                seed = base_seed + attempt * 7919      # 确定性换 seed，便于复现失败样本
-                print(f"[{key}] {tag} generate "
-                      f"{eng.resolution} {eng.num_frames}帧@{eng.fps}fps "
-                      f"seed={seed}"
-                      + (f"（重 roll {attempt}/{rolls - 1}）" if attempt else ""))
-                try:
-                    produced = eng.generate(prompt, out_path, seed=seed,
-                                            image=img,
-                                            ref_images=ref_images or None)
-                except Exception as e:
-                    print(f"[{key}] 生成失败: {e}")
-                    return None
-                if not produced or not os.path.exists(produced):
-                    print(f"[{key}] 未产出文件")
-                    return None
-                if not qa_on:
-                    shot = produced
-                    break
-                sc = qa_mod.score_video(produced, qa_policy,
-                                        is_char_shot=is_char, anchor=anchor)
-                ok, reasons = qa_mod.evaluate(sc, qa_policy, is_char_shot=is_char)
-                entry = dict(sc)
-                entry.update({"key": key, "attempt": attempt, "seed": seed,
-                              "ok": ok, "reasons": reasons})
-                qa_entries.append(entry)
-                if ok:
-                    shot = produced
-                    break
-                if attempt + 1 < rolls:
-                    print(f"[{key}] 质检未过：{'；'.join(reasons)} → 换 seed 重 roll")
-                else:
-                    print(f"[{key}] 质检仍未过（{'；'.join(reasons)}），采用本次结果继续")
-                    shot = produced
+            shot = _render_shot(eng, ep, key, idx, base, style_anchor,
+                                anchor, anchor_mode, anchor_map, ref_images,
+                                use_i2v, prev_frame, mira_prev,
+                                qa_mod, qa_policy, qa_entries)
             if not shot:
-                print(f"[{key}] 无可用产出")
                 return None
-            man = load_manifest()
-            man[key] = shot
-            save_manifest(man)
-            # 生成参数全量落盘（可复现 / 供 A/B 与回归）：存到同目录 gen_params.json
-            from agent import record
-            record.save(WORK, key, record.collect(
-                eng, prompt=prompt, seed=seed, attempt=attempt,
-                image=img, ref_images=ref_images,
-                style_anchor=style_anchor, qa_policy=qa_policy))
         else:
             print(f"[{key}] 已存在，跳过 -> {shot}")
         shot_files.append(shot)
@@ -388,19 +437,145 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
             mira_prev = last_frame(shot, os.path.join(WORK, f"{key}_last.png"))
 
     _write_qa_report(qa_entries)
+    return _finish_episode(eng, ep, out_dir, shot_files, use_i2v, only)
 
-    if only:
-        print(f"[only] 已重出镜号 {sorted(only)}，跳过拼接")
+
+def _parse_only(spec: str):
+    """--only 的逗号分隔镜号 -> set[int]；留空返回 None（= 全量）。"""
+    if not spec.strip():
         return None
+    return {int(x) for x in spec.replace("，", ",").split(",") if x.strip().isdigit()}
+
+
+def _note_anchor(anchor: str, anchor_note: str, requested: str) -> None:
+    """打印锚定图解析结果；未显式要求时提示 outputs/anchor/ 里有多少张角色卡。"""
+    if requested:
+        if anchor:
+            print(f"[anchor] 角色锚定图: {anchor}（{anchor_note}）")
+        else:
+            print(f"[anchor] {anchor_note}，改用无锚定出片")
+        return
+    anc_dir = os.path.join(ROOT, "outputs", "anchor")
+    n = len([f for f in os.listdir(anc_dir)
+             if f.lower().endswith(".png")]) if os.path.isdir(anc_dir) else 0
+    if n:
+        print(f"[anchor] 检测到 outputs/anchor/ 有 {n} 张角色卡；需要锁脸可加 "
+              f"--anchor auto（注意：LTX 的 I2V 起始图权重偏高，可能让各镜画面趋同）")
+
+
+def _load_anchor_map(spec: str) -> dict:
+    """--anchor-map：JSON 文件 {镜号: 锚定图路径}，逐镜指定（优先级高于 --anchor）。"""
+    if not spec:
+        return {}
+    p = spec if os.path.isabs(spec) else os.path.join(ROOT, spec)
+    m = load_json(p)
+    print(f"[anchor-map] 载入 {len(m)} 条逐镜锚定")
+    return m
+
+
+def _collect_ref_images(spec: str) -> list:
+    """身份参考图（增强人物一致性，配合首帧锚定走 Hybrid，不需白模）。
+
+    'auto' 自动收集 outputs/anchor/mira_*.png（最多9张）；'none'/留空=关闭。
+    """
+    if not spec or spec.lower() == "none":
+        return []
+    if spec.lower() != "auto":
+        return [p.strip() for p in spec.split(",") if p.strip()]
+    anc_dir = os.path.join(ROOT, "outputs", "anchor")
+    if not os.path.isdir(anc_dir):
+        return []
+    return sorted([
+        os.path.join(anc_dir, f) for f in os.listdir(anc_dir)
+        if f.lower().startswith("mira_") and f.lower().endswith(".png")
+    ])[:9]
+
+
+def _build_qa_policy(a) -> dict:
+    """逐镜质检策略（config.qa，可被 --qa / --no-qa / --qa-rerolls 覆盖）。"""
+    from agent import qa as qa_mod
+    pol = qa_mod.load_policy(load_config())
+    if a.qa is not None:
+        pol["enabled"] = a.qa
+    if a.qa_rerolls is not None:
+        pol["max_rerolls"] = max(0, a.qa_rerolls)
+    if pol.get("enabled"):
+        print(f"[qa] 逐镜质检开启 max_rerolls={pol.get('max_rerolls')} "
+              f"min_sharpness={pol.get('min_sharpness')} "
+              f"min_motion={pol.get('min_motion')} "
+              f"face_check={bool(pol.get('face_check'))}")
+    else:
+        print("[qa] 逐镜质检已关闭")
+    return pol
+
+
+def _do_concat(eng, ep: int, data: dict, out_dir: str) -> int:
+    """--concat：镜头已生成完，只做第 ep 集拼接。"""
+    man = load_manifest()
+    shots = [man[f"ep{ep}_shot{i}"] for i in range(1, len(data[f"ep{ep}"]) + 1)
+             if f"ep{ep}_shot{i}" in man and os.path.exists(man[f"ep{ep}_shot{i}"])]
     film = os.path.join(out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
-    if not concat_shots(eng, shot_files, film):
+    return 0 if concat_shots(eng, shots, film) else 1
+
+
+def _chain_prev_frame(a, ep: int):
+    """I2V 模式：取上一集成片的尾帧，作为跨集续写起点。"""
+    prev_film = os.path.join(a.out_dir, f"ep{ep - 1}_series_film{FILM_SUFFIX}.mp4")
+    if not os.path.exists(prev_film):
         return None
-    if use_i2v:
-        return last_frame(film, os.path.join(WORK, f"ep{ep}_film_last.png"))
-    return None
+    f = last_frame(prev_film, os.path.join(WORK, f"ep{ep - 1}_film_last.png"))
+    print(f"[chain] 接上一集 ep{ep - 1} 尾帧: {'成功' if f else '失败'}")
+    return f
 
 
-def main():
+def _ep_mode(a, anchor: str) -> str:
+    if anchor:
+        return f"角色锚定({a.anchor_mode})"
+    return "I2V 续写" if a.i2v else "T2V 精确场景"
+
+
+def _run_one_episode(eng, a, data: dict, ep: int, style_anchor: str, anchor: str,
+                     anchor_map: dict, ref_images: list, qa_policy: dict,
+                     only, prev_frame):
+    """出第 ep 集，返回 (是否成功, 新的 prev_frame)。"""
+    # 仅 I2V 模式才需要接上一集尾帧；T2V 模式每镜独立，靠角色/风格锚定保持一致。
+    if a.i2v and prev_frame is None and ep > 1:
+        prev_frame = _chain_prev_frame(a, ep)
+    prompts = data.get(f"ep{ep}")
+    if not prompts:
+        print(f"[fatal] series_shots.json 缺少 ep{ep}")
+        return False, prev_frame
+    print(f"\n===== 第 {ep} 集（{len(prompts)} 镜, {_ep_mode(a, anchor)}）=====")
+    new_prev = run_episode(eng, ep, prompts, style_anchor, prev_frame, a.out_dir,
+                           a.i2v, anchor=anchor, anchor_mode=a.anchor_mode,
+                           only=only, force=a.force, anchor_map=anchor_map,
+                           ref_images=ref_images, qa_policy=qa_policy)
+    # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
+    film = os.path.join(a.out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
+    if not _ok(film):
+        print(f"[abort] 第 {ep} 集失败")
+        return False, new_prev
+    return True, new_prev
+
+
+def _run_episodes(eng, a, data: dict, style_anchor: str, anchor: str,
+                  anchor_map: dict, ref_images: list, qa_policy: dict,
+                  only) -> int:
+    """依次出片（--ep 指定单集，否则 1/2/3），任一集失败即中止。"""
+    episodes = [a.ep] if a.ep else [1, 2, 3]
+    prev_frame = None          # 仅 --i2v 模式下用于续写链
+    for ep in episodes:
+        ok, prev_frame = _run_one_episode(eng, a, data, ep, style_anchor, anchor,
+                                         anchor_map, ref_images, qa_policy,
+                                         only, prev_frame)
+        if not ok:
+            return 1
+        if ep != episodes[-1]:
+            time.sleep(2)
+    return 0
+
+
+def _parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ep", type=int, default=0, help="只重出第 N 集；0=全部三集")
     ap.add_argument("--concat", type=int, default=0, help="只做第 N 集拼接（镜头已生成完）")
@@ -438,10 +613,12 @@ def main():
                     help="关闭逐镜质检（不看质检、不重 roll）")
     ap.add_argument("--qa-rerolls", type=int, default=None,
                     help="质检不达标时自动换 seed 重出的次数上限（覆盖 config.qa.max_rerolls）")
-    a = ap.parse_args()
-    only = None
-    if a.only.strip():
-        only = {int(x) for x in a.only.replace("，", ",").split(",") if x.strip().isdigit()}
+    return ap.parse_args()
+
+
+def main():
+    a = _parse_args()
+    only = _parse_only(a.only)
 
     # 必须在任何 WORK/MANIFEST 相关操作之前切换工作区，否则会命中其它引擎的镜头缓存
     set_workspace(a.engine)
@@ -451,96 +628,22 @@ def main():
     data = load_json(SHOTS_FILE)
     # 角色卡：--anchor auto 自动查 config / outputs/anchor/，省得每次手填路径
     anchor, anchor_note = resolve_anchor(a.anchor)
-    if a.anchor and not anchor:
-        print(f"[anchor] {anchor_note}，改用无锚定出片")
-    elif anchor:
-        print(f"[anchor] 角色锚定图: {anchor}（{anchor_note}）")
-    else:
-        anc_dir = os.path.join(ROOT, "outputs", "anchor")
-        n = len([f for f in os.listdir(anc_dir)
-                 if f.lower().endswith(".png")]) if os.path.isdir(anc_dir) else 0
-        if n:
-            print(f"[anchor] 检测到 outputs/anchor/ 有 {n} 张角色卡；需要锁脸可加 "
-                  f"--anchor auto（注意：LTX 的 I2V 起始图权重偏高，可能让各镜画面趋同）")
-
-    anchor_map = {}
-    if a.anchor_map:
-        _p = a.anchor_map if os.path.isabs(a.anchor_map) else os.path.join(ROOT, a.anchor_map)
-        anchor_map = load_json(_p)
-        print(f"[anchor-map] 载入 {len(anchor_map)} 条逐镜锚定")
+    _note_anchor(anchor, anchor_note, a.anchor)
+    anchor_map = _load_anchor_map(a.anchor_map)
     try:
         style_anchor = load_json(BIBLE_FILE).get("style_anchor", "")
     except Exception:
         style_anchor = ""
-    # 身份参考图（增强人物一致性，配合首帧锚定走 Hybrid，不需白模）
-    ref_images = []
-    if a.ref_images and a.ref_images.lower() != "none":
-        if a.ref_images.lower() == "auto":
-            anc_dir = os.path.join(ROOT, "outputs", "anchor")
-            if os.path.isdir(anc_dir):
-                ref_images = sorted([
-                    os.path.join(anc_dir, f) for f in os.listdir(anc_dir)
-                    if f.lower().startswith("mira_") and f.lower().endswith(".png")
-                ])[:9]
-        else:
-            ref_images = [p.strip() for p in a.ref_images.split(",") if p.strip()]
-    print(f"[cfg] {eng.resolution} {eng.num_frames}帧@{eng.fps}fps  style_anchor={'有' if style_anchor else '无'}  ref_images={len(ref_images)}")
-
-    # 逐镜质检策略（config.qa，可被 --qa / --no-qa / --qa-rerolls 覆盖）
-    from agent import qa as qa_mod
-    qa_policy = qa_mod.load_policy(load_config())
-    if a.qa is not None:
-        qa_policy["enabled"] = a.qa
-    if a.qa_rerolls is not None:
-        qa_policy["max_rerolls"] = max(0, a.qa_rerolls)
-    if qa_policy.get("enabled"):
-        print(f"[qa] 逐镜质检开启 max_rerolls={qa_policy.get('max_rerolls')} "
-              f"min_sharpness={qa_policy.get('min_sharpness')} "
-              f"min_motion={qa_policy.get('min_motion')} "
-              f"face_check={bool(qa_policy.get('face_check'))}")
-    else:
-        print("[qa] 逐镜质检已关闭")
+    ref_images = _collect_ref_images(a.ref_images)
+    print(f"[cfg] {eng.resolution} {eng.num_frames}帧@{eng.fps}fps  "
+          f"style_anchor={'有' if style_anchor else '无'}  "
+          f"ref_images={len(ref_images)}")
+    qa_policy = _build_qa_policy(a)
 
     if a.concat:
-        ep = a.concat
-        man = load_manifest()
-        shots = [man[f"ep{ep}_shot{i}"] for i in range(1, len(data[f"ep{ep}"]) + 1)
-                 if f"ep{ep}_shot{i}" in man and os.path.exists(man[f"ep{ep}_shot{i}"])]
-        film = os.path.join(a.out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
-        return 0 if concat_shots(eng, shots, film) else 1
-
-    episodes = [a.ep] if a.ep else [1, 2, 3]
-    prev_frame = None          # 仅 --i2v 模式下用于续写链
-    for ep in episodes:
-        # 仅 I2V 模式才需要接上一集尾帧；T2V 模式每镜独立，靠角色/风格锚定保持一致。
-        if a.i2v and prev_frame is None and ep > 1:
-            prev_film = os.path.join(a.out_dir, f"ep{ep - 1}_series_film{FILM_SUFFIX}.mp4")
-            if os.path.exists(prev_film):
-                prev_frame = last_frame(
-                    prev_film, os.path.join(WORK, f"ep{ep - 1}_film_last.png"))
-                print(f"[chain] 接上一集 ep{ep - 1} 尾帧: {'成功' if prev_frame else '失败'}")
-        prompts = data.get(f"ep{ep}")
-        if not prompts:
-            print(f"[fatal] series_shots.json 缺少 ep{ep}")
-            return 1
-        if anchor:
-            mode = f"角色锚定({a.anchor_mode})"
-        else:
-            mode = "I2V 续写" if a.i2v else "T2V 精确场景"
-        print(f"\n===== 第 {ep} 集（{len(prompts)} 镜, {mode}）=====")
-        film = os.path.join(a.out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
-        prev_frame = run_episode(eng, ep, prompts, style_anchor,
-                                 prev_frame, a.out_dir, a.i2v,
-                                 anchor=anchor, anchor_mode=a.anchor_mode,
-                                 only=only, force=a.force, anchor_map=anchor_map,
-                                 ref_images=ref_images, qa_policy=qa_policy)
-        # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
-        if not (os.path.exists(film) and os.path.getsize(film) > 0):
-            print(f"[abort] 第 {ep} 集失败")
-            return 1
-        if ep != episodes[-1]:
-            time.sleep(2)
-    return 0
+        return _do_concat(eng, a.concat, data, a.out_dir)
+    return _run_episodes(eng, a, data, style_anchor, anchor, anchor_map,
+                         ref_images, qa_policy, only)
 
 
 if __name__ == "__main__":

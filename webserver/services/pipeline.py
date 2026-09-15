@@ -72,6 +72,75 @@ def _zh_ratio(s: str) -> float:
     return sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff") / len(s)
 
 
+_STORYBOARD_SYSTEM = (
+    "你是资深科幻短片分镜编剧。任务：根据给定概念，产出可直接喂给图生视频模型"
+    "(LTX-2.5，使用英文提示词)的镜头列表，以及一段配套的中文第一人称内心独白解说"
+    "(用于配音+字幕)。\n"
+    "要求：\n"
+    "- shots：恰好 18 条英文镜头描述，每条一句，含 主体+动作+场景+光影/镜头运动+风格，"
+    "默认日式动漫风格（anime style, cel-shaded, clean line art, vibrant colors），"
+    "画面连续可拼接成约 60 秒短片，紧扣主题。\n"
+    "- narration：恰好 9 条中文解说，第一人称内心独白，口语化、有情绪递进；"
+    "关键：每句必须短（12-18 字），一口气能说完（约 4-5 秒），不要写复合长句或并列句，"
+    "否则配音会被加速显得机械。\n"
+    "- 只输出 JSON，形如：{\"shots\":[...18...],\"narration\":[...9...]}，不要多余文字。"
+)
+
+
+def _storyboard_prompts(theme: str, bible: dict, material: list) -> tuple:
+    """构造分镜扩写的 system / user 提示词。"""
+    refs = "\n".join(f"- {m['text'][:600]}" for m in material[:3])
+    user = (
+        f"主题概念：{theme}\n\n概念企划：\n{json.dumps(bible, ensure_ascii=False)[:1500]}\n\n"
+        f"参考素材（节选）：\n{refs}\n\n请产出 18 镜英文分镜与 9 段中文解说。"
+    )
+    return _STORYBOARD_SYSTEM, user
+
+
+def _require_str_list(value, name: str) -> list:
+    """要求是字符串数组（不校验是否非空）；否则抛 RuntimeError。"""
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise RuntimeError(f"{name} 不是字符串数组")
+    return value
+
+
+def _pad_or_trim(items: list, n: int, empty_fill: str = "") -> tuple:
+    """数量对齐：不足补齐（复制末项，空则用 empty_fill），超出截断。
+
+    返回 (新列表, 是否发生了补齐)。
+    """
+    if len(items) < n:
+        fill = items[-1] if items else empty_fill
+        return items + [fill] * (n - len(items)), True
+    if len(items) > n:
+        return items[:n], False
+    return items, False
+
+
+def _normalize_storyboard(data: dict) -> tuple:
+    """校验并归一化 LLM 产出的 shots / narration，返回 (shots, narration)。"""
+    shots = _require_str_list(data.get("shots"), "shots")
+    if not shots:
+        raise RuntimeError("shots 不是非空字符串数组")
+    narration = _require_str_list(data.get("narration"), "narration")
+    shots = [s.strip() for s in shots if s.strip()]
+    narration = [s.strip() for s in narration if s.strip()]
+    shots, padded = _pad_or_trim(shots, 18)
+    if padded:
+        print("[storyboard] shots 不足 18，已补至 18")
+    narration, _ = _pad_or_trim(narration, 9, empty_fill="……")
+    # 校验解说语言：prompt 已明确要求中文，但小模型经常忽略指令直接吐英文。
+    # 若静默写入，后续 TTS 会用中文语音念英文、字幕也是英文，成片报废且不易察觉，
+    # 因此宁可在这里中断任务，也不产出英文解说。
+    bad = [n for n in narration if _zh_ratio(n) < 0.3]
+    if bad:
+        raise RuntimeError(
+            "解说必须是中文，但 LLM 产出了英文（示例："
+            + " / ".join(x[:45] for x in bad[:2])
+            + "）。请重试，或换更听话的模型（config.llm.model，推荐 gemma4:e2b）。")
+    return shots, narration
+
+
 def storyboard_from_bible() -> dict:
     """C→分镜桥接：用当前企划(bible)+素材，让 LLM 扩写成 18 镜英文分镜 + 9 段中文解说。
 
@@ -85,31 +154,14 @@ def storyboard_from_bible() -> dict:
     client = make_client(cfg)
     if client is None:
         raise RuntimeError("无法创建 LLM 客户端（缺 openai 包或配置错误）")
-    model = llm.get("model")
     agent = get_agent()
     bible = agent.state.get("bible") or {}
     theme = cfg.get("project", {}).get("theme") or bible.get("logline") or ""
     material = load_material()
-    refs = "\n".join(f"- {m['text'][:600]}" for m in material[:3])
-    system = (
-        "你是资深科幻短片分镜编剧。任务：根据给定概念，产出可直接喂给图生视频模型"
-        "(LTX-2.5，使用英文提示词)的镜头列表，以及一段配套的中文第一人称内心独白解说"
-        "(用于配音+字幕)。\n"
-        "要求：\n"
-        "- shots：恰好 18 条英文镜头描述，每条一句，含 主体+动作+场景+光影/镜头运动+风格，"
-        "默认日式动漫风格（anime style, cel-shaded, clean line art, vibrant colors），"
-        "画面连续可拼接成约 60 秒短片，紧扣主题。\n"
-        "- narration：恰好 9 条中文解说，第一人称内心独白，口语化、有情绪递进；"
-        "关键：每句必须短（12-18 字），一口气能说完（约 4-5 秒），不要写复合长句或并列句，"
-        "否则配音会被加速显得机械。\n"
-        "- 只输出 JSON，形如：{\"shots\":[...18...],\"narration\":[...9...]}，不要多余文字。"
-    )
-    user = (
-        f"主题概念：{theme}\n\n概念企划：\n{json.dumps(bible, ensure_ascii=False)[:1500]}\n\n"
-        f"参考素材（节选）：\n{refs}\n\n请产出 18 镜英文分镜与 9 段中文解说。"
-    )
+    system, user = _storyboard_prompts(theme, bible, material)
     print("[storyboard] 调用 LLM 生成分镜 ...")
-    out = chat(client, system, user, max_tokens=3000, temperature=0.85, model=model,
+    out = chat(client, system, user, max_tokens=3000, temperature=0.85,
+               model=llm.get("model"),
                extra_body={"enable_thinking": False})
     if not out:
         raise RuntimeError("LLM 返回为空（可能模型是推理模型且 max_tokens 不足，或模型未加载）")
@@ -117,34 +169,10 @@ def storyboard_from_bible() -> dict:
         data = json.loads(extract_json(out))
     except Exception as e:
         raise RuntimeError(f"LLM 返回无法解析为 JSON：{e}\n原始：{out[:500]}")
-    shots = data.get("shots")
-    narration = data.get("narration")
-    if not isinstance(shots, list) or not all(isinstance(x, str) for x in shots) or not shots:
-        raise RuntimeError("shots 不是非空字符串数组")
-    if not isinstance(narration, list) or not all(isinstance(x, str) for x in narration):
-        raise RuntimeError("narration 不是字符串数组")
-    shots = [s.strip() for s in shots if s.strip()]
-    narration = [s.strip() for s in narration if s.strip()]
-    if len(shots) < 18:
-        shots = shots + [shots[-1]] * (18 - len(shots))
-        print("[storyboard] shots 不足 18，已补至 18")
-    elif len(shots) > 18:
-        shots = shots[:18]
-    if len(narration) < 9:
-        narration = narration + [(narration[-1] if narration else "……")] * (9 - len(narration))
-    elif len(narration) > 9:
-        narration = narration[:9]
-    # 校验解说语言：prompt 已明确要求中文，但小模型经常忽略指令直接吐英文。
-    # 若静默写入，后续 TTS 会用中文语音念英文、字幕也是英文，成片报废且不易察觉，
-    # 因此宁可在这里中断任务，也不产出英文解说。
-    bad = [n for n in narration if _zh_ratio(n) < 0.3]
-    if bad:
-        raise RuntimeError(
-            "解说必须是中文，但 LLM 产出了英文（示例："
-            + " / ".join(x[:45] for x in bad[:2])
-            + "）。请重试，或换更听话的模型（config.llm.model，推荐 gemma4:e2b）。")
+    shots, narration = _normalize_storyboard(data)
     with open(STORYBOARD_PATH, "w", encoding="utf-8") as f:
-        json.dump({"shots": shots, "narration": narration}, f, ensure_ascii=False, indent=2)
+        json.dump({"shots": shots, "narration": narration}, f,
+                  ensure_ascii=False, indent=2)
     print(f"[storyboard] 已写入，{len(shots)} 镜 / {len(narration)} 段解说")
     return {"ok": True, "shots": len(shots), "narration": len(narration)}
 
@@ -199,6 +227,45 @@ def run_script(script: str, timeout: int = 7200, args: list | None = None) -> No
 _probe_cache: dict = {}
 
 
+def _parse_video_line(line: str, info: dict) -> None:
+    """从 ffmpeg 的 ` Video: ` 行解析分辨率 / 帧率 / 视频编码。"""
+    mm = re.search(r"(\d{2,5})x(\d{2,5})", line)
+    if mm:
+        info["width"], info["height"] = int(mm.group(1)), int(mm.group(2))
+    fm = re.search(r"([\d.]+) fps", line)
+    if fm:
+        info["fps"] = round(float(fm.group(1)), 2)
+    cm = re.search(r"Video: (\w+)", line)
+    if cm:
+        info["vcodec"] = cm.group(1)
+
+
+def _parse_audio_line(line: str, info: dict) -> None:
+    """从 ffmpeg 的 ` Audio: ` 行解析音频编码 / 采样率 / 声道。"""
+    cm = re.search(r"Audio: (\w+)", line)
+    if cm:
+        info["acodec"] = cm.group(1)
+    sm = re.search(r"(\d+) Hz", line)
+    if sm:
+        info["sample_rate"] = int(sm.group(1))
+    chm = re.search(r"(mono|stereo|5\.1)", line)
+    if chm:
+        info["channels"] = chm.group(1)
+
+
+def _parse_probe_streams(err: str, info: dict) -> None:
+    """解析 ffmpeg -i 的 stderr 输出，填充时长 / 分辨率 / 帧率 / 编码。"""
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
+    if m:
+        info["duration_sec"] = round(
+            int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)), 2)
+    for line in err.splitlines():
+        if " Video: " in line and "width" not in info:
+            _parse_video_line(line, info)
+        if " Audio: " in line and "acodec" not in info:
+            _parse_audio_line(line, info)
+
+
 def probe_media(path: str) -> dict:
     """探视频规格（时长/分辨率/帧率/编码）。
 
@@ -218,32 +285,7 @@ def probe_media(path: str) -> dict:
         exe = imageio_ffmpeg.get_ffmpeg_exe()
         r = subprocess.run([exe, "-i", path], capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=30)
-        err = r.stderr or ""
-        m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
-        if m:
-            info["duration_sec"] = round(
-                int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)), 2)
-        for line in err.splitlines():
-            if " Video: " in line and "width" not in info:
-                mm = re.search(r"(\d{2,5})x(\d{2,5})", line)
-                if mm:
-                    info["width"], info["height"] = int(mm.group(1)), int(mm.group(2))
-                fm = re.search(r"([\d.]+) fps", line)
-                if fm:
-                    info["fps"] = round(float(fm.group(1)), 2)
-                cm = re.search(r"Video: (\w+)", line)
-                if cm:
-                    info["vcodec"] = cm.group(1)
-            if " Audio: " in line and "acodec" not in info:
-                cm = re.search(r"Audio: (\w+)", line)
-                if cm:
-                    info["acodec"] = cm.group(1)
-                sm = re.search(r"(\d+) Hz", line)
-                if sm:
-                    info["sample_rate"] = int(sm.group(1))
-                chm = re.search(r"(mono|stereo|5\.1)", line)
-                if chm:
-                    info["channels"] = chm.group(1)
+        _parse_probe_streams(r.stderr or "", info)
     except Exception as e:  # noqa: BLE001  探测失败只降级显示，不能拖垮看板
         info["probe_error"] = str(e)
     _probe_cache[key] = info

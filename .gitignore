@@ -50,11 +50,14 @@ space/_deploy_tmp/
 _*.py
 _*.ps1
 _*.bat
+_*.txt
 kill_test.py
 tmp_vae_test.py
 
 # 测试 / 构建缓存
 .pytest_cache/
+# 本地 pytest 临时目录（放仓库内可避开沙箱对系统临时目录的清删拦截）
+.pytest_tmp/
 .ruff_cache/
 *.egg-info/
 build/

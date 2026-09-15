@@ -17,16 +17,35 @@ import sys
 import subprocess
 
 
+def _set_profile_key(cfg: dict, group: str, key: str, value) -> None:
+    """把 value 写入 cfg.profiles.<group>.*.<key>（仅处理 dict 档案）。"""
+    profiles = ((cfg.get("profiles", {}) or {}).get(group, {}) or {}).values()
+    for p in profiles:
+        if isinstance(p, dict):
+            p[key] = value
+
+
+def _override_llm_endpoint(cfg: dict, base_url: str) -> None:
+    """把 Ollama 地址写入 config.llm 与所有 llm 档案（补 /v1 后缀）。"""
+    v1 = base_url + "/v1"
+    cfg.setdefault("llm", {})["base_url"] = v1
+    _set_profile_key(cfg, "llm", "base_url", v1)
+
+
+def _override_comfyui_endpoint(cfg: dict, api: str) -> None:
+    """把 ComfyUI 地址写入 engine 两套引擎 + image_prompt + 所有 comfyui 档案。"""
+    cfg.setdefault("engine", {}).setdefault("comfyui_ltx", {})["api"] = api
+    cfg.setdefault("engine", {}).setdefault("comfyui_mmH3", {})["api"] = api
+    cfg.setdefault("image_prompt", {}).setdefault("comfyui", {})["api"] = api
+    _set_profile_key(cfg, "comfyui", "api", api)
+
+
 def apply_env_overrides(cfg: dict) -> dict:
     cfg = cfg or {}
 
     ollama = (os.environ.get("OLLAMA_URL") or "").rstrip("/")
     if ollama:
-        v1 = ollama + "/v1"
-        cfg.setdefault("llm", {})["base_url"] = v1
-        for p in ((cfg.get("profiles", {}) or {}).get("llm", {}) or {}).values():
-            if isinstance(p, dict):
-                p["base_url"] = v1
+        _override_llm_endpoint(cfg, ollama)
 
     if os.environ.get("LLM_MODEL"):
         cfg.setdefault("llm", {})["model"] = os.environ["LLM_MODEL"]
@@ -35,12 +54,7 @@ def apply_env_overrides(cfg: dict) -> dict:
 
     comfy = os.environ.get("COMFYUI_API")
     if comfy:
-        cfg.setdefault("engine", {}).setdefault("comfyui_ltx", {})["api"] = comfy
-        cfg.setdefault("engine", {}).setdefault("comfyui_mmH3", {})["api"] = comfy
-        cfg.setdefault("image_prompt", {}).setdefault("comfyui", {})["api"] = comfy
-        for p in ((cfg.get("profiles", {}) or {}).get("comfyui", {}) or {}).values():
-            if isinstance(p, dict):
-                p["api"] = comfy
+        _override_comfyui_endpoint(cfg, comfy)
 
     if os.environ.get("ENGINE_BACKEND"):
         cfg.setdefault("engine", {})["backend"] = os.environ["ENGINE_BACKEND"]
@@ -48,8 +62,7 @@ def apply_env_overrides(cfg: dict) -> dict:
     # 显卡后端：amd 时 NVFP4 不支持，把 LTX 精度降为 bf16（bf16 权重跑 ROCm 更稳）
     if os.environ.get("GPU_BACKEND") == "amd":
         cfg.setdefault("engine", {}).setdefault("comfyui_ltx", {})["precision"] = "bf16"
-    cfg = apply_hw_overrides(cfg)
-    return cfg
+    return apply_hw_overrides(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +74,8 @@ def apply_env_overrides(cfg: dict) -> dict:
 #   config.auto_hardware: true     同上，写进 config.yaml
 #   config.hw_tier: <档>           同上，写进 config.yaml
 # ---------------------------------------------------------------------------
-def detect_hardware() -> dict:
-    """跨平台检测 GPU 厂商 / 显存 / 内存，无需额外依赖。"""
-    info = {"vendor": None, "gpu_name": None, "vram_gb": 0.0, "ram_gb": 0.0}
-    # ---- RAM ----
+def _detect_ram_gb() -> float:
+    """跨平台读取物理内存总量（GiB）；失败返回 0.0。"""
     try:
         if sys.platform.startswith("win"):
             out = subprocess.run(
@@ -72,79 +83,113 @@ def detect_hardware() -> dict:
                  "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
                 capture_output=True, text=True, timeout=20)
             if out.returncode == 0 and out.stdout.strip():
-                info["ram_gb"] = int(out.stdout.strip()) / (1024 ** 3)
+                return int(out.stdout.strip()) / (1024 ** 3)
         elif sys.platform.startswith("linux"):
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal:"):
-                        info["ram_gb"] = int(line.split()[1]) / 1024 / 1024
-                        break
+                        return int(line.split()[1]) / 1024 / 1024
         elif sys.platform == "darwin":
             out = subprocess.run(["sysctl", "-n", "hw.memsize"],
                                  capture_output=True, text=True, timeout=10)
-            info["ram_gb"] = int(out.stdout.strip()) / (1024 ** 3)
+            return int(out.stdout.strip()) / (1024 ** 3)
     except Exception:
         pass
-    # ---- GPU: NVIDIA (nvidia-smi) ----
+    return 0.0
+
+
+def _detect_nvidia() -> dict | None:
+    """nvidia-smi 探测 NVIDIA 显卡；未安装/失败返回 None。"""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10)
-        if out.returncode == 0:
-            lines = [l for l in out.stdout.strip().splitlines() if l.strip()]
-            if lines:
-                parts = [p.strip() for p in lines[0].split(",")]
-                info["vendor"] = "NVIDIA"
-                info["gpu_name"] = parts[0]
-                try:
-                    # nvidia-smi --format=nounits 的 memory.total 单位为 MiB
-                    info["vram_gb"] = float(parts[1]) / 1024.0
-                except (ValueError, IndexError):
-                    pass
-                return info
+        if out.returncode != 0:
+            return None
+        lines = [l for l in out.stdout.strip().splitlines() if l.strip()]
+        if not lines:
+            return None
+        parts = [p.strip() for p in lines[0].split(",")]
+        info = {"vendor": "NVIDIA", "gpu_name": parts[0], "vram_gb": 0.0}
+        try:
+            # nvidia-smi --format=nounits 的 memory.total 单位为 MiB
+            info["vram_gb"] = float(parts[1]) / 1024.0
+        except (ValueError, IndexError):
+            pass
+        return info
     except Exception:
-        pass
-    # ---- GPU: AMD / 其它（Windows WMI）----
-    if sys.platform.startswith("win"):
-        try:
-            ps = ("Get-CimInstance Win32_VideoController | "
-                  "Where-Object {$_.AdapterRAM} | "
-                  "Select-Object Name,AdapterRAM | ConvertTo-Json")
-            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                                 capture_output=True, text=True, timeout=20)
-            if out.returncode == 0 and out.stdout.strip():
-                import json as _json
-                arr = _json.loads(out.stdout)
-                if isinstance(arr, dict):
-                    arr = [arr]
-                for dev in arr:
-                    name = (dev.get("Name") or "").upper()
-                    ram = (dev.get("AdapterRAM") or 0) / (1024 ** 3)
-                    if "AMD" in name or "RADEON" in name:
-                        info["vendor"] = "AMD"
-                    elif info["vendor"] is None and ("NVIDIA" in name or "INTEL" in name):
-                        info["vendor"] = "OTHER"
-                    if ram > info["vram_gb"]:
-                        info["vram_gb"] = ram
-                        info["gpu_name"] = dev.get("Name")
-        except Exception:
-            pass
-    # ---- GPU: AMD / NVIDIA（Linux lspci）----
-    elif sys.platform.startswith("linux"):
-        try:
-            out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=10)
-            for line in out.stdout.splitlines():
-                if "VGA" in line or "3D" in line:
-                    if "AMD" in line or "ATI" in line:
-                        info["vendor"] = "AMD"
-                    elif "NVIDIA" in line:
-                        info["vendor"] = "NVIDIA"
-                    if info["vendor"]:
-                        info["gpu_name"] = line.split(":")[-1].strip()
-                        break
-        except Exception:
-            pass
+        return None
+
+
+def _pick_vram_device(arr: list) -> dict:
+    """从 WMI 设备列表里选出显存最大的那块，并识别厂商。"""
+    info = {"vendor": None, "gpu_name": None, "vram_gb": 0.0}
+    for dev in arr:
+        name = (dev.get("Name") or "").upper()
+        ram = (dev.get("AdapterRAM") or 0) / (1024 ** 3)
+        if "AMD" in name or "RADEON" in name:
+            info["vendor"] = "AMD"
+        elif info["vendor"] is None and ("NVIDIA" in name or "INTEL" in name):
+            info["vendor"] = "OTHER"
+        if ram > info["vram_gb"]:
+            info["vram_gb"] = ram
+            info["gpu_name"] = dev.get("Name")
+    return info
+
+
+def _detect_gpu_win_wmi() -> dict | None:
+    """Windows WMI 探测非 NVIDIA 显卡（AMD / Intel）；失败返回 None。"""
+    import json as _json
+    try:
+        ps = ("Get-CimInstance Win32_VideoController | "
+              "Where-Object {$_.AdapterRAM} | "
+              "Select-Object Name,AdapterRAM | ConvertTo-Json")
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=20)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        arr = _json.loads(out.stdout)
+    except Exception:
+        return None
+    if isinstance(arr, dict):
+        arr = [arr]
+    return _pick_vram_device(arr)
+
+
+def _detect_gpu_linux_lspci() -> dict | None:
+    """Linux lspci 探测 AMD / NVIDIA 显卡；失败返回 None。"""
+    try:
+        out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=10)
+        for line in out.stdout.splitlines():
+            if "VGA" not in line and "3D" not in line:
+                continue
+            if "AMD" in line or "ATI" in line:
+                vendor = "AMD"
+            elif "NVIDIA" in line:
+                vendor = "NVIDIA"
+            else:
+                continue
+            return {"vendor": vendor, "gpu_name": line.split(":")[-1].strip(),
+                    "vram_gb": 0.0}
+    except Exception:
+        return None
+    return None
+
+
+def detect_hardware() -> dict:
+    """跨平台检测 GPU 厂商 / 显存 / 内存，无需额外依赖。"""
+    info = {"vendor": None, "gpu_name": None, "vram_gb": 0.0, "ram_gb": 0.0}
+    info["ram_gb"] = _detect_ram_gb()
+    nv = _detect_nvidia()
+    if nv:
+        info.update(nv)
+        return info
+    other = (_detect_gpu_win_wmi() if sys.platform.startswith("win")
+             else _detect_gpu_linux_lspci() if sys.platform.startswith("linux")
+             else None)
+    if other:
+        info.update({k: v for k, v in other.items() if k != "ram_gb"})
     return info
 
 

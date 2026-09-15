@@ -303,6 +303,30 @@ class MMH3Engine(VideoEngine):
             return None
         return None
 
+    @staticmethod
+    def _assert_control_usable(control_video: str, fc_video: str | None) -> None:
+        """显式传了 control_video 但文件不可用时立刻报错（杜绝静默不加控制）。"""
+        usable = bool(fc_video) and os.path.isfile(fc_video)
+        if usable:
+            try:
+                usable = os.path.getsize(fc_video) > 0
+            except OSError:
+                usable = False
+        if not usable:
+            raise RuntimeError(
+                f"Fun Control 控制视频不可用（不存在或为空）: {control_video}"
+                "；若本镜不需要走位控制，请不要传 control_video。")
+
+    def _resolve_fc_strength(self, fc_strength: float | None) -> float:
+        """解析并校验 Fun Control strength（须 >0；≥1.5 实测崩坏，仅告警）。"""
+        strength = self.fc_strength if fc_strength is None else float(fc_strength)
+        if strength <= 0:
+            raise RuntimeError(f"Fun Control strength 必须 > 0，当前 {strength}")
+        if strength >= 1.5:
+            log(f"  [mmh3] 警告: Fun Control strength={strength} ≥ 1.5，"
+                f"实测画面会崩坏（建议 0.8~1.2）")
+        return strength
+
     def _validate_control_video(self, control_video: str | None,
                                 fc_strength: float | None = None) -> None:
         """Fun Control 入参校验，把三类「静默失败」挡在提交 ComfyUI 之前。
@@ -315,24 +339,10 @@ class MMH3Engine(VideoEngine):
         """
         fc_video = control_video or self.fc_video
         if control_video:
-            usable = bool(fc_video) and os.path.isfile(fc_video)
-            if usable:
-                try:
-                    usable = os.path.getsize(fc_video) > 0
-                except OSError:
-                    usable = False
-            if not usable:
-                raise RuntimeError(
-                    f"Fun Control 控制视频不可用（不存在或为空）: {control_video}"
-                    "；若本镜不需要走位控制，请不要传 control_video。")
+            self._assert_control_usable(control_video, fc_video)
         if not (fc_video and os.path.isfile(fc_video)):
             return
-        strength = self.fc_strength if fc_strength is None else float(fc_strength)
-        if strength <= 0:
-            raise RuntimeError(f"Fun Control strength 必须 > 0，当前 {strength}")
-        if strength >= 1.5:
-            log(f"  [mmh3] 警告: Fun Control strength={strength} ≥ 1.5，"
-                f"实测画面会崩坏（建议 0.8~1.2）")
+        self._resolve_fc_strength(fc_strength)
         got = self._probe_frame_count(fc_video)
         if got is None:
             log(f"  [mmh3] 控制视频帧数未知（无 ffprobe），跳过帧数校验: "
@@ -357,6 +367,9 @@ class MMH3Engine(VideoEngine):
         节点 ID 一律经 NodeAllocator 按语义名分配，不再出现裸数字：分配器保证
         名字唯一、ID 唯一，构建完成后再 audit() 一次，杜绝撞号——历史上
         ref_images 的 20~28 与后处理的 30/31/32 撞号会形成依赖环。
+
+        各节点族（模型链 / 条件 / 采样器 / Fun Control / 输出）拆到 _add_* /
+        _build_* 子方法里，本函数只负责按依赖顺序编排。
         """
         ids = NodeAllocator()
         seed = seed if seed is not None else self.seed
@@ -368,11 +381,9 @@ class MMH3Engine(VideoEngine):
         # （conditioning.py: resolve_task_type → "I2VA cannot include reference
         # media; use Auto or Hybrid"），直接抛错。计入后走 Hybrid 即可，
         # 且无需白模 ref_video（避免参考视频的运动信号压过身份）。
-        has_refimg = bool([p for p in (ref_images or [])
-                           if p and os.path.exists(p)])
-        has_any_ref = has_ref or has_refimg
+        has_refimg = any(p and os.path.exists(p) for p in (ref_images or []))
         # 任务类型：首帧锁形象/场景，参考视频锁走位与镜头运动，同时给走 Hybrid
-        task = self.resolve_task(has_img, has_any_ref)
+        task = self.resolve_task(has_img, has_ref or has_refimg)
 
         n_unet = ids.alloc("unet")
         n_clip = ids.alloc("clip")
@@ -386,141 +397,23 @@ class MMH3Engine(VideoEngine):
             n_vae_v: {"class_type": "VAELoader", "inputs": {"vae_name": self.video_vae}},
             n_vae_a: {"class_type": "VAELoader", "inputs": {"vae_name": self.audio_vae}},
         }
-        # 模型源：Turbo 时经 LoRA 注入
-        if self.turbo:
-            n_lora = ids.alloc("lora")
-            nodes[n_lora] = {"class_type": "LoraLoaderBypassModelOnly",
-                             "inputs": {"model": [n_unet, 0], "lora_name": self.lora,
-                                        "strength_model": self.lora_strength}}
-            model_src = [n_lora, 0]
-        else:
-            model_src = [n_unet, 0]
+        # 模型源链：Turbo(经 LoRA) → BlockCache，细节见 _add_model_chain
+        model_src = self._add_model_chain(nodes, ids, n_unet)
 
-        # BlockCache（缓存加速）：插在模型源与采样器之间。仅当 config 开启时接入，
-        # 缺失节点时 ComfyUI 会报 class_type 不存在，故默认关闭。
-        if self.block_cache:
-            n_bc = ids.alloc("block_cache")
-            nodes[n_bc] = {"class_type": "MiniMaxH3BlockCacheT8", "inputs": {
-                "model": model_src,
-                "residual_diff_threshold": self.bc_threshold,
-                "start_percent": 0.08, "end_percent": 0.95,
-                "max_consecutive_hits": 2,
-                "cache_device": self.bc_cache_device,
-                "metric_stride": 8, "verbose": False}}
-            model_src = [n_bc, 0]
+        # 条件节点（含首帧 / 参考视频 / 多参考图），细节见 _build_cond_inputs
+        cond_in, n_cond = self._build_cond_inputs(
+            nodes, ids, prompt, w, h, task, image, ref_video, ref_images,
+            has_img, has_ref)
 
-        # 条件节点（I2VA 时挂首帧）
-        cond_in = {
-            "clip": ["3", 0], "video_vae": ["4", 0], "audio_vae": ["5", 0],
-            "prompt": prompt, "width": w, "height": h, "length": self.num_frames,
-            "task_type": task,
-            "audio_mode": "native", "audio_denoise_strength": 1.0,
-            "add_source_as_reference": False, "prompt_primary_audio_ordinal": 0,
-            "strict_prompt_tags": True, "ref_image_size": "match",
-            "reference_video_policy": "official_2_to_15s",
-        }
-        if has_img:
-            meta = self.client.upload_image(image)
-            img_name = (meta or {}).get("name") or (meta or {}).get("filename")
-            if not img_name:
-                raise RuntimeError(f"起始帧上传失败: {image}")
-            n_first = ids.alloc("first_frame")
-            nodes[n_first] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
-            cond_in["first_frame"] = [n_first, 0]
-        if has_ref:
-            # 参考视频：本地绝对路径直接加载（免上传），输出 IMAGE 帧批次接 ref_videos
-            n_refv = ids.alloc("ref_video")
-            nodes[n_refv] = {"class_type": "VHS_LoadVideoPath", "inputs": {
-                "video": os.path.abspath(ref_video),
-                "force_rate": float(self.fps),
-                "custom_width": 0, "custom_height": 0,
-                "frame_load_cap": 0, "skip_first_frames": 0,
-                "select_every_nth": 1,
-            }}
-            # Autogrow 在 API prompt 里是**带父级前缀的路径键**（finalize_prefix 用 "." 连接）：
-            #   f"{autogrow_input_id}.{prefix}{i}"，i 从 0 开始 → "ref_videos.ref_video_0"
-            # 写成嵌套 dict 或裸 ref_video_1 都会被丢弃（节点不执行，报
-            # "requires at least one reference media input"）。
-            cond_in["ref_videos.ref_video_0"] = [n_refv, 0]
-        # 多参考图（最多 9 张）：增强身份/形象信号，缓解 Hybrid 下人物形态崩坏。
-        # 同样是 Autogrow：键名带父级前缀 ref_images.ref_image_i，i 从 0 开始。
-        for i, rp in enumerate((ref_images or [])[:9]):
-            if not (rp and os.path.exists(rp)):
-                continue
-            meta = self.client.upload_image(rp)
-            nm = (meta or {}).get("name") or (meta or {}).get("filename")
-            if not nm:
-                continue
-            nid = ids.alloc_range("ref_image", i)    # 20..28，区间由分配器保证不越界
-            nodes[nid] = {"class_type": "LoadImage", "inputs": {"image": nm}}
-            cond_in[f"ref_images.ref_image_{i}"] = [nid, 0]
-        n_cond = ids.alloc("cond")
-        nodes[n_cond] = {"class_type": "MiniMaxH3AudioConditioningT8", "inputs": cond_in}
-
-        # 采样器：Turbo 走双速率（4 视频 / 8 音频），否则统一步数双时钟。
-        # 二采模式下一采固定用 DualClock（统一 sigma 轨迹 → ParityPlan 切 coarse/refine）。
-        n_sampler = ids.alloc("sampler")
-        if self.two_pass_latent:
-            nodes[n_sampler] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
-                "model": model_src, "av_latent": [n_cond, 1], "steps": self.tp_base,
-                "shift_video": self.shift_video, "shift_audio": self.shift_audio,
-                "sampler_name": "dual_clock_euler", "scheduler": "native_flow"}}
-            # 二采 sigma 计划：coarse 段给一采，refine 段给二采（base = coarse + refine）
-            n_par = ids.alloc("tp_parity")
-            nodes[n_par] = {"class_type": "MiniMaxH3LearnedTwoPassParityPlanT8Advanced",
-                            "inputs": {"model": [n_sampler, 0], "base_steps": self.tp_base,
-                                       "coarse_steps": self.tp_coarse,
-                                       "refine_steps": self.tp_refine}}
-            first_sigmas = [n_par, 0]
-        elif self.turbo:
-            nodes[n_sampler] = {"class_type": "MiniMaxH3MultiRateSamplerEXPT8", "inputs": {
-                "model": model_src, "av_latent": [n_cond, 1],
-                "video_steps": self.video_steps, "audio_steps": self.audio_steps,
-                "shift_video": self.shift_video, "shift_audio": self.shift_audio}}
-            first_sigmas = [n_sampler, 2]
-        else:
-            nodes[n_sampler] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
-                "model": model_src, "av_latent": [n_cond, 1], "steps": self.steps,
-                "shift_video": self.shift_video, "shift_audio": self.shift_audio,
-                "sampler_name": "dual_clock_euler", "scheduler": "native_flow"}}
-            first_sigmas = [n_sampler, 2]
-        # 一采 guider model：Turbo / 二采 => 采样器 wrapper 输出(7.0)；非 Turbo 直连模型源
-        guider_model = ([n_sampler, 0] if (self.turbo or self.two_pass_latent)
-                        else model_src)
+        # 采样器节点族（Turbo 双速率 / 二采 DualClock / 统一步数），细节见 _add_sampler
+        n_sampler, first_sigmas, guider_model, n_par = self._add_sampler(
+            nodes, ids, model_src, n_cond)
 
         # ---------- Fun Control：把「走位/构图」真正交给白模 ----------
-        # 逐帧 depth/pose 控制视频经 FunControlApply 注入 DiT(第0/10/20/30/40层)。
-        # 实测：能把走位方向从 H3 默认「左移」纠正为「跟随白模」；strength 0.8~1.2，≥1.5 崩坏。
-        cond_src = [n_cond, 0]
-        fc_video = control_video or self.fc_video
-        if ((self.fun_control_enable or control_video)
-                and fc_video and os.path.exists(fc_video)):
-            fc_str = self.fc_strength if fc_strength is None else float(fc_strength)
-            n_fc_l = ids.alloc("fc_loader")
-            n_fc_v = ids.alloc("fc_video")
-            n_fc_a = ids.alloc("fc_apply")
-            nodes[n_fc_l] = {"class_type": "MiniMaxH3FunControlLoaderT8Advanced",
-                             "inputs": {"control_net_name": self.fc_control_net}}
-            nodes[n_fc_v] = {"class_type": "VHS_LoadVideoPath", "inputs": {
-                "video": os.path.abspath(fc_video),
-                "force_rate": float(self.fps),
-                "custom_width": w, "custom_height": h,
-                "frame_load_cap": self.num_frames, "skip_first_frames": 0,
-                "select_every_nth": 1}}
-            nodes[n_fc_a] = {"class_type": "MiniMaxH3FunControlApplyT8Advanced",
-                             "inputs": {"model": guider_model, "positive": [n_cond, 0],
-                                        "control_net": [n_fc_l, 0], "vae": [n_vae_v, 0],
-                                        "control_video": [n_fc_v, 0],
-                                        "width": w, "height": h, "length": self.num_frames,
-                                        "control_kind": self.fc_control_kind,
-                                        "fit_mode": self.fc_fit_mode,
-                                        "strength": fc_str,
-                                        "start_percent": 0.0,
-                                        "end_percent": self.fc_end_percent}}
-            guider_model = [n_fc_a, 0]
-            cond_src = [n_fc_a, 1]
-            log(f"  [mmh3] Fun Control 注入：{os.path.basename(fc_video)} "
-                f"({self.fc_control_kind}, strength={fc_str}, end={self.fc_end_percent})")
+        # 细节（节点族 / 注入层 / strength 语义）见 _add_fun_control
+        guider_model, cond_src = self._add_fun_control(
+            nodes, ids, guider_model, n_cond, n_vae_v, w, h,
+            control_video, fc_strength)
 
         # ---------- 后处理（质量增强，由 config.engine.comfyui_mmH3.post 控制）----------
         # decode(11) 输出 [IMAGE 帧批次, AUDIO]；音频不动，只增强图像分辨率/锐度。
@@ -606,6 +499,186 @@ class MMH3Engine(VideoEngine):
                 "noise": [n_n2, 0], "guider": [n_g2, 0], "sampler": [n_mix, 1],
                 "sigmas": [n_mix, 2], "latent_image": [n_rec, 0]}}
             decoded_src = [n_s2, 0]
+        self._add_output_nodes(nodes, ids, n_decode, decoded_src, images_src,
+                               n_vae_v, n_vae_a)
+        ids.audit(nodes)      # 自检：无未登记 / 无悬空 ID
+        return nodes
+
+    def _add_model_chain(self, nodes: dict, ids, n_unet: str) -> list:
+        """模型源链：Turbo 时经 LoRA 注入，再按需插入 BlockCache。
+
+        BlockCache（缓存加速）插在模型源与采样器之间。仅当 config 开启时接入，
+        缺失节点时 ComfyUI 会报 class_type 不存在，故默认关闭。
+        """
+        if self.turbo:
+            n_lora = ids.alloc("lora")
+            nodes[n_lora] = {"class_type": "LoraLoaderBypassModelOnly",
+                             "inputs": {"model": [n_unet, 0], "lora_name": self.lora,
+                                        "strength_model": self.lora_strength}}
+            model_src = [n_lora, 0]
+        else:
+            model_src = [n_unet, 0]
+
+        if self.block_cache:
+            n_bc = ids.alloc("block_cache")
+            nodes[n_bc] = {"class_type": "MiniMaxH3BlockCacheT8", "inputs": {
+                "model": model_src,
+                "residual_diff_threshold": self.bc_threshold,
+                "start_percent": 0.08, "end_percent": 0.95,
+                "max_consecutive_hits": 2,
+                "cache_device": self.bc_cache_device,
+                "metric_stride": 8, "verbose": False}}
+            model_src = [n_bc, 0]
+        return model_src
+
+    def _build_cond_inputs(self, nodes: dict, ids, prompt: str, w: int, h: int,
+                           task: str, image, ref_video, ref_images,
+                           has_img: bool, has_ref: bool) -> tuple:
+        """条件节点输入（含首帧 / 参考视频 / 多参考图），返回 (cond_in, n_cond)。"""
+        cond_in = {
+            "clip": ["3", 0], "video_vae": ["4", 0], "audio_vae": ["5", 0],
+            "prompt": prompt, "width": w, "height": h, "length": self.num_frames,
+            "task_type": task,
+            "audio_mode": "native", "audio_denoise_strength": 1.0,
+            "add_source_as_reference": False, "prompt_primary_audio_ordinal": 0,
+            "strict_prompt_tags": True, "ref_image_size": "match",
+            "reference_video_policy": "official_2_to_15s",
+        }
+        if has_img:
+            self._add_first_frame(nodes, ids, cond_in, image)
+        if has_ref:
+            self._add_ref_video(nodes, ids, cond_in, ref_video)
+        self._add_ref_images(nodes, ids, cond_in, ref_images)
+        n_cond = ids.alloc("cond")
+        nodes[n_cond] = {"class_type": "MiniMaxH3AudioConditioningT8", "inputs": cond_in}
+        return cond_in, n_cond
+
+    def _add_first_frame(self, nodes: dict, ids, cond_in: dict, image: str) -> None:
+        """首帧：上传后挂 LoadImage（I2VA/Hybrid 用）。上传失败直接报错，不静默降级。"""
+        meta = self.client.upload_image(image)
+        img_name = (meta or {}).get("name") or (meta or {}).get("filename")
+        if not img_name:
+            raise RuntimeError(f"起始帧上传失败: {image}")
+        n_first = ids.alloc("first_frame")
+        nodes[n_first] = {"class_type": "LoadImage", "inputs": {"image": img_name}}
+        cond_in["first_frame"] = [n_first, 0]
+
+    def _add_ref_video(self, nodes: dict, ids, cond_in: dict,
+                       ref_video: str) -> None:
+        """参考视频：本地绝对路径直接加载（免上传），输出 IMAGE 帧批次接 ref_videos。
+
+        Autogrow 在 API prompt 里是**带父级前缀的路径键**（finalize_prefix 用 "." 连接）：
+          f"{autogrow_input_id}.{prefix}{i}"，i 从 0 开始 → "ref_videos.ref_video_0"
+        写成嵌套 dict 或裸 ref_video_1 都会被丢弃（节点不执行，报
+        "requires at least one reference media input"）。
+        """
+        n_refv = ids.alloc("ref_video")
+        nodes[n_refv] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+            "video": os.path.abspath(ref_video),
+            "force_rate": float(self.fps),
+            "custom_width": 0, "custom_height": 0,
+            "frame_load_cap": 0, "skip_first_frames": 0,
+            "select_every_nth": 1,
+        }}
+        cond_in["ref_videos.ref_video_0"] = [n_refv, 0]
+
+    def _add_ref_images(self, nodes: dict, ids, cond_in: dict,
+                        ref_images: list | None) -> None:
+        """多参考图（最多 9 张）：增强身份/形象信号，缓解 Hybrid 下人物形态崩坏。
+
+        同样是 Autogrow：键名带父级前缀 ref_images.ref_image_i，i 从 0 开始。
+        """
+        for i, rp in enumerate((ref_images or [])[:9]):
+            if not (rp and os.path.exists(rp)):
+                continue
+            meta = self.client.upload_image(rp)
+            nm = (meta or {}).get("name") or (meta or {}).get("filename")
+            if not nm:
+                continue
+            nid = ids.alloc_range("ref_image", i)    # 20..28，区间由分配器保证不越界
+            nodes[nid] = {"class_type": "LoadImage", "inputs": {"image": nm}}
+            cond_in[f"ref_images.ref_image_{i}"] = [nid, 0]
+
+    def _add_sampler(self, nodes: dict, ids, model_src: list,
+                     n_cond: str) -> tuple:
+        """采样器节点族，返回 (n_sampler, first_sigmas, guider_model, n_par)。
+
+        Turbo 走双速率（4 视频 / 8 音频），否则统一步数双时钟。二采模式下一采固定
+        用 DualClock（统一 sigma 轨迹 → ParityPlan 切 coarse/refine）。
+        """
+        n_sampler = ids.alloc("sampler")
+        n_par = None
+        if self.two_pass_latent:
+            nodes[n_sampler] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
+                "model": model_src, "av_latent": [n_cond, 1], "steps": self.tp_base,
+                "shift_video": self.shift_video, "shift_audio": self.shift_audio,
+                "sampler_name": "dual_clock_euler", "scheduler": "native_flow"}}
+            # 二采 sigma 计划：coarse 段给一采，refine 段给二采（base = coarse + refine）
+            n_par = ids.alloc("tp_parity")
+            nodes[n_par] = {"class_type": "MiniMaxH3LearnedTwoPassParityPlanT8Advanced",
+                            "inputs": {"model": [n_sampler, 0], "base_steps": self.tp_base,
+                                       "coarse_steps": self.tp_coarse,
+                                       "refine_steps": self.tp_refine}}
+            first_sigmas = [n_par, 0]
+        elif self.turbo:
+            nodes[n_sampler] = {"class_type": "MiniMaxH3MultiRateSamplerEXPT8", "inputs": {
+                "model": model_src, "av_latent": [n_cond, 1],
+                "video_steps": self.video_steps, "audio_steps": self.audio_steps,
+                "shift_video": self.shift_video, "shift_audio": self.shift_audio}}
+            first_sigmas = [n_sampler, 2]
+        else:
+            nodes[n_sampler] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
+                "model": model_src, "av_latent": [n_cond, 1], "steps": self.steps,
+                "shift_video": self.shift_video, "shift_audio": self.shift_audio,
+                "sampler_name": "dual_clock_euler", "scheduler": "native_flow"}}
+            first_sigmas = [n_sampler, 2]
+        # 一采 guider model：Turbo / 二采 => 采样器 wrapper 输出(7.0)；非 Turbo 直连模型源
+        guider_model = ([n_sampler, 0] if (self.turbo or self.two_pass_latent)
+                        else model_src)
+        return n_sampler, first_sigmas, guider_model, n_par
+
+    def _add_fun_control(self, nodes: dict, ids, guider_model: list, n_cond: str,
+                         n_vae_v: str, w: int, h: int, control_video,
+                         fc_strength) -> tuple:
+        """Fun Control 节点族，返回 (guider_model, cond_src)。
+
+        逐帧 depth/pose 控制视频经 FunControlApply 注入 DiT(第0/10/20/30/40层)。
+        实测：能把走位方向从 H3 默认「左移」纠正为「跟随白模」；strength 0.8~1.2，≥1.5 崩坏。
+        """
+        cond_src = [n_cond, 0]
+        fc_video = control_video or self.fc_video
+        if not ((self.fun_control_enable or control_video)
+                and fc_video and os.path.exists(fc_video)):
+            return guider_model, cond_src
+        fc_str = self.fc_strength if fc_strength is None else float(fc_strength)
+        n_fc_l = ids.alloc("fc_loader")
+        n_fc_v = ids.alloc("fc_video")
+        n_fc_a = ids.alloc("fc_apply")
+        nodes[n_fc_l] = {"class_type": "MiniMaxH3FunControlLoaderT8Advanced",
+                         "inputs": {"control_net_name": self.fc_control_net}}
+        nodes[n_fc_v] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+            "video": os.path.abspath(fc_video),
+            "force_rate": float(self.fps),
+            "custom_width": w, "custom_height": h,
+            "frame_load_cap": self.num_frames, "skip_first_frames": 0,
+            "select_every_nth": 1}}
+        nodes[n_fc_a] = {"class_type": "MiniMaxH3FunControlApplyT8Advanced",
+                         "inputs": {"model": guider_model, "positive": [n_cond, 0],
+                                    "control_net": [n_fc_l, 0], "vae": [n_vae_v, 0],
+                                    "control_video": [n_fc_v, 0],
+                                    "width": w, "height": h, "length": self.num_frames,
+                                    "control_kind": self.fc_control_kind,
+                                    "fit_mode": self.fc_fit_mode,
+                                    "strength": fc_str,
+                                    "start_percent": 0.0,
+                                    "end_percent": self.fc_end_percent}}
+        log(f"  [mmh3] Fun Control 注入：{os.path.basename(fc_video)} "
+            f"({self.fc_control_kind}, strength={fc_str}, end={self.fc_end_percent})")
+        return [n_fc_a, 0], [n_fc_a, 1]
+
+    def _add_output_nodes(self, nodes: dict, ids, n_decode: str, decoded_src: list,
+                          images_src: list, n_vae_v: str, n_vae_a: str) -> None:
+        """解码 + 合成输出节点（音频不动，只增强图像分辨率/锐度）。"""
         n_combine = ids.alloc("combine")
         nodes.update({
             n_decode: {"class_type": "MiniMaxH3AVDecodeT8", "inputs": {
@@ -617,5 +690,3 @@ class MMH3Engine(VideoEngine):
                 "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 18,
                 "loop_count": 0, "pingpong": False, "save_output": True}},
         })
-        ids.audit(nodes)      # 自检：无未登记 / 无悬空 ID
-        return nodes

@@ -22,6 +22,45 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9876
 
 
+def _parse_json_or_first_line(text: str) -> Optional[dict]:
+    """整段解析 JSON；失败退回首行解析；仍失败打日志并返回 None。"""
+    try:
+        return json.loads(text)
+    except ValueError:
+        try:
+            return json.loads(text.splitlines()[0])
+        except (ValueError, IndexError) as e:
+            print(f"  [blender-mcp] 响应解析失败: {e}; raw={text[:200]}",
+                  file=sys.stderr)
+            return None
+
+
+def _recv_json(s) -> Optional[dict]:
+    """逐段收包并尝试整体解析；连接关闭后再做最后一次兜底解析。
+
+    原实现只按「出现换行」判断，遇到无换行/粘包/分片会丢或挂。
+    """
+    buf = b""
+    while True:
+        text = buf.decode("utf-8", "ignore").strip()
+        if text:
+            try:
+                return json.loads(text)
+            except ValueError:
+                pass
+        try:
+            chunk = s.recv(65536)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        buf += chunk
+    text = buf.decode("utf-8", "ignore").strip()
+    if not text:
+        return None
+    return _parse_json_or_first_line(text)
+
+
 class BlenderMCP:
     def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
                  timeout: float = 300.0):
@@ -50,36 +89,10 @@ class BlenderMCP:
         for attempt in range(2):
             try:
                 with socket.create_connection((self.host, self.port),
-                                               timeout=self.timeout) as s:
+                                              timeout=self.timeout) as s:
                     s.settimeout(self.timeout)
                     s.sendall(payload)
-                    buf = b""
-                    while True:
-                        text = buf.decode("utf-8", "ignore").strip()
-                        if text:
-                            try:
-                                return json.loads(text)
-                            except ValueError:
-                                pass
-                        try:
-                            chunk = s.recv(65536)
-                        except socket.timeout:
-                            break
-                        if not chunk:
-                            break
-                        buf += chunk
-                    text = buf.decode("utf-8", "ignore").strip()
-                    if not text:
-                        return None
-                    try:
-                        return json.loads(text)
-                    except ValueError:
-                        try:
-                            return json.loads(text.splitlines()[0])
-                        except ValueError as e:
-                            print(f"  [blender-mcp] 响应解析失败: {e}; raw={text[:200]}",
-                                  file=sys.stderr)
-                            return None
+                    return _recv_json(s)
             except (OSError, socket.timeout) as e:
                 if attempt == 0:
                     time.sleep(0.5)

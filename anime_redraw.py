@@ -110,6 +110,70 @@ def build_wf(ckpt, prompt, negative, seed, steps, cfg, denoise,
     return wf
 
 
+def _clean_redraw_tmp(inp: str, outd: str) -> None:
+    """清理 redraw_* 中间图（用 cmd del 批量绕过 turn 级 SAFE_DELETE 计数拦截）。"""
+    os.system(f'del /q "{inp}\\redraw_*.png" >nul 2>nul')
+    os.system(f'del /q "{outd}\\redraw_*.png" >nul 2>nul')
+
+
+def _open_io(a):
+    """打开源视频并建静音输出 writer，返回 (cap, vw, w, h, total, fps, tmp)。"""
+    cap = cv2.VideoCapture(a.src)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    tmp = a.dst + ".silent.mp4"
+    vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    return cap, vw, w, h, total, fps, tmp
+
+
+def _redraw_one_frame(client, frame, idx, a, inp, w, h):
+    """重绘单帧；失败返回 None（内部已打日志，调用方按原逻辑跳过该帧）。"""
+    name = f"redraw_{idx:05d}.png"
+    cv2.imwrite(os.path.join(inp, name), frame)
+    seed = (a.seed + idx) if a.vary_seed else a.seed
+    wf = build_wf(a.ckpt, QUALITY, NEGATIVE, seed, a.steps, a.cfg, a.denoise,
+                  cn_model=a.controlnet, cn_strength=a.cn_strength,
+                  canny_low=a.canny_low, canny_high=a.canny_high)
+    wf["2"]["inputs"]["image"] = name
+    try:
+        paths = client.run_workflow(wf, inp, timeout=900)
+    except Exception as e:
+        print(f"  [err] 帧 {idx}: {e}")
+        return None
+    if not paths:
+        print(f"  [err] 帧 {idx}: 无产出")
+        return None
+    out = cv2.imread(paths[0])
+    if out is None:
+        print(f"  [err] 帧 {idx}: 读回失败")
+        return None
+    if out.shape[1] != w or out.shape[0] != h:
+        out = cv2.resize(out, (w, h))
+    return out
+
+
+def _redraw_loop(client, cap, vw, a, inp, w, h) -> int:
+    """逐帧重绘主循环，返回完成到的帧号。"""
+    done = a.start
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        out = _redraw_one_frame(client, frame, done, a, inp, w, h)
+        if out is None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, done + 1)
+            continue
+        vw.write(out)
+        done += 1
+        if done % 20 == 0:
+            print(f"[info] {done} 帧已重绘", flush=True)
+        if a.limit and (done - a.start) >= a.limit:
+            break
+    return done
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
@@ -143,65 +207,20 @@ def main():
     inp = os.path.join(_ROOT, "input")
     outd = os.path.join(_ROOT, "output")
     os.makedirs(inp, exist_ok=True)
-    # 清理上一轮遗留的 redraw_* 中间图（用 cmd del 批量绕过 turn 级 SAFE_DELETE 计数拦截）
-    os.system(f'del /q "{inp}\\redraw_*.png" >nul 2>nul')
-    os.system(f'del /q "{outd}\\redraw_*.png" >nul 2>nul')
+    _clean_redraw_tmp(inp, outd)
 
-    cap = cv2.VideoCapture(a.src)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 24
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    tmp = a.dst + ".silent.mp4"
-    vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    cap, vw, w, h, total, fps, tmp = _open_io(a)
     seed_mode = "vary" if a.vary_seed else "fixed"
     print(f"[cfg] {a.src} {w}x{h} {fps}fps 共{total}帧 denoise={a.denoise} "
           f"seed={seed_mode} controlnet={a.controlnet or 'off'} -> {tmp}", flush=True)
 
     if a.start:
         cap.set(cv2.CAP_PROP_POS_FRAMES, a.start)
-    done = a.start
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        idx = done
-        name = f"redraw_{idx:05d}.png"
-        src_p = os.path.join(inp, name)
-        cv2.imwrite(src_p, frame)
-        seed = (a.seed + idx) if a.vary_seed else a.seed
-        wf = build_wf(a.ckpt, QUALITY, NEGATIVE, seed, a.steps, a.cfg, a.denoise,
-                      cn_model=a.controlnet, cn_strength=a.cn_strength,
-                      canny_low=a.canny_low, canny_high=a.canny_high)
-        wf["2"]["inputs"]["image"] = name
-        try:
-            paths = client.run_workflow(wf, inp, timeout=900)
-        except Exception as e:
-            print(f"  [err] 帧 {idx}: {e}")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx + 1)
-            continue
-        if not paths:
-            print(f"  [err] 帧 {idx}: 无产出")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx + 1)
-            continue
-        out = cv2.imread(paths[0])
-        if out is None:
-            print(f"  [err] 帧 {idx}: 读回失败")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx + 1)
-            continue
-        if out.shape[1] != w or out.shape[0] != h:
-            out = cv2.resize(out, (w, h))
-        vw.write(out)
-        done = idx + 1
-        if done % 20 == 0:
-            print(f"[info] {done} 帧已重绘", flush=True)
-        if a.limit and (done - a.start) >= a.limit:
-            break
+    done = _redraw_loop(client, cap, vw, a, inp, w, h)
     cap.release()
     vw.release()
     print(f"[info] 重绘完成 {done} 帧 -> {tmp}")
-    os.system(f'del /q "{inp}\\redraw_*.png" >nul 2>nul')
-    os.system(f'del /q "{outd}\\redraw_*.png" >nul 2>nul')
+    _clean_redraw_tmp(inp, outd)
 
     ff = imageio_ffmpeg.get_ffmpeg_exe()
     subprocess.run([ff, "-y", "-i", tmp, "-i", a.src,

@@ -485,16 +485,56 @@ def compute_timing() -> None:
     GLOBAL_TEMPO = 1.0
 
 
-def build_and_render() -> None:
-    ff = ffmpeg_exe()
-    durs, tempos = list(COMP_DUR), list(TEMPOS)
-    n = len(TTS_LINES)
-    print("--- 各段时长（可用 %.2fs）---" % AVAIL)
-    for i in range(1, n + 1):
-        d, tempo = durs[i - 1], tempos[i - 1]
-        print(f"  {i:02d} {d:5.2f}s tempo={tempo:.2f}  {TTS_LINES[i-1][:16]}...")
+def _cue_window(i: int, cues, durs: list, n: int) -> tuple:
+    """第 i 段字幕的 (起, 止) 秒：优先真实语音时间戳，否则用估算窗口。"""
+    if cues:
+        return cues[i - 1]
+    s = seg_start(i) + NARR_DELAY
+    e = s + durs[i - 1] + 0.10
+    if i < n:
+        return s, min(e, SEG_STARTS[i] - 0.05)   # 不侵入下一段起点
+    return s, min(e, TOTAL - 0.05)
 
-    # ---- 音频：9 段延时后混合，再与原环境音混合 ----
+
+def _subtitle_filters(i: int, s: float, e: float, en_fs: int, zh_fs: int,
+                      zh_margin: int, en_margin: int) -> list:
+    """第 i 段的双语字幕 drawtext 滤镜（上行英文 + 下行中文）。"""
+    filters = []
+    if SUBS in ("bilingual", "en"):
+        filters.append(
+            f"drawtext=fontfile='{FONT_EN}':textfile=line_en_{i:02d}.txt:"
+            f"x=(w-tw)/2:y=h-th-{en_margin}:fontsize={en_fs}:fontcolor=white:"
+            f"borderw=3:bordercolor=black@0.9:"
+            f"enable='between(t,{s:.3f},{e:.3f})'")
+    if SUBS in ("bilingual", "zh"):
+        filters.append(
+            f"drawtext=fontfile='{FONT}':textfile=line_zh_{i:02d}.txt:"
+            f"x=(w-tw)/2:y=h-th-{zh_margin}:fontsize={zh_fs}:fontcolor=white:"
+            f"borderw=3:bordercolor=black@0.9:"
+            f"enable='between(t,{s:.3f},{e:.3f})'")
+    return filters
+
+
+def _align_cues():
+    """有真实语音时间戳时按 ASR 结果对齐字幕；否则返回 None（沿用估算时间轴）。"""
+    if not (ALIGN and SPEECH_SPANS):
+        return None
+    try:
+        from agent import align
+        cues = align.cues_for_lines(SPEECH_SPANS, SEG_STARTS, tempo=TEMPOS,
+                                    delay=NARR_DELAY, total=TOTAL)
+        print(f"[align] 字幕按语音时间戳对齐（{len(cues)} 段）")
+        return cues
+    except Exception as e:        # noqa: BLE001
+        print(f"[align] 对齐失败，沿用估算时间轴: {e}")
+        return None
+
+
+def _audio_filter_parts(tempos: list) -> tuple:
+    """音频滤镜：9 段解说各自延时后混合，再与原环境音混合。
+
+    返回 (inputs, parts)：inputs 是 ffmpeg 的 -i 序列，parts 是滤镜片段。
+    """
     inputs = ["-i", FILM]
     for i in range(1, len(TTS_LINES) + 1):
         inputs += ["-i", os.path.join(NAR, f"nar_{i:02d}.wav")]
@@ -514,52 +554,48 @@ def build_and_render() -> None:
     parts.append(f"[0:a]aformat=sample_rates=48000:channel_layouts=stereo,"
                  f"volume={AMBIENT_VOL}[amb]")
     parts.append(f"[amb][narr]amix=inputs=2:normalize=0,loudnorm={LUFS}[aout]")
+    return inputs, parts
+
+
+def _video_filter_parts(durs: list, cues, n: int) -> tuple:
+    """视频滤镜：逐段烧字幕（文本走 textfile，规避命令行中文编码）。
+
+    返回 (parts, 末段输出标签)——末段标签用于 -map。
+    """
+    parts = []
+    vprev = "0:v"
+    wv, hv = _probe_wh(FILM)
+    en_fs, zh_fs, _en_max, _zh_max = _sub_sizes(wv)
+    zh_margin = max(16, int(hv * 0.05))       # 中文距底
+    # 英文距底：底部锁定，多行向上生长，永不压到中文
+    en_margin = max(64, int(hv * 0.15))
+    for i in range(1, len(TTS_LINES) + 1):
+        s, e = _cue_window(i, cues, durs, n)
+        vcur = f"v{i}"
+        filters = _subtitle_filters(i, s, e, en_fs, zh_fs, zh_margin, en_margin)
+        parts.append(f"[{vprev}]" + ",".join(filters) + f"[{vcur}]")
+        vprev = vcur
+    return parts, vprev
+
+
+def build_and_render() -> None:
+    ff = ffmpeg_exe()
+    durs, tempos = list(COMP_DUR), list(TEMPOS)
+    n = len(TTS_LINES)
+    print("--- 各段时长（可用 %.2fs）---" % AVAIL)
+    for i in range(1, n + 1):
+        d, tempo = durs[i - 1], tempos[i - 1]
+        print(f"  {i:02d} {d:5.2f}s tempo={tempo:.2f}  {TTS_LINES[i-1][:16]}...")
+
+    # ---- 音频：9 段延时后混合，再与原环境音混合 ----
+    inputs, parts = _audio_filter_parts(tempos)
 
     # ---- 视频：逐段烧字幕（文本走 textfile，规避命令行中文编码）----
     # 默认双语：上行英文(Arial) + 下行中文(simhei)
     # 强制对齐：有真实语音时间戳就用它，否则沿用"段起点 + wav 时长"的估算窗口
-    cues = None
-    if ALIGN and SPEECH_SPANS:
-        try:
-            from agent import align
-            cues = align.cues_for_lines(SPEECH_SPANS, SEG_STARTS, tempo=TEMPOS,
-                                        delay=NARR_DELAY, total=TOTAL)
-            print(f"[align] 字幕按语音时间戳对齐（{len(cues)} 段）")
-        except Exception as e:        # noqa: BLE001
-            print(f"[align] 对齐失败，沿用估算时间轴: {e}")
-            cues = None
-
-    vprev, vcur = "0:v", None
-    Wv, Hv = _probe_wh(FILM)
-    EN_FS, ZH_FS, _EN_MAX, _ZH_MAX = _sub_sizes(Wv)
-    ZH_MARGIN = max(16, int(Hv * 0.05))       # 中文距底
-    EN_MARGIN = max(64, int(Hv * 0.15))       # 英文距底：底部锁定，多行向上生长，永不压到中文
-    for i in range(1, len(TTS_LINES) + 1):
-        if cues:
-            s, e = cues[i - 1]
-        else:
-            s = seg_start(i) + NARR_DELAY
-            e = s + durs[i - 1] + 0.10
-            if i < n:
-                e = min(e, SEG_STARTS[i] - 0.05)   # 不侵入下一段起点
-            else:
-                e = min(e, TOTAL - 0.05)
-        vcur = f"v{i}"
-        filters = []
-        if SUBS in ("bilingual", "en"):
-            filters.append(
-                f"drawtext=fontfile='{FONT_EN}':textfile=line_en_{i:02d}.txt:"
-                f"x=(w-tw)/2:y=h-th-{EN_MARGIN}:fontsize={EN_FS}:fontcolor=white:"
-                f"borderw=3:bordercolor=black@0.9:"
-                f"enable='between(t,{s:.3f},{e:.3f})'")
-        if SUBS in ("bilingual", "zh"):
-            filters.append(
-                f"drawtext=fontfile='{FONT}':textfile=line_zh_{i:02d}.txt:"
-                f"x=(w-tw)/2:y=h-th-{ZH_MARGIN}:fontsize={ZH_FS}:fontcolor=white:"
-                f"borderw=3:bordercolor=black@0.9:"
-                f"enable='between(t,{s:.3f},{e:.3f})'")
-        parts.append(f"[{vprev}]" + ",".join(filters) + f"[{vcur}]")
-        vprev = vcur
+    cues = _align_cues()
+    vparts, vcur = _video_filter_parts(durs, cues, n)
+    parts += vparts
 
     fc = ";".join(parts)
     cmd = [ff, "-y", *inputs, "-filter_complex", fc,
