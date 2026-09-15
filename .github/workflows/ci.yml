@@ -34,9 +34,11 @@ jobs:
           pip install pytest ruff
 
       - name: 语法检查（compileall）
-        run: python -m compileall -q agent tools tests webserver cli.py webui.py comfy_paths.py config_env.py
+        # 根目录的独立出片脚本同样纳入——它们不在 pytest 覆盖范围内，
+        # 改动后至少要有语法级兜底（含 run_series / make_narration / face_swap_ep 等）。
+        run: python -m compileall -q agent tools tests webserver cli.py webui.py comfy_paths.py config_env.py run_series.py make_narration.py face_swap_ep.py anime_redraw.py upscale_video.py deploy.py monitor_upload.py download_ltx25_gguf.py
 
-      # 规则集固化在仓库根目录 ruff.toml（E9,F63,F7,F82 + F 全类），
+      # 规则集固化在仓库根目录 ruff.toml（E9,F63,F7,F82 + F 全类 + C901 复杂度门槛），
       # 本地与 CI 行为一致；不再用 continue-on-error 掩盖问题。
       - name: Lint（ruff，使用仓库 ruff.toml）
         run: ruff check .
