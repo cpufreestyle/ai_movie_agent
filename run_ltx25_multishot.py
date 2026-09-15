@@ -143,10 +143,10 @@ def build_engine(width=None, height=None, frames=None, fps=None):
     return eng
 
 
-def run_shot(eng, idx: int) -> str | None:
+def run_shot(eng, idx: int, force: bool = False) -> str | None:
     man = load_manifest()
     key = str(idx)
-    if key in man and os.path.exists(man[key]):
+    if not force and key in man and os.path.exists(man[key]):
         print(f"[shot {idx}] 已存在，跳过 -> {man[key]}")
         return man[key]
 
@@ -231,6 +231,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--shot", type=int, default=0, help="只生成第 N 镜；0=全部")
     ap.add_argument("--concat", action="store_true", help="只做拼接")
+    ap.add_argument("--force", action="store_true",
+                    help="忽略 manifest 缓存强制重出；配合 --shot N 即可只重出某一镜"
+                         "（WebUI「只重渲指定镜」走这条）")
     ap.add_argument("--width", type=int, default=0, help="覆盖分辨率宽（需与 --height 同给）")
     ap.add_argument("--height", type=int, default=0, help="覆盖分辨率高")
     ap.add_argument("--frames", type=int, default=0, help="覆盖单镜帧数")
@@ -246,10 +249,10 @@ def main():
     if a.concat:
         return 0 if concat(eng, a.out) else 1
     if a.shot:
-        return 0 if run_shot(eng, a.shot) else 1
+        return 0 if run_shot(eng, a.shot, force=a.force) else 1
 
     for i in range(1, len(SHOTS) + 1):
-        p = run_shot(eng, i)
+        p = run_shot(eng, i, force=a.force)
         if not p:
             print(f"[abort] 第 {i} 镜失败")
             return 1

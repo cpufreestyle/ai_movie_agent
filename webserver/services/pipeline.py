@@ -72,6 +72,112 @@ def _zh_ratio(s: str) -> float:
     return sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff") / len(s)
 
 
+#: 单段解说建议字数上限（超出后 TTS 会被迫加速、听感机械）
+NARRATION_MAX_CHARS = 60
+#: 约定镜数（18 镜 × 约 4s ≈ 60s 短片）
+STORYBOARD_SHOT_HINT = 18
+
+
+def _duplicate_shot_pairs(shots: list) -> list[tuple[int, int]]:
+    """内容完全相同的镜号对（归一化：去空白 + 忽略大小写后逐字相等）。"""
+    seen: dict[str, int] = {}
+    dupes: list[tuple[int, int]] = []
+    for i, s in enumerate(shots):
+        key = str(s).strip().lower()
+        if not key:
+            continue
+        if key in seen:
+            dupes.append((seen[key], i + 1))
+        else:
+            seen[key] = i + 1
+    return dupes
+
+
+def _storyboard_errors(shots: list, narration: list) -> list[str]:
+    """必须拦住的问题（空镜 / 空解说 / 重复镜）。"""
+    errors: list[str] = []
+    if not shots:
+        errors.append("分镜不能为空")
+    blanks = [i + 1 for i, s in enumerate(shots) if not str(s).strip()]
+    if blanks:
+        errors.append(f"第 {blanks} 镜是空行，请删掉或补上内容")
+    if not narration:
+        errors.append("解说不能为空（成片需要中文配音与字幕）")
+    dupes = _duplicate_shot_pairs(shots)
+    if dupes:
+        pairs = "、".join(f"第{a}镜=第{b}镜" for a, b in dupes)
+        errors.append(f"有内容完全相同的镜头（{pairs}），请改掉或删掉其中一个")
+    return errors
+
+
+def _storyboard_warnings(shots: list, narration: list) -> list[str]:
+    """只提示、不拦的问题（镜数偏离 / 段数比例 / 语言 / 长度）。"""
+    warnings: list[str] = []
+    if shots and len(shots) != STORYBOARD_SHOT_HINT:
+        warnings.append(f"当前 {len(shots)} 镜（约定 {STORYBOARD_SHOT_HINT} 镜，"
+                        f"单镜约 4s / 全片约 60s）")
+    if len(narration) > len(shots):
+        warnings.append(f"解说 {len(narration)} 段多于镜头 {len(shots)} 镜，"
+                        "按段均分后每段比一镜还短，配音可能被加速")
+    no_ascii = [i + 1 for i, s in enumerate(shots)
+                if not any(c.isascii() and c.isalpha() for c in str(s))]
+    if no_ascii:
+        warnings.append(f"第 {no_ascii} 镜不含英文字母 —— 视频模型吃英文提示词，"
+                        "中文描述可能出不来预期画面")
+    long_n = [i + 1 for i, n in enumerate(narration)
+              if len(str(n)) > NARRATION_MAX_CHARS]
+    if long_n:
+        warnings.append(f"第 {long_n} 段解说超过 {NARRATION_MAX_CHARS} 字，"
+                        "配音会被加速显得机械（建议 12-18 字）")
+    return warnings
+
+
+def validate_storyboard(shots: list, narration: list) -> tuple[list, list]:
+    """校验 WebUI 手改的分镜，返回 (errors, warnings)。
+
+    **errors 非空必须拒绝保存**（调用方回 400）；warnings 只提示、仍然保存。
+    分成两档是因为：空镜/重复镜几乎一定是误操作，而「镜数不是 18」「解说偏长」
+    完全可能是刻意的。原先 POST /api/storyboard 只校验字段类型，于是
+    「末两镜内容完全一样」这种明显错误被原样写进 storyboard.json，
+    渲染完才发现（画面重复），只能人工逐条比对 —— 这里把它拦在保存前。
+    """
+    return _storyboard_errors(shots, narration), _storyboard_warnings(shots, narration)
+
+
+def normalize_shot_indices(value) -> list[int]:
+    """把「镜号」输入归一成有序去重的正整数列表。
+
+    接受 ``[1, "3", 5]``、``"1,3,5"``、``"1，3 5"``（中英文逗号 / 顿号 / 分号 /
+    空白都算分隔）。非法项（0、负数、非数字）直接丢弃 —— 「全非法」空结果由调用方
+    报错，避免把 ``--shot 0``（在脚本语义里等于"全部"）当成合法单镜传下去。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = [p for p in re.split(r"[,，、;；\s]+", value) if p]
+    elif isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        parts = [value]
+    out: set[int] = set()
+    for p in parts:
+        try:
+            n = int(str(p).strip())
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            out.add(n)
+    return sorted(out)
+
+
+def storyboard_shot_count() -> int:
+    """当前分镜的镜数（用于校验重出镜号是否越界）。"""
+    try:
+        return len(load_storyboard().get("shots") or [])
+    except Exception:                     # noqa: BLE001 - 分镜坏了不该让页面 500
+        return 0
+
+
 _STORYBOARD_SYSTEM = (
     "你是资深科幻短片分镜编剧。任务：根据给定概念，产出可直接喂给图生视频模型"
     "(LTX-2.5，使用英文提示词)的镜头列表，以及一段配套的中文第一人称内心独白解说"

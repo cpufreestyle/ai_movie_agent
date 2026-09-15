@@ -63,6 +63,9 @@ EXPECTED = {
     ("/api/storyboard", ("POST",)),
     ("/api/storyboard/generate", ("POST",)),
     ("/api/models", ("GET",)),
+
+    ("/api/series", ("GET",)),
+    ("/api/series/run", ("POST",)),
 }
 
 
