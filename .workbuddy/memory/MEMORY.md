@@ -67,7 +67,8 @@
 - `agent/preflight.py` + `cli.py preflight` 投稿前静态体检；`cli.py publish` / WebUI 投稿。
 
 ## 九、WebUI 结构 / 外观 / tooltip
-- 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py`，现 41 条，新增即改 `EXPECTED`）。服务层：`services/{blocking,anchor,pipeline,series}.py`；视图层：`views/{core,run,pipeline,film,bili,media,blocking,anchor,series}.py`。
+- 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py`，现 **42 条**，新增即改 `EXPECTED`）。服务层：`services/{blocking,anchor,pipeline,series,hw}.py`；视图层：`views/{core,run,pipeline,film,bili,media,blocking,anchor,series,hw}.py`。
+- **硬件档位选择已进设置页（2026-09-15）**：`services/hw.py`（`tier_options/profiles/current/detect/payload`）+ `views/hw.py`（`GET /api/hw`，**默认只读、仅 `?detect=1` 才探硬件**，避免开页面白卡 1~2s）；前端「部署 · 硬件档位」块 = `set-tier` 下拉 + `set-autohw` 复选 + `hw-preview` 只读覆盖预览，保存**复用既有 `POST /api/config`**（设/删 `hw_tier` 与 `auto_hardware`）。`current()` 用 `normalize_tier()` 归一别名，无法识别时返回 `unknown`+`raw` 由前端插一项提示。
 - **成片页（分镜）**：`POST /api/storyboard` 会跑 `services/pipeline.validate_storyboard` —— 错误级（空镜/描述重复，忽略大小写与空白）400 拒；告警级（镜数≠18、解说多于镜头、描述含中文、单条解说>60 字）200 带 `warnings`。**「只重渲指定镜」= 逐镜 `run_ltx25_multishot.py --shot N --force` 再 `--concat`**；`--force` 必需，否则 `--shot N` 命中 `ltx25_manifest.json` 缓存直接跳过、根本不重出。镜号解析用 `pipeline.normalize_shot_indices()`（分隔符 `,，、;；\s`，丢 ≤0，排序去重）。
 - **系列连贯出片页签（尾帧续写）**：`services/series.py`（纯函数 `build_argv/validate`，**刻意不 import `run_series`**——它顶层 import 会建目录/探 ffmpeg）+ `views/series.py`（`GET /api/series` 选项与已有 `ep*_series_film.mp4`、`POST /api/series/run` 校验→忙锁 409→后台）。对应 `run_series.py` 的 `--i2v/--anchor-mode/--only/--force/--ep`；**默认不勾 `--i2v`**（首帧权重过高会让镜头收敛/无视提示词），默认 `anchor_mode=first`。
 - **锚定资产页签**（2026-09-15）：`services/anchor.py`（`SHOT_SPECS` 清单 + `default_names()`=三视图）+ `views/anchor.py`（`/api/anchor`、`/api/anchor/run` 名称白名单 + 忙锁、`/api/anchor/file`、`/api/anchor/index`）+ `gen_anchor_assets.py --force`。服务层**刻意不 import 生成脚本**（其顶层 `import run_series` 会建目录/探 ffmpeg），两份条目清单由 `tests/test_anchor_assets.py` 断言同名同序兜漂移。生成脚本产出的 `index.html` **必须经路由回传**，别在 HTML 里写 `/outputs/...`（无路由 → 404）。
@@ -90,10 +91,11 @@
 
 ## 十一、Lint / 测试门槛（ruff.toml 已入库）
 - 根目录 `ruff.toml`：line-length 100、target py310、select = `E9,F63,F7,F82` + **F 全类** + **`C901`**（暂不开 E4/E7：E402 与项目「刻意延迟 import 重依赖」的设计冲突）；exclude 含 legacy/outputs。
+- 本机跑 lint：`C:/Users/michael/.workbuddy/binaries/python/envs/default/Scripts/ruff.exe check .`。**别用 `python -m ruff`**（托管与系统 Python 都没装 ruff 模块，仓库内也没有 ruff 可执行文件；ruff 只装在托管 venv 的 `envs/default/Scripts`）。
 - **`[lint.mccabe] max-complexity = 10`（2026-09-15 起纳入）**；`[lint.per-file-ignores]` 只放行两个不受本项目维护链路约束的文件：`tools/blender_mcp_addon.py`（上游 vendored）、`deploy/sol_h3_spark/sol_h3_server.py`（远程部署脚本）。
 - ⚠️ **`tools/blender_server.py` 的 `import bpy` 必须保留**（`_exec()` 是 `exec(code, globals())`，远端脚本依赖模块全局的 `bpy`），已加 `# noqa: F401`。
 - 复杂度现状：**全仓 C901 = 0**（治理前 48 处；9 处曾列的 `preflight.check 22`、`ltx_engine._inject 20`、`concept_video.render_concept_video 19`、`_strip_cloud_prompt_branch 17`、`publisher.upload 15`、`mmh3_engine._build_workflow 14`、`_write_mp4 12`、`_encode_frames 11`、`_validate_control_video 11` 全部拆完）。查热点：`ruff check . --select C901`。
-- 测试基线：`pytest -q tests/ --basetemp=.pytest_tmp` **249 passed**；`python tests/smoke_test.py` 50 pass 也在 CI 跑。
+- 测试基线：`pytest -q tests/ --basetemp=.pytest_tmp` **362 passed**（2026-09-15；含 `test_hw_profile.py` 44 + `test_hw_webui.py` 29）；`python tests/smoke_test.py` 50 pass 也在 CI 跑。
 - **跨平台断言自检（新增纪律）**：凡「CI 红但本机绿」，先问「这条断言依赖路径 / 编码 / 换行的平台差异吗」。本机是 ntpath，平台相关失败在 Windows 上验不动 → **用另一套 path 语义模拟自证**：`posixpath.normpath(posixpath.join(base, rel))` 跑同一组输入（本次 6 条越界串全 REJECT、2 条正常名全 KEEP）。已踩三次同类坑：`.gitignore` 的 `_*.py` 吃 `__init__.py`、黄金指纹嵌绝对路径、路径穿越反斜杠。
 - **`.gitignore` 的 `_*.py` 会吃掉 `__init__.py`**（`*` 能匹配 `_init`）→ 已加 `!**/__init__.py` 取反。血的教训：`webserver/{,services/,views/}__init__.py` 因此**长期未入库**，本地有文件所以绿、CI 全新克隆必 ImportError。**新增包后必须 `git check-ignore -v <path>` 逐个确认**（被忽略的文件在 `git status` 里根本不出现）。
 - 重构等价性验证法：`git show HEAD:<file>` 存到**仓库内**临时文件（放仓库外会因同目录 import 失败产生假差异），与新版同 argv 跑，stdout/stderr/rc 折叠空白后逐字比对。
@@ -104,15 +106,17 @@
 - 仓库实际路径：`C:\Users\michael\CodeBuddy\ai_movie_agent` 是 Junction → `D:\ai sheare\repo\ai_movie_agent`（show-toplevel 落在 D:）。
 - 远端：GitHub `cpufreestyle/ai_movie_agent`（origin，https）；本地 main 跟踪 origin/main。
 - **推送通道会变，按序试**（**别记死端口，先探测**：`socket.connect(('127.0.0.1', p))` 扫 `7897/11268/7890/10809/1080/10808`，或直接试直连）：
-  1) 直连：`git -c http.proxy= -c https.proxy= push origin main`（**2026-09-15 晚实测可用**）
-  2) 代理 `127.0.0.1:7897`：2026-09-15 早可用，**当晚起变 `schannel: failed to receive handshake`**（端口在监听但握手失败，别被「端口开着」误导）
-  3) 代理 `127.0.0.1:11268`（曾长期可用；09-15 起 `Could not connect`，已挂）
+  1) 代理 `127.0.0.1:7897`（gitconfig 里的**全局默认**）—— **2026-09-15 晚实测可用**，`git push` **不加任何 `-c`** 即走它（数秒推完 5db6a82）。**别手动 `-c http.proxy= -c https.proxy=` 清空**（清了反而不通）。
+  2) 直连 `git -c http.proxy= -c https.proxy= push origin main`：同晚实测报 `Recv failure: Connection was reset`（**当前不通**）。
+  3) 代理 `127.0.0.1:11268`：曾长期可用；09-15 起 `Could not connect`（已挂）。
+  4) 代理 `127.0.0.1:13761`（沙箱注入的 `HTTP_PROXY`）：`CONNECT tunnel failed 502` / `schannel: server closed abruptly`（不通）。
+  - 同一端口**会时通时不通**（09-15 早 7897 曾报 `schannel: failed to receive handshake`）→ 别因一次失败就跳过，按序都试一遍再换招。
   - 保留默认 credential.helper（禁用会报 `could not read Username`）。
   - 看报错判代理状态：`schannel ...` / `CONNECT tunnel failed 502` / `Could not connect` = 该代理不通；`could not read Username` = 隧道通但没带凭据（去掉 `-c credential.helper=`）。PowerShell 的 `curl` 是别名，用 `curl.exe`。
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
 - 提交习惯：`_*.py/_*.ps1/_*.bat/_*.txt`、`outputs/`、`.pytest_tmp/`、`.venv/`、`config.yaml` 均 gitignore；每个独立变更批次单独 commit。
-- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 4cbfb4c**。
+- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 `5db6a82`（CI run #54 / `34980375326`）**。
 - **无 gh CLI 查 CI**：`GET /actions/runs?per_page=10`（按 sha 找 run，**sha 必须传完整 40 位**，传短 sha 会匹配不到、误判「还没有 run」）、`GET /actions/runs/<id>/jobs`（看**每个 step** 的 conclusion，比整体红绿有用得多）；日志 `/actions/jobs/<id>/logs` 会 302 到 Azure 签名 URL，**跳转时必须摘掉 Authorization** 否则 403，且单 job 返回纯文本、多 job 是 zip。**完整步骤见 skill `github-release-no-gh` 第 7 节**。
 - 坑：`git …push | tail` 会因 shim 缺 `tail` 报错并可能吞掉输出 → 一律重定向到文件再 Read。
 - **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest `v0.11.0`（2026-09-15）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用 `## 亮点` + `## 工程 / 质量`。**完整流程见 skill `github-release-no-gh`**。
