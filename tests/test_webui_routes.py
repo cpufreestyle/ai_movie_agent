@@ -51,6 +51,11 @@ EXPECTED = {
     ("/api/blocking/run", ("POST",)),
     ("/api/blocking/file", ("GET",)),
 
+    ("/api/anchor", ("GET",)),
+    ("/api/anchor/run", ("POST",)),
+    ("/api/anchor/file", ("GET",)),
+    ("/api/anchor/index", ("GET",)),
+
     ("/api/films", ("GET",)),
     ("/api/film/play", ("GET",)),
     ("/api/film/render", ("POST",)),

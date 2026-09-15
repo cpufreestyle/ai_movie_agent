@@ -5,10 +5,11 @@ URL 规则与原 webui.py 完全一致（无 url_prefix）；endpoint 名会带�
 """
 from __future__ import annotations
 
-from . import bili, blocking, core, film, media, pipeline, run
+from . import anchor, bili, blocking, core, film, media, pipeline, run
 
 # 顺序无关（各域 URL 不重叠），仅按可读性排列
-BLUEPRINTS = (core.bp, run.bp, pipeline.bp, bili.bp, media.bp, blocking.bp, film.bp)
+BLUEPRINTS = (core.bp, run.bp, pipeline.bp, bili.bp, media.bp, blocking.bp,
+              film.bp, anchor.bp)
 
 
 def register_blueprints(app) -> None:

@@ -11,9 +11,12 @@
   index.html                                       一页锚定图册
 
 用法:
-  python gen_anchor_assets.py                        # 全部生成
+  python gen_anchor_assets.py                        # 全部生成（已存在的跳过）
   python gen_anchor_assets.py --only mira_front      # 只跑某几张（逗号分隔）
+  python gen_anchor_assets.py --force                # 忽略已存在，全部重出
   python gen_anchor_assets.py --resolution 768x448   # 显存不足时降分辨率
+
+WebUI「锚定资产」页签就是调这个脚本（默认只勾三视图，--only 由前端传入）。
 """
 from __future__ import annotations
 import argparse
@@ -140,6 +143,8 @@ def main() -> None:
                     help="每段短片帧数（只取中间帧，5 帧足够且最快；H3 需 17n+5）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--only", default="", help="只跑指定图，逗号分隔")
+    ap.add_argument("--force", action="store_true",
+                    help="忽略已存在的 png，强制重出（默认跳过已存在的）")
     ap.add_argument("--no-anchor", action="store_true", help="跳过人脸锚定提取")
     a = ap.parse_args()
 
@@ -159,8 +164,8 @@ def main() -> None:
 
     for i, (name, prompt) in enumerate(todo, 1):
         png = os.path.join(OUT, f"{name}.png")
-        if os.path.exists(png):
-            print(f"[SKIP] {name} 已存在（删掉可重出）", flush=True)
+        if os.path.exists(png) and not a.force:
+            print(f"[SKIP] {name} 已存在（--force 可重出）", flush=True)
             continue
         mp4 = os.path.join(TMP, f"{name}.mp4")
         print(f"[{i}/{len(todo)}] {name}: {prompt[:70]}...", flush=True)
