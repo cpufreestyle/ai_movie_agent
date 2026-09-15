@@ -52,6 +52,7 @@ python make_narration.py --film outputs/ep1_series_film_mmh3.mp4 \
   在 `config.yaml` 加同名 `qa:` 段即可覆盖；建议先看报告分布再收紧阈值。
   单独给视频打分：`python -m agent.qa <视频>`，整目录分布：`python -m agent.qa --dir <目录> --json`。
 - **状态持久化**：每一镜的剧本、提示词、片段都落盘，可随时 `status` 查看进度。
+- **可控走位（白模）**：Blender 渲白模控制图（depth / pose / edge），经 H3 Fun Control 逐帧注入 DiT，精确锁定角色走位与镜头运动，避免随机漂移。
 
 ## 部署方式（跨平台，Docker / 原生脚本 二选一）
 
@@ -121,12 +122,18 @@ python cli.py pipeline --no-research --max-scenes 5
 
 ## WebUI（本地浏览器可视化操作）
 
-不想敲命令行？内置一个**零构建的本地 WebUI**（Flask + 原生前端），把上面这些能力搬到浏览器里：
+不想敲命令行？内置一个**零构建的本地 WebUI**（Flask + 原生前端），把上面这些能力搬到浏览器里。顶部还有**外观控件**（暗 / 亮主题、舒适 / 紧凑密度、6 种强调色），偏好存 `localStorage` 即时生效。页签分四组：
 
-- **概览配置**：实时影片状态（分镜数 / 时长 / BGM / 封面 / 登录态）+ 在线编辑 `config.yaml`
-- **运行监控**：一键启动 A–H 流水线 / 续写，实时日志流 + 进度（需 GPU / SkyReels）
-- **创意策划**：`enrich-bible` 充实世界观（人物小传 / 视觉风格 / 三幕）并重渲染 concept demo，预览播放，一键投稿到 B 站（带 BGM / 转场）
-- **发布**：biliup 登录态引导 + 投稿正式成片
+- **看板**：系列多集进度与统计（每集时长 / 镜头数 / 产出状态）一览。
+- **流程控制台**：A–H 八阶段可视化串跑，每阶段可独立运行 / 编辑中间结果再续跑，实时任务日志，可随时停止。
+- **概览配置**：实时影片状态（分镜数 / 时长 / BGM / 封面 / 登录态）+ 在线编辑 `config.yaml`（保存自动备份）。
+- **运行监控**：一键启动 / 续写 A–H 流水线，实时日志流 + 进度。
+- **创意策划**：`enrich-bible` 充实世界观（人物小传 / 视觉风格 / 三幕）并重渲染 concept demo，预览播放，一键投稿到 B 站（带 BGM / 转场）。
+- **成片**：分镜校验（空镜 / 重复 / 镜数≠18 / 解说字数等）+ **逐镜重渲染指定镜** + **系列尾帧续写**（集间 / 镜间衔接，支持 `--i2v` 与 anchor 模式）。
+- **发布**：biliup 登录态引导 + 投稿正式成片。
+- **白模模块**：Blender Blocking 渲白模（depth / pose / edge 控制图）→ 经 H3 Fun Control 锁走位出片，含 4 图渲染与专业参数。
+- **锚定资产**：一键生成角色三视图 / 场景图（H3 版），产物图册在线预览。
+- **接口与模型设置**：配置 LLM / 视频引擎 / 阶段档案；**硬件档位选择**（下拉选 `high` / `mid` / `low` / `cpu` / `amd395-128g` / `dgxspark-128g`，或勾选自动检测）；主题 / 密度 / 强调色即时切换。
 
 启动：
 ```bash
@@ -136,7 +143,7 @@ python cli.py webui --port 9000   # 自定义端口
 ```
 打开浏览器访问提示的地址即可。所有耗时操作在后台线程执行，日志页每秒自动刷新。
 
-> 提示：真正生成电影（G 阶段）需要 GPU + SkyReels；**创意策划 / 发布** 两条链路不依赖 GPU，本机即可跑通（已实测：concept demo 生成、BGM 混入、投稿 B 站均成功）。biliup 扫码登录仍须在**真实终端**执行（`biliup login`），Web 端会给出引导命令。
+> 提示：真正生成电影（G 阶段 / 白模模块）需要 GPU + ComfyUI 视频引擎（mmh3 / LTX-2.5）；**创意策划 / 发布** 两条链路不依赖 GPU，本机即可跑通（已实测：concept demo 生成、BGM 混入、投稿 B 站均成功）。biliup 扫码登录仍须在**真实终端**执行（`biliup login`），Web 端会给出引导命令。
 
 ## 配置说明（config.yaml）
 | 项 | 说明 |
@@ -148,6 +155,11 @@ python cli.py webui --port 9000   # 自定义端口
 | `engine.offload` | 显存不足时卸载到 CPU |
 | `engine.scene_frames` | 每镜帧数（97≈4s @24fps） |
 | `llm.*` | Ollama / 任意 OpenAI 兼容端点；`disabled: true` 强制模板 |
+| `qa.*` | 逐镜质检阈值（糊 / 静帧 / 全黑 / 身份漂移），覆盖 `agent/qa.py` 的 `DEFAULTS` |
+| `preflight.*` | 投稿前静态体检开关（`enabled` / `block_publish`） |
+| `prompting.*` | 提示词生成相关配置 |
+| `series.*` | 系列尾帧续写参数（`i2v` / `anchor_mode` / `only` / `force` / `ep`） |
+| `hw_tier` / `auto_hardware` | 硬件档位（见上 `HW_TIER` 环境变量；`auto_hardware: true` 启动即自动选档） |
 
 ## 环境变量（换机器 / 远程部署时用，不必改代码）
 
