@@ -14,6 +14,10 @@
 再跑重构版逐 case 比对，结果 56/56 逐字节一致；样本即由那份旧快照生成，
 所以它同时是「重构无副作用」的证明。
 
+跨平台：工作流里有两处真实绝对路径（ref_video / fc_video），故 `_norm` 会把
+临时目录前缀与路径分隔符统一掉（详见 TMP_RE 处注释）；否则样本只在生成它的
+那台机器 / 那个系统上成立，CI（Linux）必然红。
+
 维护：改 `NodeAllocator.PLAN` 或工作流结构后，人工确认变更符合预期，再执行
     python tests/test_node_ids.py --update
 重新生成样本。
@@ -36,17 +40,26 @@ if ROOT not in sys.path:
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "fixtures", "mmh3_wf_fingerprint.json")
 
-# 临时目录每次运行都不同 → 归一化后再算指纹，否则样本不可复现
+# 指纹必须**跨机器 / 跨平台**可复现，否则黄金样本只在生成它的那台机器上成立。
+# 工作流里有两处会写进真实绝对路径（VHS_LoadVideoPath 的 ref_video / fc_video，
+# 见 mmh3_engine 的 _add_ref_video / _add_fun_control），故要做两级归一：
+#   1) 把整个临时目录前缀统一成 TMPDIR —— 只挡 `golden_xxx` 随机后缀是不够的，
+#      父目录本身在 Windows 是 `C:\Users\...\Temp`、Linux 是 `/tmp`；
+#   2) 统一路径分隔符（`\` -> `/`），否则 Windows 与 Linux 的 sha 必然不同。
+# 兜底：不在 tmpdir 前缀里的 `golden_*` 也一并替换。
 TMP_RE = re.compile(r"golden_[0-9A-Za-z_]{6,}")
 
 
-def _norm(o):
+def _norm(o, tmp: str = ""):
     if isinstance(o, dict):
-        return {k: _norm(v) for k, v in o.items()}
+        return {k: _norm(v, tmp) for k, v in o.items()}
     if isinstance(o, list):
-        return [_norm(v) for v in o]
+        return [_norm(v, tmp) for v in o]
     if isinstance(o, str):
-        return TMP_RE.sub("golden_TMP", o)
+        s = o.replace("\\", "/")
+        if tmp:
+            s = s.replace(tmp.replace("\\", "/").rstrip("/"), "TMPDIR")
+        return TMP_RE.sub("TMPDIR", s)
     return o
 
 
@@ -105,8 +118,8 @@ def _build(cfg_engine: dict, kwargs: dict) -> dict:
     return eng._build_workflow(prompt="a prompt", seed=1234, image=img, **kw)
 
 
-def _fingerprint(wf: dict) -> dict:
-    nw = _norm(wf)
+def _fingerprint(wf: dict, tmp: str = "") -> dict:
+    nw = _norm(wf, tmp)
     canon = json.dumps(nw, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":"))
     return {
@@ -123,7 +136,7 @@ def _collect() -> dict:
     ins, cv = _inputs(tmp)
     for cname, engine_cfg in _configs(cv).items():
         for iname, kwargs in ins.items():
-            out[f"{cname}__{iname}"] = _fingerprint(_build(engine_cfg, kwargs))
+            out[f"{cname}__{iname}"] = _fingerprint(_build(engine_cfg, kwargs), tmp)
     return out
 
 
