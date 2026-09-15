@@ -73,12 +73,17 @@ def detect() -> dict:
     """
     try:
         hw = ce.detect_hardware()
+        info = ce.explain_tier(hw)
         return {
-            "vendor": hw.get("vendor"),
-            "gpu_name": hw.get("gpu_name"),
+            "vendor": info.get("vendor"),
+            "gpu_name": info.get("gpu_name"),
             "vram_gb": round(hw.get("vram_gb") or 0.0, 1),
             "ram_gb": round(hw.get("ram_gb") or 0.0, 1),
-            "tier": ce.pick_tier(hw),
+            "tier": info["tier"],
+            # 判定依据：让「为什么判成这档」可被用户核对。大统一内存机靠型号线索认，
+            # 线索没命中时会**静默**落到 high —— 没有依据就只能靠猜（见 config_env.explain_tier）。
+            "reason": info.get("reason", ""),
+            "matched_hints": list(info.get("matched_hints") or []),
         }
     except Exception as e:  # noqa: BLE001
         return {"error": str(e)}

@@ -89,7 +89,9 @@ AMD395_NAME_HINTS = ("395", "STRIX", "AI MAX", "8060", "RADEON 8050")
 # 同样是大统一内存机：CPU 与 GPU 共享 128GB LPDDR5X，GPU 不报「独立显存」，
 # 老规则（按 vram 判档）会把这台顶级机判成 high 甚至 cpu。故用「NVIDIA + 大内存 + 型号线索」显式识别。
 DGXSPARK_TIER = "dgxspark-128g"
-DGXSPARK_NAME_HINTS = ("GB10", "DGX SPARK", "DGXSPARK", "PROJECT DIGITS", "DIGITS", "NVIDIA DGX SPARK", "NVIDIA GB10")
+# 不再单列 "NVIDIA GB10" / "NVIDIA DGX SPARK"：它们分别是 "GB10" / "DGX SPARK" 的
+# 超集，子串判断已经覆盖；列出来只会让「判定依据」里出现重复命中词。
+DGXSPARK_NAME_HINTS = ("GB10", "DGX SPARK", "DGXSPARK", "PROJECT DIGITS", "DIGITS")
 # 别名归一：允许 HW_TIER / config.hw_tier / --tier 用口语写法
 # ⚠️ 故意不入「dgx」「blackwell」「grace」这类宽泛词：
 #   DGX A100/H100（数据中心、独立 HBM 显存，非统一内存）与 H200/B200（Blackwell）应当落入 high 档，
@@ -285,21 +287,57 @@ def detect_hardware() -> dict:
     return info
 
 
-def pick_tier(hw: dict) -> str:
+def explain_tier(hw: dict) -> dict:
+    """返回选档结果**以及判定依据**（给人看的中文理由 + 机器可查的原始字段）。
+
+    为什么需要它：大统一内存机（AMD 395 / DGX Spark）是靠「厂商 + 内存 ≥96GB +
+    型号线索 + 极低显存兜底」认出来的，而真机 `nvidia-smi` / WMI 报上来的
+    `gpu_name` 千奇百怪。只返回一个档位名的话，机器被判成 `high` 时没人知道是
+    「确实是独立显卡」还是「型号线索没命中」，排查只能靠猜。带上依据后，
+    WebUI 与 `tools/hw_profile.py` 都能直接把理由摆出来给用户核对。
+    """
+    vendor = hw.get("vendor") or ""
+    name = hw.get("gpu_name") or ""
     vram = hw.get("vram_gb") or 0
     ram = hw.get("ram_gb") or 0
+    up = name.upper()
+    info = {"vendor": vendor or None, "gpu_name": name or None,
+            "vram_gb": vram, "ram_gb": ram, "matched_hints": []}
+
+    def _basis(hints: tuple) -> tuple:
+        matched = [h for h in hints if h in up]
+        if matched:
+            return matched, "型号命中 " + " / ".join(matched)
+        return matched, f"显存被低估兜底（VRAM {vram:.1f}GB < 6）"
+
     # 先认大统一内存机（显存是 UMA 切分、常被低估）：DGX Spark 与 AMD 395 都必须先于通用档判断
     if _is_amd395(hw):
-        return AMD395_TIER
+        matched, basis = _basis(AMD395_NAME_HINTS)
+        return {**info, "matched_hints": matched, "tier": AMD395_TIER,
+                "reason": f"AMD + 内存 {ram:.1f}GB + {basis} → {AMD395_TIER}"}
     if _is_dgxspark(hw):
-        return DGXSPARK_TIER
-    if not hw.get("vendor") or vram < 6:
-        return "cpu"
+        matched, basis = _basis(DGXSPARK_NAME_HINTS)
+        return {**info, "matched_hints": matched, "tier": DGXSPARK_TIER,
+                "reason": f"NVIDIA + 内存 {ram:.1f}GB + {basis} → {DGXSPARK_TIER}"}
+    if not vendor or vram < 6:
+        why = "未识别到显卡厂商" if not vendor else f"显存 {vram:.1f}GB < 6GB"
+        return {**info, "tier": "cpu", "reason": f"{why} → cpu"}
     if vram >= 24 and ram >= 48:
-        return "high"
+        return {**info, "tier": "high",
+                "reason": f"显存 {vram:.1f}GB ≥24 且内存 {ram:.1f}GB ≥48 → high"}
     if vram >= 12 and ram >= 24:
-        return "mid"
-    return "low"
+        return {**info, "tier": "mid",
+                "reason": f"显存 {vram:.1f}GB ≥12 且内存 {ram:.1f}GB ≥24 → mid"}
+    return {**info, "tier": "low",
+            "reason": f"显存 {vram:.1f}GB / 内存 {ram:.1f}GB 未达 mid 门槛 → low"}
+
+
+def pick_tier(hw: dict) -> str:
+    """按硬件选档；判定依据见 `explain_tier()`。
+
+    刻意让两者共用同一套逻辑（这里直接委托），避免「选档」与「解释」日后漂移。
+    """
+    return explain_tier(hw)["tier"]
 
 
 # 各档位的覆盖项（点路径 -> 值）。只在对应档位写入，其余保留 config 默认。

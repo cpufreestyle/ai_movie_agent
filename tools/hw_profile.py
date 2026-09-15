@@ -30,8 +30,8 @@ from config_env import (  # noqa: E402
     AMD395_TIER,
     HW_TIER_PROFILES,
     detect_hardware,
+    explain_tier,
     normalize_tier,
-    pick_tier,
 )
 
 
@@ -101,7 +101,8 @@ def main():
 
     forced = _resolve_tier(args.tier)      # 先校验档位，非法即刻退出（不必探测硬件）
     hw = detect_hardware()
-    tier = forced or pick_tier(hw)
+    info = explain_tier(hw)                # 档位 + 判定依据（同源，不会漂移）
+    tier = forced or info["tier"]
     overrides = compute_overrides(tier, hw.get("vendor"))
 
     print("== 硬件检测 ==")
@@ -110,6 +111,11 @@ def main():
     print(f"  显存 VRAM : {hw.get('vram_gb') or 0:.1f} GB")
     print(f"  内存 RAM  : {hw.get('ram_gb') or 0:.1f} GB")
     print(f"  推荐档位  : {tier}" + ("  (手动指定)" if forced else ""))
+    # 判定依据：大统一内存机靠型号线索识别，线索没命中会**静默**落到 high —— 摆出来供核对
+    if forced:
+        print(f"  判定依据  : 手动指定（自动检测会判 {info['tier']} —— {info['reason']}）")
+    else:
+        print(f"  判定依据  : {info['reason']}")
     print("\n== 将应用的配置覆盖 ==")
     if not overrides:
         print("  (无)")

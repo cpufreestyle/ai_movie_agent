@@ -120,6 +120,18 @@ def test_detect_maps_amd395(monkeypatch):
     assert d["vram_gb"] == 0.5 and d["ram_gb"] == 125.5
 
 
+def test_detect_returns_reason_for_explainability(monkeypatch):
+    """探测结果必须带判定依据：大统一内存机靠型号线索认，线索没命中会**静默**落到
+    high —— 没有依据，用户（和我们排查时）只能靠猜。"""
+    monkeypatch.setattr(ce, "detect_hardware", lambda: {
+        "vendor": "NVIDIA", "gpu_name": "NVIDIA GB10",
+        "vram_gb": 120.0, "ram_gb": 128.0})
+    d = hw.detect()
+    assert d["tier"] == ce.DGXSPARK_TIER
+    assert "GB10" in d["reason"]
+    assert d["matched_hints"] == ["GB10"]
+
+
 def test_detect_never_raises(monkeypatch):
     def boom():
         raise RuntimeError("no powershell")

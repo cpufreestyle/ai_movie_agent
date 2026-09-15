@@ -87,6 +87,43 @@ def test_pick_tier_covers_amd395_without_misfiring(hw, expected):
     assert ce.pick_tier(hw) == expected
 
 
+@pytest.mark.parametrize("case_id,hw,expected", [(c[0], c[2], c[3]) for c in HW_CASES],
+                         ids=[c[0] for c in HW_CASES])
+def test_explain_tier_matches_pick_tier(case_id, hw, expected):
+    """判定依据与选档必须同源 —— 两者一旦漂移，界面上显示的理由就成了谎言。"""
+    info = ce.explain_tier(hw)
+    assert info["tier"] == expected == ce.pick_tier(hw)
+    assert info["reason"], f"{case_id}：必须给出可展示的判定依据"
+    assert expected in info["reason"]
+
+
+def test_explain_tier_names_the_matched_hint():
+    """命中型号线索时，理由要写明命中的是哪个词（否则用户无从核对）。"""
+    info = ce.explain_tier({"vendor": "NVIDIA", "gpu_name": "NVIDIA GB10",
+                            "vram_gb": 120.0, "ram_gb": 128.0})
+    assert info["tier"] == DGXSPARK
+    assert "GB10" in info["reason"]
+    assert "GB10" in info["matched_hints"]
+
+
+def test_explain_tier_says_when_fallback_used():
+    """型号没线索时靠显存兜底 —— 理由必须说明是兜底，别让用户以为识别很确定。"""
+    info = ce.explain_tier({"vendor": "NVIDIA", "gpu_name": "",
+                            "vram_gb": 2.0, "ram_gb": 128.0})
+    assert info["tier"] == DGXSPARK
+    assert "兜底" in info["reason"]
+    assert info["matched_hints"] == []
+
+
+def test_explain_tier_explains_why_not_unified_memory():
+    """独立 HBM 卡被判 high 时，理由要能说明「不是统一内存机」。"""
+    info = ce.explain_tier({"vendor": "NVIDIA", "gpu_name": "NVIDIA A100-SXM4-80GB",
+                            "vram_gb": 80.0, "ram_gb": 128.0})
+    assert info["tier"] == "high"
+    assert "24" in info["reason"]          # 显存 ≥24 门槛
+    assert info["matched_hints"] == []     # 没命中任何 DGX Spark 线索
+
+
 @pytest.mark.parametrize("alias", [
     "amd395", "amd-395", "amd_395", "amd395-128g", "amd395128g", "amd-395-128g",
     "395", "395-128g", "ai-max-395", "ai-max-395-128g", "ryzen-ai-max-395",

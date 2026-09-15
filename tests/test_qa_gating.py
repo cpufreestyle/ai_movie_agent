@@ -1,9 +1,10 @@
 """P2-⑬：MovieAgent 出片链路的质检（QA）与投稿前体检（preflight）门控。
 
-两条链路的关键约束都是「默认行为保持不变」：
-- QA 用独立开关 `qa.agent_enabled`（默认关）。刻意不复用 `qa.enabled` ——
-  那份是 run_series 批量出片的历史默认值（config.yaml 里就是 true），
-  直接复用它会让 WebUI/cli run 的逐镜链路凭空多出打分开销与换 seed 重 roll。
+两条链路都有独立开关，且**互不牵连**：
+- QA 用独立开关 `qa.agent_enabled`（2026-09-15 起默认**开**：不让糊/静帧/全黑的废片
+  静默进成片）。刻意不复用 `qa.enabled` —— 那份是 run_series 批量出片的历史默认值
+  （config.yaml 里就是 true），两条链路节奏不同，所以逐镜链路要能单独关：
+  `agent_enabled: false` 完全跳过，或 `max_rerolls: 0` 只打分不重出。
 - preflight 的拦截只在「配置开启自动投稿」时生效，且可关。
 """
 from __future__ import annotations
@@ -101,9 +102,16 @@ def test_run_series_report_delegates_to_qa_writer(tmp_path):
 
 
 # ------------------------------------------------------------- _qa_policy
-def test_qa_is_off_for_agent_by_default():
-    """关键：run_series 的 qa.enabled=true 不能顺手把 MovieAgent 也打开。"""
-    a, _ = _agent({"qa": {"enabled": True, "max_rerolls": 2}})
+def test_qa_is_on_for_agent_by_default():
+    """默认开（2026-09-15 起）：不再让不合格镜头静默进成片。"""
+    a, _ = _agent({})
+    on, policy = a._qa_policy()
+    assert on is True and policy            # 阈值取自 qa.DEFAULTS
+
+
+def test_qa_agent_switch_is_independent_of_batch_enabled():
+    """关键：`qa.enabled`（批量链路）不能替逐镜链路做决定，显式 false 必须生效。"""
+    a, _ = _agent({"qa": {"enabled": True, "agent_enabled": False, "max_rerolls": 2}})
     on, policy = a._qa_policy()
     assert on is False and policy == {}
 
@@ -121,7 +129,8 @@ def test_qa_agent_switch_enables_and_reuses_thresholds():
 
 # ------------------------------------------------------- 出片链路的默认行为
 def test_generate_one_scene_unchanged_when_qa_off():
-    a, work = _agent({})
+    """显式关掉时，出片链路与「没有质检」完全一致：不打分 / 不重 roll / 不写摘要。"""
+    a, work = _agent({"qa": {"agent_enabled": False}})
     a.generate_one_scene()
     assert len(a.engine.seeds) == 1             # 不重 roll
     assert "qa" not in a.state                  # 不写质检摘要

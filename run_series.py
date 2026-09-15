@@ -391,13 +391,34 @@ def _finish_episode(eng, ep: int, out_dir: str, shot_files: list,
     return None
 
 
+def _free_vram(eng) -> None:
+    """让 ComfyUI 放一次显存（best-effort，不动任何出片状态）。
+
+    ComfyUI 不支持 `/free`、或网络抖动，都只打印提示、不中断出片。
+    """
+    client = getattr(eng, "client", None)
+    fn = getattr(client, "free_memory", None)
+    if fn is None:
+        return
+    try:
+        ok = fn()
+    except Exception as e:      # noqa: BLE001 - 清理失败不该拖垮出片
+        print(f"[vram] 释放显存失败（已忽略）: {e}")
+        return
+    if ok:
+        print("[vram] 已通知 ComfyUI 释放显存（--free-every）")
+    else:
+        print("[vram] 释放显存未成功（ComfyUI 可能不支持 /free），继续出片")
+
+
 def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                 prev_frame: str | None, out_dir: str, use_i2v: bool,
                 anchor: str = "", anchor_mode: str = "first",
                 only: set | None = None, force: bool = False,
                 anchor_map: dict | None = None,
                 ref_images: list | None = None,
-                qa_policy: dict | None = None) -> str | None:
+                qa_policy: dict | None = None,
+                free_every: int = 0) -> str | None:
     """出一集。
 
     默认（use_i2v=False）每镜 **T2V**：prompt 语义主导，画面精确匹配该段旁白描写的场景。
@@ -407,6 +428,11 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
     --anchor：给「含 Mira 的镜」喂同一张标准像作 I2V 起始帧，用来锁住身份。
       first（默认）每个 Mira 镜都从标准像起 → 一致性最强；
       chain  首镜用标准像、后续接上一个 Mira 镜的尾帧 → 兼顾连贯与自然演变。
+
+    free_every：每**新渲染** N 镜就让 ComfyUI 放一次显存（0 = 不启用，即既有行为）。
+      长片连出时 FunControl int8（约 2.3GB）+ H3 主模型的驻留会累积、把 ComfyUI 拖崩；
+      代价是下一镜要重新加载模型（变慢），所以默认关，按需开（建议 3~6）。
+      只统计新渲染的镜 —— 缓存命中的没占新显存，不必放。
     """
     from agent import qa as qa_mod
     qa_policy = qa_policy or {}
@@ -414,6 +440,7 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
     man = load_manifest()
     shot_files = []
     mira_prev = None          # chain 模式：上一个 Mira 镜的尾帧
+    rendered = 0              # 本集**新渲染**的镜数（缓存命中的不算）
 
     for i, base in enumerate(prompts):
         idx = i + 1
@@ -428,9 +455,13 @@ def run_episode(eng, ep: int, prompts: list, style_anchor: str,
                                 qa_mod, qa_policy, qa_entries)
             if not shot:
                 return None
+            rendered += 1
         else:
             print(f"[{key}] 已存在，跳过 -> {shot}")
         shot_files.append(shot)
+        # 每 N 镜放一次显存：驻留会累积，连出多镜后会把 ComfyUI 拖崩（见 docstring）
+        if free_every and rendered and rendered % free_every == 0:
+            _free_vram(eng)
         if use_i2v:
             prev_frame = last_frame(shot, os.path.join(WORK, f"{key}_last.png"))
         if anchor and _is_char_shot(base):
@@ -549,7 +580,8 @@ def _run_one_episode(eng, a, data: dict, ep: int, style_anchor: str, anchor: str
     new_prev = run_episode(eng, ep, prompts, style_anchor, prev_frame, a.out_dir,
                            a.i2v, anchor=anchor, anchor_mode=a.anchor_mode,
                            only=only, force=a.force, anchor_map=anchor_map,
-                           ref_images=ref_images, qa_policy=qa_policy)
+                           ref_images=ref_images, qa_policy=qa_policy,
+                           free_every=getattr(a, "free_every", 0))
     # T2V 模式下 run_episode 成功也返回 None，故用成片是否落盘判定成败
     film = os.path.join(a.out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
     if not _ok(film):
@@ -604,6 +636,11 @@ def _parse_args():
                     help="只重出指定镜号（逗号分隔，如 14,15,16），强制重生成并跳过拼接")
     ap.add_argument("--force", action="store_true",
                     help="强制重生成所有镜头（用于跑锚定图升级等场景，仍会拼接）")
+    ap.add_argument("--free-every", type=int, default=0, metavar="N",
+                    help="每**新渲染** N 镜就让 ComfyUI 释放一次显存（0 = 不启用，默认，"
+                         "即既有行为）。长片连出时 FunControl int8（约 2.3GB）+ H3 主模型的"
+                         "驻留会累积、把 ComfyUI 拖崩；开启可显著降低「跑到一半崩、前面白跑」的"
+                         "概率，代价是下一镜要重新加载模型（变慢）。建议 3~6")
     ap.add_argument("--ref-images", default="auto",
                     help="身份参考图：'auto' 自动收集 outputs/anchor/mira_*.png（最多9张）；"
                          "或逗号分隔的显式路径；'none' 关闭。配合首帧锚定走 Hybrid 增强人物一致性（不需白模）")

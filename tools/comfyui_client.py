@@ -223,6 +223,26 @@ class ComfyUIClient:
                 ok = False
         return ok
 
+    def free_memory(self, unload_models: bool = True) -> bool:
+        """让 ComfyUI 释放显存（可选同时卸载模型权重），best-effort、不抛异常。
+
+        为什么需要：长片逐镜出片时，FunControl int8（约 2.3GB）与 H3 主模型的驻留
+        会**累积**，连出若干镜后把 ComfyUI 拖崩（实测连续出片后崩）。每隔 N 镜
+        调一次能显著降低「跑到一半崩掉、前面白跑」的概率。
+
+        代价：下一次出片要重新加载模型（变慢）。所以这里只提供能力，频率由调用方
+        （`run_series --free-every N`，默认 0 = 不启用）决定。
+
+        失败不抛 —— 服务不支持该端点 / 网络抖动都不该中断出片。
+        """
+        try:
+            self._post("/free",
+                       json={"free_memory": True, "unload_models": bool(unload_models)},
+                       retries=1, timeout=30)
+            return True
+        except Exception:
+            return False
+
     def wait(self, prompt_id: str, timeout: int | None = None,
              *, raise_on_timeout: bool = False, poll: float = 2.0,
              on_progress=None) -> dict | None:

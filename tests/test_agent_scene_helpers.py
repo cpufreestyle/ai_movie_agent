@@ -208,6 +208,9 @@ def test_generate_one_scene_happy_path(agent, tmp_path):
     agent.blocking_fc = [fc]
     agent.config["blender"] = {"use_as_ref_images": True, "use_as_fun_control": True,
                                "fun_control_strength": 0.8}
+    # 本例只验 FunControl / ref_images 接线与参数落盘；关掉质检，否则占位黑帧会被判
+    # 不合格而换 seed（7 -> 7926），seed 断言就不成立了。QA 行为见 test_qa_gating.py。
+    agent.config["qa"] = {"agent_enabled": False}
 
     beat = agent.generate_one_scene(seed=7)
     assert beat is not None

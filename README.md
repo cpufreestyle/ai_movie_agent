@@ -48,11 +48,17 @@ python make_narration.py --film outputs/ep1_series_film_mmh3.mp4 \
   无 LLM 时自动降级为模板生成，保证流程可跑通。
 - **电影感提示词**：导演模块把分镜压缩成视频引擎友好的英文提示词（含运镜、风格）。
 - **逐镜自动质检**：每镜出片后自动打分（糊 / 静帧 / 全黑 / 可选身份漂移），不达标就换 seed
-  自动重出（限次），并落 `qa_report.json`。阈值默认值写在 `agent/qa.py` 的 `DEFAULTS`，
+  自动重出（限次），并落 `qa_report.json`。**默认开启**：不合格的废片直接进成片代价更高
+  （事后只能人工挑，且往往拼接完才暴露）；不想付重 roll 成本就设 `qa.agent_enabled: false`，
+  或 `qa.max_rerolls: 0`（只打分报告、不重出）。阈值默认值写在 `agent/qa.py` 的 `DEFAULTS`，
   在 `config.yaml` 加同名 `qa:` 段即可覆盖；建议先看报告分布再收紧阈值。
   单独给视频打分：`python -m agent.qa <视频>`，整目录分布：`python -m agent.qa --dir <目录> --json`。
 - **状态持久化**：每一镜的剧本、提示词、片段都落盘，可随时 `status` 查看进度。
-- **可控走位（白模）**：Blender 渲白模控制图（depth / pose / edge），经 H3 Fun Control 逐帧注入 DiT，精确锁定角色走位与镜头运动，避免随机漂移。
+- **可控走位（白模）**：Blender 渲白模控制图（depth / pose / edge）→ 经 H3 Fun Control
+  逐帧注入 DiT，**显著改善走位方向的正确性**（不加控制时角色常反向漂移）。
+  ⚠️ 幅度仍是弱项：实测白模意图 +614px、出片仅 +37px（约 6%）；可用
+  `blender.fun_control_walk_gain` 微调，但受画面边界限制**上限只有约 1.25x** ——
+  真正的杠杆是 `fun_control_strength`（0.8 干净弱 / 1.2 明显强 / ≥1.5 画面崩坏）。
 
 ## 部署方式（跨平台，Docker / 原生脚本 二选一）
 
@@ -249,6 +255,10 @@ python launch_comfy.py --sage-attention
 ## 进阶
 - **更长更连贯**：调大 `overlap_history`(17→37)、`addnoise_condition`(20)，或用异步
   `ar_step` + `causal_block_size`。
+- **长片防 OOM**：连续出多镜时 FunControl int8（约 2.3GB）+ H3 主模型的显存驻留会**累积**，
+  会把 ComfyUI 拖崩（跑到一半崩，前面就白跑了）。`run_series.py` 加 `--free-every N`
+  （建议 3~6），每**新渲染** N 镜就让 ComfyUI 放一次显存（缓存命中的镜不计）。
+  代价是下一镜要重新加载模型（变慢），所以**默认 0 = 不启用**。
 - **角色一致性**：后续可接入本地图像模型（SDXL/ComfyUI）生成关键帧，再用 SkyReels I2V
   (`--image`) 生成镜头。
 - **配音**：用本地 TTS 生成旁白，editor 阶段合入音轨。

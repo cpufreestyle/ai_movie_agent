@@ -188,5 +188,43 @@ def test_blocking_fc_size_uses_engine_snap_resolution():
     assert BlockingGenerator._resolve_fc_size(stub) == (768, 448)
 
 
+# ---------------------------------------------------------------- 走位幅度增益
+def _gain_stub(blender_cfg: dict):
+    """`_resolve_walk_gain` 吃的是 `self.cfg`（与 `_resolve_fc_*` 吃 config 不同）。"""
+    return types.SimpleNamespace(cfg=blender_cfg)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (1.0, 1.0), (1.25, 1.25), (0.5, 0.5), ("1.5", 1.5),
+    ("abc", 1.0), ("", 1.0), (0, 1.0), (-2, 1.0), (None, 1.0),
+])
+def test_walk_gain_parses_or_falls_back(raw, expected):
+    """非法值（非数字 / 非正 / 空）一律回退 1.0 = 既有行为，绝不让配置写坏出片。"""
+    from agent.blocking import BlockingGenerator
+    got = BlockingGenerator._resolve_walk_gain(
+        _gain_stub({"fun_control_walk_gain": raw}))
+    assert got == expected
+
+
+def test_walk_gain_default_is_neutral():
+    from agent.blocking import BlockingGenerator
+    assert BlockingGenerator._resolve_walk_gain(_gain_stub({})) == 1.0
+
+
+@pytest.mark.parametrize("gain,expect_margin", [
+    (1.0, "0.8"),     # 默认：与加这个开关之前逐字一致
+    (0.5, "0.4"),     # 收窄
+    (1.25, "1.0"),    # 贴画面边缘（0.8 * 1.25 = 1.0）
+    (5.0, "1.0"),     # 硬顶：再大就是出画，控制序列反而丢信号
+])
+def test_fc_code_walk_margin_is_clamped(tmp_path, gain, expect_margin):
+    from agent.blocking import BlockingGenerator
+    cfg = {"blender": {"enabled": False, "fun_control_walk_gain": gain},
+           "engine": {}}
+    bg = BlockingGenerator(cfg, str(tmp_path))
+    code = bg._build_fc_code({"characters": 1}, str(tmp_path / "out"), "eevee")
+    assert f"def _wx(nx): return nx*HW*{expect_margin}" in code
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

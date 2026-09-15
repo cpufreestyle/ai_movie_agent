@@ -140,14 +140,20 @@ class MovieAgent:
     def _qa_policy(self) -> tuple:
         """返回 (是否对 MovieAgent 出片链路启用质检, 策略)。
 
-        默认**关**。WebUI / `cli run` 的逐镜续写链路一旦开启质检，就会多出打分开销
-        与「换 seed 重 roll」（一次重 roll 就是几分钟 GPU），默认行为必须与既有出片
-        完全一致，所以这里用独立开关 `qa.agent_enabled`，而不是复用 run_series 批量
-        链路那份 `qa.enabled`（它历史上默认就是开的）。
+        默认**开**（2026-09-15 起）。翻默认值的理由：逐镜链路开着质检的代价是
+        「打分开销 + 换 seed 重 roll（一次重 roll 就是几分钟 GPU）」；但不合格的
+        废片（糊 / 静帧 / 全黑）直接进成片的代价更高 —— 事后只能人工挑，而且往往
+        到拼接完才暴露。默认先拦住崩坏镜头，比默认放行更实用。
+
+        不想付重 roll 成本可显式关：配置 `qa.agent_enabled: false`；或保留打分但
+        不重出：`qa.max_rerolls: 0`（只报告）。
+
+        开关仍是**独立**的，刻意不复用 run_series 批量链路那份 `qa.enabled`
+        （它历史上默认就是开的）—— 两条链路节奏不同，不该互相牵连。
         阈值仍复用 `qa.*` 同一段配置，不必维护两套。
         """
         from . import qa
-        on = bool((self.config.get("qa") or {}).get("agent_enabled", False))
+        on = bool((self.config.get("qa") or {}).get("agent_enabled", True))
         return on, (qa.load_policy(self.config) if on else {})
 
     def _score_shot(self, path: str, n: int) -> dict:

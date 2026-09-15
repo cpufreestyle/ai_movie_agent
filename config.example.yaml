@@ -147,11 +147,13 @@ engine:
 #   单独给视频打分：python -m agent.qa <视频路径> [--char --anchor <锚定图>]
 qa:
   enabled: true
-  # MovieAgent（WebUI 一键出片 / cli run 逐镜续写）是否参与质检，**默认关**。
-  # 与上面的 enabled 分开：批量出片（run_series）历史上就开着质检，而逐镜链路一旦
-  # 开启会多出打分开销 + 换 seed 重 roll（一次重 roll 就是几分钟 GPU），默认必须与
-  # 既有出片行为完全一致，所以这里只在显式开启时才打分。阈值仍复用下面这段。
-  agent_enabled: false
+  # MovieAgent（WebUI 一键出片 / cli run 逐镜续写）是否参与质检，**默认开**。
+  # 与上面的 enabled 分开：批量出片（run_series）历史上就开着质检，两条链路节奏不同、
+  # 不该互相牵连（所以 `qa.enabled` 不会顺手把这条也打开）。
+  # 默认开的取舍 —— 代价：打分开销 + 换 seed 重 roll（一次重 roll 就是几分钟 GPU）；
+  # 收益：不让糊 / 静帧 / 全黑的废片直接进成片（事后只能人工挑，且往往拼接完才暴露）。
+  # 不想付重 roll 成本就置 false；保留打分但只报告不重出，用下面的 max_rerolls: 0。
+  agent_enabled: true
   sample_frames: 9        # 每镜抽样帧数
   max_rerolls: 1          # 不达标时换 seed 重出的次数上限（0 = 只报告不重出）
   # ---- 风格无关指标（默认启用，只用 opencv+numpy，无额外依赖）----
@@ -367,6 +369,13 @@ blender:
   use_as_fun_control: false
   fun_control_walk: "-1,0:1,0"   # 归一化走位 'x,y[:x,y...]'；留空 = 只用分镜文本识别的走位
   fun_control_strength: 1.2      # Fun Control 强度：0.8 干净弱 / 1.2 明显强 / >=1.5 画面崩坏
+  # 走位幅度增益：放大归一化走位换算出的世界位移（1.0 = 原样，即既有行为）。
+  #   用途：H3 Fun Control 实测「跟不到位」—— 白模意图 +614px，出片只有 +37px（约 6%），
+  #   放大白模位移能让引擎多跟一点。
+  #   ⚠️ 天花板只有约 1.25x：模板按镜头半宽换算并留 0.8 边距防出画，最多放到 1.0
+  #      （贴画面边缘）；再大角色就出画，控制序列反而丢信号。真正的瓶颈在引擎跟随
+  #      强度（上面 fun_control_strength），别指望这个旋钮填平 6% 的差距。
+  fun_control_walk_gain: 1.0
   # ---- 渲染性能 / 健壮性（本次优化新增）----
   engine: auto            # auto=优先 EEVEE(GPU)失败自动降级 CYCLES / eevee / cycles（cycles 最稳但最慢）
   samples: 24             # 采样数，白模可降到 8~24，越低越快

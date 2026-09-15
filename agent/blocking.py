@@ -127,8 +127,22 @@ class BlockingGenerator:
         # 控制视频必须与出片**同分辨率、同帧数(17n+5)**（fit_mode=exact），故用引擎出片参数。
         self.fc_enabled = bool(self.cfg.get("use_as_fun_control", False))
         self.fc_walk = str(self.cfg.get("fun_control_walk", "-1,0:1,0") or "")
+        # 走位幅度增益：放大白模里角色的横向位移，补偿 H3 Fun Control「跟不到位」
+        # （实测白模意图 +614px、出片仅 +37px，约 6%）。
+        # ⚠️ 天花板很低：模板按相机水平半宽 HW 换算、默认留 0.8 边距防出画，
+        #    最多只能放到 1.0（贴画面边缘）→ 增益上限约 1.25x。
+        #    真正的瓶颈在引擎跟随强度，不在白模幅度，别指望这个旋钮填平 6% 的差距。
+        self.fc_walk_gain = self._resolve_walk_gain()
         self.fc_frames = self._resolve_fc_frames()
         self.fc_w, self.fc_h = self._resolve_fc_size()
+
+    def _resolve_walk_gain(self) -> float:
+        """走位幅度增益；非法值（非数字 / 非正）一律回退 1.0（= 既有行为）。"""
+        try:
+            g = float(self.cfg.get("fun_control_walk_gain", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
+        return g if g > 0 else 1.0
 
     def _resolve_fc_frames(self) -> int:
         """Fun Control 控制视频帧数：对齐出片 num_frames 并吸附到 H3 的 17n+5 网格。
@@ -462,6 +476,9 @@ class BlockingGenerator:
             # Fun Control 走位控制序列（归一化走位；分辨率/帧数对齐出片）
             FCW=str(self.fc_w), FCH=str(self.fc_h), FCFRAMES=str(self.fc_frames),
             WALK=json.dumps(spec.get("walk") or self.fc_walk, ensure_ascii=False),
+            # 走位世界 x = 相机水平半宽 HW × 该边距。0.8 是防出画基线，增益在其上放大，
+            # 硬顶 1.0（贴画面边缘）—— 再大角色就出画，控制序列反而丢信号。
+            WALKMARGIN=str(min(0.8 * self.fc_walk_gain, 1.0)),
             FCPATH=json.dumps(os.path.join(out_dir, "fc_")),
         )
 
@@ -913,7 +930,9 @@ print("OK_ANIM", {OUTDIR})
 
 # Fun Control 走位控制序列（逐帧 depth；近白远黑、地面压黑只留角色）。
 # 走位为**归一化坐标**（x: -1=画面左 / +1=画面右；y: -1=近 / +1=远），模板内按相机水平
-# 半宽 HW=DIST*tan(19.8°) 换算世界坐标并留 20% 边距 → 自动适配镜头、角色全程不出画。
+# 半宽 HW=DIST*tan(19.8°) 换算世界坐标；{WALKMARGIN} 是防出画边距（默认 0.8，可由
+# config 的 fun_control_walk_gain 放大，**硬顶 1.0 = 贴画面边缘**，再大角色就出画、
+# 控制序列反而丢信号）→ 自动适配镜头、角色全程不出画。
 # 分辨率/帧数由 _common 的 FCW/FCH/FCFRAMES 给出（严格对齐出片，fit_mode=exact）。
 _FC_TAIL = r'''
 W={FCW}; H={FCH}
@@ -955,7 +974,7 @@ for o in scn.collection.objects:
         BASE[o.name]=(o.location.x, o.location.y, o.location.z)
 HW=DIST*0.36
 CX=(sum(b[0] for b in BASE.values())/len(BASE)) if BASE else 0.0   # 角色组中心初始 x
-def _wx(nx): return nx*HW*0.8
+def _wx(nx): return nx*HW*{WALKMARGIN}
 def _wy(ny): return ny*DIST*0.22
 PTS=[]
 for _s in {WALK}.split(":"):
