@@ -3,6 +3,10 @@
 config.yaml
 config.local.yaml
 
+# 旧版 CodeBuddy 的记忆目录：内容已于 2026-09-15 并入 .workbuddy/memory/，
+# 这里只保留磁盘备份，不再入库（避免两份互相冲突的记忆同时存在）。
+.codebuddy/
+
 # 虚拟环境
 .venv/
 .venv-win/
