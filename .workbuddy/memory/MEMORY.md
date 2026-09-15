@@ -9,8 +9,9 @@
 - 模型根 `E:/ComfyUI_models/`（extra_model_paths.yaml，E/D 都查）。代理 127.0.0.1:7897；**访问本机 ComfyUI 须 NO_PROXY/ProxyHandler({}) 防 502**。
 - **cu130 必须**（cu128→CUDA 禁用→latent 全噪）。venv: `d:/ai sheare/repo/ai管理/.venv/Scripts/python.exe`。终端 PowerShell；长任务 Start-Process 后台 + Get-Content 轮询。
 - AMD395(128GB) 须 BF16/FP8（NVFP4 不兼容）。
-- **硬件档位 `HW_TIER`（部署选择，2026-09-15 新增 `amd395-128g`）**：`config_env.HW_TIER_PROFILES` 是唯一权威；档位 = `high/mid/low/cpu/amd395-128g`。三处入口：`HW_TIER` 环境变量、`config.hw_tier`、`python deploy.py --tier amd395-128g`（会写进 `.env`，compose 已透传）；`AUTO_HW=1` 自动检测。别名（`amd395`/`395`/`strix-halo`/`ai-max-395-128g`）统一由 `normalize_tier()` 归一，**别再各处硬列档位名**。
+- **硬件档位 `HW_TIER`（部署选择，2026-09-15 新增 `amd395-128g`）**：`config_env.HW_TIER_PROFILES` 是唯一权威；档位 = `high/mid/low/cpu/amd395-128g/dgxspark-128g`。三处入口：`HW_TIER` 环境变量、`config.hw_tier`、`python deploy.py --tier amd395-128g`（会写进 `.env`，compose 已透传）；`AUTO_HW=1` 自动检测。别名（`amd395`/`395`/`strix-halo`/`ai-max-395-128g`）统一由 `normalize_tier()` 归一，**别再各处硬列档位名**。
 - **AMD 395 为什么要单列一档**：其「显存」由 128G 统一内存切出（BIOS UMA 75–96GB），而 WMI 的 `AdapterRAM` 是 32 位字段、iGPU 常报 512MB~4GB，Linux `lspci` 报 0 → 老 `pick_tier()` 会把这台顶级机判成 **cpu**。识别改走「AMD + 内存 ≥96GB + 型号线索（395/STRIX/AI MAX/8060）+ 显存被低估兜底」；**注意别误伤 AMD 真独显**（RX 7900 XTX 24GB+128G 内存应仍是 high，已锁测试）。
+- **DGX Spark 同为「大统一内存」家族（2026-09-15 新增 `dgxspark-128g`）**：NVIDIA GB10 Grace Blackwell（Project Digits，128GB 统一内存），覆盖与 amd395-128g **完全相同**（bf16／1024x576／90 帧／block_cache on／two_pass on／offload off／blender 64／qa 3 reroll）。识别走「NVIDIA + 内存 ≥96GB + 型号线索（GB10/DGX SPARK/DGXSPARK/PROJECT DIGITS/DIGITS；**不再单列 "NVIDIA GB10"/"NVIDIA DGX SPARK"**，它们是上面词的子集超集、子串判断已覆盖，列出来只会让判定依据出现重复命中词）+ 极低显存兜底」，**先于通用档判断**；**注意别误伤独立 HBM 卡**（DGX A100/H100、RTX 5090 应仍是 high，已锁测试）。别名 `dgxspark`/`dgx-spark`/`dgx`/`digits`/`project-digits`/`gb10`。
 
 ## 二、SageAttention（2026-09-10）
 - wheel: HF `ussoewwin/Sage-Attention-for-Windows`（cu130torch2.11.0-cp313，SA2/SA3），装须 `--no-deps`；另 `pip install triton-windows`。
@@ -37,8 +38,9 @@
   - **全链路接入（agent.py + blocking.py）**：config `blender.use_as_fun_control: true` → `render_assets` 每镜产 **fcvideos**（走位 depth 序列→fc.mp4）→ `generate_one_scene` 自动作 control_video 喂引擎。走位来源：`blender.fun_control_walk`（默认 `-1,0:1,0`，归一化 ±1=画面左右）+ 分镜文本识别（左→右/走近/来回/绕圈，`parse_spec`）。`_FC_TAIL` 模板按镜头距离自动换算世界坐标+留边距→不出画；控制序列分辨率/帧数严格对齐出片（fit_mode=exact，帧数吸附 17n+5）。需 Blender + BlenderMCP(9876) 运行。
   - 坑：FunControl int8 2.3GB + H3 累积易 OOM 使 ComfyUI 崩（连续 A/B 两版后崩）；重启 `python launch_comfy.py --sage-attention`；脚本须用 `/prompt` 返回的 prompt_id 轮询（非本地 uuid）。
 - 驱动模板：`gen_ep5_fc.py`（BlockingGenerator 渲 fc_*.png → export_fc_video 合 fc.mp4 → MMH3Engine.generate → ffmpeg xfade 拼接）。
-- 走位归一化：±1=画面左右；`parse_spec` 从中文提取 左/右/走近镜头/远离镜头/来回/绕圈。注意「走了一圈」等口语**未覆盖**，需补关键词。
+- 走位归一化：±1=画面左右；`parse_spec` 走**规则表**（`agent/blocking.py` 约 225~245 行）而非 if/elif 链 —— approach(走近/走向/靠近镜头)、away(远离/走远)、back_forth(来回/徘徊/踱步/走来走去)、circle(绕圈/环绕走/绕着/**走了一圈**/绕一圈/绕一)；「左/右同时出现」按出现先后定方向（兼容 从左到右 / 由左向右）。⚠️ **「走了一圈」早已覆盖**（旧记的「口语未覆盖、需补关键词」已过时，勿再当待办）。
 - `fc_dir` 须用独立时间戳子目录(RUN)，避免 `_clean` 命中上一轮旧帧。
+- **走位幅度增益 `blender.fun_control_walk_gain`**（默认 `1.0`=既有行为）：只放大 `_wx()` 的换算边距，**硬顶 1.0**（贴画面边缘，再大必出画）；`_resolve_walk_gain()` 对非数字/非正值回退 1.0。用途：白模意图 +614px 而 H3 实测只 +37px（约 6%），需放大白模幅度补偿（但**幅度瓶颈在 FunControl 侧**，增益只能补一部分，别当万能）。README 表述已改为保守版（"方向正确性改善，幅度约为意图的一小部分"），勿再写"精确锁定"。
 
 ## 五、白模 4 图渲染（Blender 5.2 实测结论，别再重复试错）
 - 引擎分工：previs=EEVEE；line=**默认 CYCLES**（可配 `blender.line_engine: eevee`，快 12x，线条掩膜 IoU 72.9%）；depth/normal 回切 EEVEE（`blender.fast_control_passes`，默认 true）。
@@ -54,7 +56,9 @@
 - 现用路线：H3 原片 → `anime_redraw.py` 逐帧动漫重绘（Counterfeit-V3.0，denoise 0.70，steps 20，0% 检出，最稳）或 `anime_stable.py --mode keyframe` → `make_narration` 加旁白 → faststart。
 - 弃用：像素化（用户否「脸部打码」）、prop 模式（花屏发散）、ControlNet-Canny（锁真人脸→检出飙 68%）、3D 画风（70% 检出）。
 - 连贯性：全片固定同一种子（逐帧变种子→抖动 8x）。单 GPU 不能同时跑多个 anime_redraw。
-- 验收：`diag_face_rate.py`（insightface buffalo_l）量化，目标 0%。
+- 验收：`diag_face_rate.py`（insightface buffalo_l）量化，目标 0%。**该脚本只作离线诊断**，不入流水线。
+- 🚫 **不要做真人脸检测（2026-09-16 用户明确）**：既**不**把「真人脸检出率」做成 preflight 发布闸门，也**不**在出片/质检流水线里跑人脸检出。唯一相关开关 `qa.face_check` 恒为 `false`（可选能力，默认关，勿翻）。
+  → 我曾提议「把人脸检出率加进 preflight 当发布闸门」，**已被否决，别再提**。理由：检出开销 + 动漫脸误判高，且用户不接受该方向。剩下来解决真人脸只走**源头**：G 阶段提示词锁死动漫风格 + 风格锚定图用动漫（见上）。
 - 默认风格 `config.project.style` = 日式动漫（`anime style, cel-shaded, ...`，见 v0.10.0），回到写实只改这一行。
 
 ## 七、配音 / 字幕 / 配乐
@@ -96,7 +100,7 @@
 - **`[lint.mccabe] max-complexity = 10`（2026-09-15 起纳入）**；`[lint.per-file-ignores]` 只放行两个不受本项目维护链路约束的文件：`tools/blender_mcp_addon.py`（上游 vendored）、`deploy/sol_h3_spark/sol_h3_server.py`（远程部署脚本）。
 - ⚠️ **`tools/blender_server.py` 的 `import bpy` 必须保留**（`_exec()` 是 `exec(code, globals())`，远端脚本依赖模块全局的 `bpy`），已加 `# noqa: F401`。
 - 复杂度现状：**全仓 C901 = 0**（治理前 48 处；9 处曾列的 `preflight.check 22`、`ltx_engine._inject 20`、`concept_video.render_concept_video 19`、`_strip_cloud_prompt_branch 17`、`publisher.upload 15`、`mmh3_engine._build_workflow 14`、`_write_mp4 12`、`_encode_frames 11`、`_validate_control_video 11` 全部拆完）。查热点：`ruff check . --select C901`。
-- 测试基线：`pytest -q tests/ --basetemp=.pytest_tmp` **362 passed**（2026-09-15；含 `test_hw_profile.py` 44 + `test_hw_webui.py` 29）；`python tests/smoke_test.py` 50 pass 也在 CI 跑。
+- 测试基线：`pytest -q --basetemp=.pytest_tmp` **424 passed**（2026-09-15；`test_hw_profile.py` 含 amd395+dgxspark 两家族 + `test_hw_webui.py` 29 + 新增 `test_vram_guard.py` 7 例）；`python tests/smoke_test.py` 50 pass 也在 CI 跑。
 - **跨平台断言自检（新增纪律）**：凡「CI 红但本机绿」，先问「这条断言依赖路径 / 编码 / 换行的平台差异吗」。本机是 ntpath，平台相关失败在 Windows 上验不动 → **用另一套 path 语义模拟自证**：`posixpath.normpath(posixpath.join(base, rel))` 跑同一组输入（本次 6 条越界串全 REJECT、2 条正常名全 KEEP）。已踩三次同类坑：`.gitignore` 的 `_*.py` 吃 `__init__.py`、黄金指纹嵌绝对路径、路径穿越反斜杠。
 - **`.gitignore` 的 `_*.py` 会吃掉 `__init__.py`**（`*` 能匹配 `_init`）→ 已加 `!**/__init__.py` 取反。血的教训：`webserver/{,services/,views/}__init__.py` 因此**长期未入库**，本地有文件所以绿、CI 全新克隆必 ImportError。**新增包后必须 `git check-ignore -v <path>` 逐个确认**（被忽略的文件在 `git status` 里根本不出现）。
 - 重构等价性验证法：`git show HEAD:<file>` 存到**仓库内**临时文件（放仓库外会因同目录 import 失败产生假差异），与新版同 argv 跑，stdout/stderr/rc 折叠空白后逐字比对。
@@ -117,11 +121,20 @@
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
 - 提交习惯：`_*.py/_*.ps1/_*.bat/_*.txt`、`outputs/`、`.pytest_tmp/`、`.venv/`、`config.yaml` 均 gitignore；每个独立变更批次单独 commit。
-- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 `5db6a82`（CI run #54 / `34980375326`）**。
+- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 `00e950d`（四项实用性改进批次，CI run 2 job 全 success）**；此前 `0691935`(README/`34986481287`)、`6227b7d`(dgxspark/`34985316308`)、`5db6a82`(run #54/`34980375326`)、`85bca4b`(v0.12.0) 亦全绿。
 - **无 gh CLI 查 CI**：`GET /actions/runs?per_page=10`（按 sha 找 run，**sha 必须传完整 40 位**，传短 sha 会匹配不到、误判「还没有 run」）、`GET /actions/runs/<id>/jobs`（看**每个 step** 的 conclusion，比整体红绿有用得多）；日志 `/actions/jobs/<id>/logs` 会 302 到 Azure 签名 URL，**跳转时必须摘掉 Authorization** 否则 403，且单 job 返回纯文本、多 job 是 zip。**完整步骤见 skill `github-release-no-gh` 第 7 节**。
 - 坑：`git …push | tail` 会因 shim 缺 `tail` 报错并可能吞掉输出 → 一律重定向到文件再 Read。
 - **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest **`v0.12.0`**（2026-09-15，tag→`85bca4b`）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用「开头一句话统计 + `## 亮点` + `## 工程 / 质量` + `## 升级提示`」。**完整流程见 skill `github-release-no-gh`**。
 - ⚠️ **写 notes 前必须用 tag 区间取事实**：`git log <prev-tag>..HEAD` / `git diff --shortstat <prev-tag>..HEAD` / `--name-status`。**别拿工作区观感代替 tag 内容** —— 已踩过：v0.11.0 的 notes 把「复杂度治理 / config.yaml 出库 / 测试 128 例」都算进去了，但这些提交并不在 v0.11.0 的 tag（`32f1e8d`）里，实际落在 v0.12.0 区间（`merge-base --is-ancestor` 判定）。另 `--diff-filter=A` 会漏掉**重命名**的文件（`config.yaml`→`config.example.yaml` 记为 `R`），要按 tag 逐个 `git cat-file -e` 确认。
+
+## 十二之二、质检 / 档位可解释 / 防 OOM（2026-09-15 新增，commit `00e950d`）
+- **`qa.agent_enabled` 默认已改为 `true`**（逐镜链路：WebUI 一键出片 / `cli run`）。原默认 `false` = 糊/静帧/全黑镜头直接进成片无兜底。仍与 `qa.enabled`（run_series 批量链路，历史就开）**解耦**，阈值共用同一段 `qa:*`。
+  ⚠️ **翻转默认值的固定动作**：先 `grep agent_enabled tests/` 找出所有断言旧默认值的用例 —— 本次 `test_qa_gating.py` 两条正是断言「默认关」，另有 `test_agent_scene_helpers.py::test_generate_one_scene_happy_path` 因假视频被判不合格换 seed 而失败（该用例只验接线 → 显式关掉并注释原因）。
+- **档位判定可解释 `config_env.explain_tier(hw)`** → `(tier, reason:str, detail:dict{rule,matched_hints,ram,vram})`；
+  **`pick_tier()` 直接委托它**（单一真相源，防解释与判定漂移）。三入口均展示依据：WebUI `/api/hw?detect=1` 的 `reason` 字段 + 前端 `hwStatus`、`tools/hw_profile.py` CLI 打印「判定依据」、测试断言 `pick_tier == explain_tier[0]`（跑遍 HW_CASES 矩阵）。
+  坑：线索表**别放互为子串的项**（`"GB10"` 与 `"NVIDIA GB10"` 会让 `matched_hints` 重复）→ 已去重。
+- **长片防 OOM**：`tools/comfyui_client.py.free_memory()`（POST `/free`，best-effort 失败只 warn）；
+  `run_series.run_episode(..., vram_every=N)` + CLI `--vram-every N`（`0`=关，默认 0）。**只在「新渲染」的镜上计数**（缓存命中不占新显存），每 N 镜放一次。背景：FunControl int8 2.3GB + H3 累积易 OOM（连续出片后 ComfyUI 崩）。
 
 ## 十三、已知隐患 / 待办
 - ~~记忆分叉~~ **已解决（2026-09-15）**：`.codebuddy/memory` 的 13 天历史已并入 `.workbuddy/memory`，重叠的 09-14/09-15 以「附」区保留，`.codebuddy/` 已停止跟踪（文件仍在磁盘）。**权威目录 = `.workbuddy/memory/`**。

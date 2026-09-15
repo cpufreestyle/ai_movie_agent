@@ -47,7 +47,7 @@ python make_narration.py --film outputs/ep1_series_film_mmh3.mp4 \
 - **自动剧本**：用本地 LLM（默认 Ollama，OpenAI 兼容接口）生成世界观设定与逐镜分镜；
   无 LLM 时自动降级为模板生成，保证流程可跑通。
 - **电影感提示词**：导演模块把分镜压缩成视频引擎友好的英文提示词（含运镜、风格）。
-- **逐镜自动质检**：每镜出片后自动打分（糊 / 静帧 / 全黑 / 可选身份漂移），不达标就换 seed
+- **逐镜自动质检**：每镜出片后自动打分（糊 / 静帧 / 全黑），不达标就换 seed
   自动重出（限次），并落 `qa_report.json`。**默认开启**：不合格的废片直接进成片代价更高
   （事后只能人工挑，且往往拼接完才暴露）；不想付重 roll 成本就设 `qa.agent_enabled: false`，
   或 `qa.max_rerolls: 0`（只打分报告、不重出）。阈值默认值写在 `agent/qa.py` 的 `DEFAULTS`，
@@ -161,7 +161,7 @@ python cli.py webui --port 9000   # 自定义端口
 | `engine.offload` | 显存不足时卸载到 CPU |
 | `engine.scene_frames` | 每镜帧数（97≈4s @24fps） |
 | `llm.*` | Ollama / 任意 OpenAI 兼容端点；`disabled: true` 强制模板 |
-| `qa.*` | 逐镜质检阈值（糊 / 静帧 / 全黑 / 身份漂移），覆盖 `agent/qa.py` 的 `DEFAULTS` |
+| `qa.*` | 逐镜质检阈值（糊 / 静帧 / 全黑），覆盖 `agent/qa.py` 的 `DEFAULTS`。注：**本项目不做真人脸检测**，`qa.face_check` 恒为 `false`（离线诊断用 `diag_face_rate.py`，不入流水线） |
 | `preflight.*` | 投稿前静态体检开关（`enabled` / `block_publish`） |
 | `prompting.*` | 提示词生成相关配置 |
 | `series.*` | 系列尾帧续写参数（`i2v` / `anchor_mode` / `only` / `force` / `ep`） |

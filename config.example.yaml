@@ -163,8 +163,10 @@ qa:
   min_brightness: 8.0     # 灰度均值下限，抓全黑；0 = 不检查
   max_brightness: 247.0   # 灰度均值上限，抓全白；0 = 不检查
   # ---- 人脸类指标（需 insightface + 锚定图）----
-  #   注意：opencv 自带 Haar 只认真实人脸，对**动漫脸基本失效**；本项目默认动漫风格，
-  #   故默认关闭，否则会大量误判并白白重 roll GPU。装好 insightface 后再置 true。
+  #   ⚠️ 项目策略：**不做真人脸检测**。此开关保持 false，不要翻成 true
+  #   （另有两条理由支持关闭：opencv 自带 Haar 只认真实人脸、对**动漫脸基本失效**，
+  #   本项目默认动漫风格，开了会大量误判并白白重 roll GPU）。
+  #   需要量化人脸情况时用离线诊断脚本 `diag_face_rate.py`，不入流水线。
   face_check: false
   min_face_ratio: 0.34    # 检出人脸的采样帧占比下限
   min_identity: 0.35      # arcface 余弦：>0.6 同一人，0.35~0.6 偏弱，<0.35 基本换人
