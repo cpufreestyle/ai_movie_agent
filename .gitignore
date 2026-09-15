@@ -47,10 +47,15 @@ comfy_run.log
 space/_deploy_tmp/
 
 # one-off dev scripts (underscore prefix)
+# 注意：`_*.py` 同样会命中 `__init__.py`（`*` 能吃掉 `_init`），会把整个包的
+# 包声明文件一起忽略掉 —— 本地因为有文件而「看起来正常」，但 CI 全新克隆时
+# 会缺 webserver/__init__.py，`from webserver import register_blueprints` 直接
+# ImportError（namespace package，unknown location）。故必须显式取反放行。
 _*.py
 _*.ps1
 _*.bat
 _*.txt
+!**/__init__.py
 kill_test.py
 tmp_vae_test.py
 
