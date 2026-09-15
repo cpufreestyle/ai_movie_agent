@@ -25,6 +25,7 @@ NO_TIER_LABEL = "默认 · 不改动（沿用 config.yaml 现有值）"
 #: 档位 -> 中文说明。键必须覆盖 config_env.HW_TIER_PROFILES 的全部档位（有测试兜底）。
 TIER_LABELS = {
     "amd395-128g": "amd395-128g · AMD Ryzen AI Max+ 395（128GB 统一内存，bf16）",
+    "dgxspark-128g": "dgxspark-128g · NVIDIA DGX Spark / Project Digits（128GB 统一内存，bf16）",
     "high": "high · 大显存独显（≥24GB VRAM）",
     "mid": "mid · 主流独显（≥12GB VRAM）",
     "low": "low · 小显存 / 需 offload",

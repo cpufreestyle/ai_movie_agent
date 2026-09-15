@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """硬件自适应配置工具。
 
-根据机器显存(VRAM) / 内存(RAM) 自动选择配置档位（high / mid / low / cpu / amd395-128g），
+根据机器显存(VRAM) / 内存(RAM) 自动选择配置档位（high / mid / low / cpu / amd395-128g / dgxspark-128g），
 并把对应的参数覆盖应用到 config.yaml，或打印供启动时自动套用的环境变量。
 
 依赖：仅标准库（无 psutil/pynvml/torch 等）。GPU 检测走 nvidia-smi /

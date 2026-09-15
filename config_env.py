@@ -11,7 +11,7 @@
   ENGINE_BACKEND 默认视频引擎：comfyui_mmH3（MiniMax H3）或 comfyui_ltx（LTX-2.5）
   GPU_BACKEND    显卡后端：nvidia（默认）或 amd。amd 时 NVFP4 不支持，
                  自动把 LTX 精度降为 bf16（视频权重需改用 bf16/GGUF/INT8 变体，见下载脚本）
-  HW_TIER        硬件档位：high / mid / low / cpu / amd395-128g。
+  HW_TIER        硬件档位：high / mid / low / cpu / amd395-128g / dgxspark-128g。
                  amd395-128g 专为 AMD Ryzen AI Max+ 395（Strix Halo, 128GB 统一内存）
                  准备；别名 amd395 / amd-395 / 395 / strix-halo / ai-max-395-128g 会自动归一。
   AUTO_HW        1/true 时自动检测本机硬件选档（AMD 395 128G 机器也能被正确识别为
@@ -75,7 +75,7 @@ def apply_env_overrides(cfg: dict) -> dict:
 # 无额外依赖（标准库 + nvidia-smi / rocm-smi / WMI / /proc/meminfo）。
 # 触发方式（任一即可，否则保持原配置，向后兼容）：
 #   AUTO_HW=1                      自动检测本机硬件选档
-#   HW_TIER=high|mid|low|cpu|amd395-128g   强制指定（远程显卡规格已知时最准）
+#   HW_TIER=high|mid|low|cpu|amd395-128g|dgxspark-128g   强制指定（远程显卡规格已知时最准）
 #   config.auto_hardware: true     同上，写进 config.yaml
 #   config.hw_tier: <档>           同上，写进 config.yaml
 # ---------------------------------------------------------------------------
@@ -85,7 +85,15 @@ def apply_env_overrides(cfg: dict) -> dict:
 # 结果就是自动检测把顶级机器判成 cpu 档。故用「AMD + 大内存 + 型号线索」显式识别。
 AMD395_TIER = "amd395-128g"
 AMD395_NAME_HINTS = ("395", "STRIX", "AI MAX", "8060", "RADEON 8050")
+# DGX Spark（原 Project Digits，NVIDIA GB10 Grace Blackwell 超级芯片，128GB 统一内存）专属档位。
+# 同样是大统一内存机：CPU 与 GPU 共享 128GB LPDDR5X，GPU 不报「独立显存」，
+# 老规则（按 vram 判档）会把这台顶级机判成 high 甚至 cpu。故用「NVIDIA + 大内存 + 型号线索」显式识别。
+DGXSPARK_TIER = "dgxspark-128g"
+DGXSPARK_NAME_HINTS = ("GB10", "DGX SPARK", "DGXSPARK", "PROJECT DIGITS", "DIGITS", "NVIDIA DGX SPARK", "NVIDIA GB10")
 # 别名归一：允许 HW_TIER / config.hw_tier / --tier 用口语写法
+# ⚠️ 故意不入「dgx」「blackwell」「grace」这类宽泛词：
+#   DGX A100/H100（数据中心、独立 HBM 显存，非统一内存）与 H200/B200（Blackwell）应当落入 high 档，
+#   不应被误判成 dgxspark。模型线索只认 DGX Spark 这一台。
 TIER_ALIASES = {
     "amd395": AMD395_TIER,
     "amd-395": AMD395_TIER,
@@ -101,6 +109,20 @@ TIER_ALIASES = {
     "strix-halo": AMD395_TIER,
     "strixhalo": AMD395_TIER,
     "halo": AMD395_TIER,
+    "dgxspark": DGXSPARK_TIER,
+    "dgx-spark": DGXSPARK_TIER,
+    "dgx_spark": DGXSPARK_TIER,
+    "dgx spark": DGXSPARK_TIER,
+    "dgxspark-128g": DGXSPARK_TIER,
+    "dgxspark128g": DGXSPARK_TIER,
+    "dgx-spark-128g": DGXSPARK_TIER,
+    "dgx": DGXSPARK_TIER,
+    "digits": DGXSPARK_TIER,
+    "project-digits": DGXSPARK_TIER,
+    "project digits": DGXSPARK_TIER,
+    "nvidia dgx spark": DGXSPARK_TIER,
+    "nvidia dgxspark": DGXSPARK_TIER,
+    "gb10": DGXSPARK_TIER,
 }
 
 
@@ -125,6 +147,22 @@ def _is_amd395(hw: dict) -> bool:
     has_hint = any(h in name for h in AMD395_NAME_HINTS)
     # 型号没线索时，靠「AMD 大内存 + 显存报得极小（iGPU 被 WMI/lspci 低估）」兜底。
     # 真独显（如 RX 7900 + 128G RAM）显存 ≥8GB，不会命中这里。
+    return has_hint or (hw.get("vram_gb") or 0) < 6
+
+
+def _is_dgxspark(hw: dict) -> bool:
+    """判是否 NVIDIA DGX Spark / Project Digits（GB10，128GB 统一内存）。"""
+    vendor = hw.get("vendor")
+    name = (hw.get("gpu_name") or "").upper()
+    # 既认 nvidia-smi 报的 NVIDIA，也认 WMI/lspci 里名字带 NVIDIA 但 vendor 被标成 OTHER 的情况。
+    is_nvidia = vendor == "NVIDIA" or "NVIDIA" in name
+    if not is_nvidia:
+        return False
+    if (hw.get("ram_gb") or 0) < 96:
+        return False
+    has_hint = any(h in name for h in DGXSPARK_NAME_HINTS)
+    # 型号没线索时，靠「NVIDIA 大内存 + 显存报得极小（统一内存被低估，如只报 0~4GB）」兜底。
+    # 真独显（如 RTX 5090 / A100 + 128G RAM）显存 ≥8GB，不会命中这里。
     return has_hint or (hw.get("vram_gb") or 0) < 6
 
 
@@ -250,9 +288,11 @@ def detect_hardware() -> dict:
 def pick_tier(hw: dict) -> str:
     vram = hw.get("vram_gb") or 0
     ram = hw.get("ram_gb") or 0
-    # 先认 AMD 395（Strix Halo 128G）：其显存是 UMA 切分且常被低估，必须先于通用档判断
+    # 先认大统一内存机（显存是 UMA 切分、常被低估）：DGX Spark 与 AMD 395 都必须先于通用档判断
     if _is_amd395(hw):
         return AMD395_TIER
+    if _is_dgxspark(hw):
+        return DGXSPARK_TIER
     if not hw.get("vendor") or vram < 6:
         return "cpu"
     if vram >= 24 and ram >= 48:
@@ -268,6 +308,21 @@ HW_TIER_PROFILES = {
     # 与 high 的区别：显式钉死 bf16（NVFP4/int4_convrot 是 NVIDIA 专属）、开两遍采样、
     # 允许多 reroll、Blender 高档采样——128G 统一内存有足够余量，不必省。
     "amd395-128g": {
+        "engine.comfyui_ltx.precision": "bf16",
+        "engine.comfyui_mmH3.resolution": "1024x576",
+        "engine.comfyui_mmH3.num_frames": 90,
+        "engine.offload": False,
+        "llm.model": "qwen2.5:7b",
+        "engine.comfyui_mmH3.block_cache.enable": True,
+        "engine.comfyui_mmH3.two_pass.enable": True,
+        "qa.max_rerolls": 3,
+        "blender.samples": 64,
+    },
+    # NVIDIA DGX Spark（Project Digits，GB10 Grace Blackwell，128GB 统一内存）+ CUDA。
+    # 与 amd395-128g 是同一个「大统一内存」档位家族：显式钉死 bf16、1024x576/90 帧、开两遍采样、
+    # 不 offload、允许多 reroll、Blender 高档采样——128G 统一内存有足够余量，不必省。
+    # 区别只在厂牌（AMD 那档显式钉 bf16 是因为 NVFP4 是 NVIDIA 专属；本档本就是 NVIDIA，bf16 同样通用）。
+    "dgxspark-128g": {
         "engine.comfyui_ltx.precision": "bf16",
         "engine.comfyui_mmH3.resolution": "1024x576",
         "engine.comfyui_mmH3.num_frames": 90,

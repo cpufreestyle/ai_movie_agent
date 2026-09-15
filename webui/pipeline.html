@@ -323,7 +323,7 @@ html[data-theme="light"] #ui-tip{ box-shadow:0 14px 34px rgba(30,50,80,.20); }
       <label><span class="tip" data-tip="硬件档位：按机器规格一次性套用一组覆盖（分辨率 / 帧数 / 精度 / 采样数）。&#10;选「默认 · 不改动」表示沿用 config.yaml 里现有的值。&#10;amd395-128g = AMD Ryzen AI Max+ 395（Strix Halo, 128GB 统一内存）：LTX 精度钉死 bf16、1024x576 / 90 帧、开两遍采样、不 offload。&#10;优先级：环境变量 HW_TIER &gt; config.hw_tier（这里保存的值）；命令行 python deploy.py --tier 也会写这项。">硬件档位 HW_TIER</span><select id="set-tier" onchange="hwPreview()"></select></label>
     </div>
     <div class="wide" style="margin-top:8px">
-      <label style="color:var(--fg)"><input type="checkbox" id="set-autohw" style="width:auto;vertical-align:middle"> <span class="tip" data-tip="打开后写入 config.auto_hardware: true：每次启动都探测本机显存 / 内存并自动选档。&#10;AMD Ryzen AI Max+ 395 这类统一内存机器会被正确识别成 amd395-128g（其 iGPU 显存常被 WMI 报成 0~4GB，不修正会误判成 cpu 档）。&#10;上面显式选了档位时以档位为准（档位优先于自动检测）。">启动时自动检测硬件（auto_hardware）</span></label>
+      <label style="color:var(--fg)"><input type="checkbox" id="set-autohw" style="width:auto;vertical-align:middle"> <span class="tip" data-tip="打开后写入 config.auto_hardware: true：每次启动都探测本机显存 / 内存并自动选档。&#10;AMD Ryzen AI Max+ 395 / NVIDIA DGX Spark 这类统一内存机器会被正确识别成 amd395-128g / dgxspark-128g（其「显存」由统一内存切出、常被报成 0~4GB，不修正会误判成 cpu 档）。&#10;上面显式选了档位时以档位为准（档位优先于自动检测）。">启动时自动检测硬件（auto_hardware）</span></label>
     </div>
     <div class="wide"><label><span class="tip" data-tip="上面档位将写入 config.yaml 的覆盖项（点路径 = 值），保存后下次启动 cli.py / webui.py 生效。&#10;这里是只读预览，方便确认改动范围。">该档位将应用的覆盖（只读预览）</span></label><pre id="hw-preview" style="max-height:190px">…</pre></div>
   </section>

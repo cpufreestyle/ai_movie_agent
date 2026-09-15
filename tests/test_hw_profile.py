@@ -1,4 +1,4 @@
-"""硬件档位 `amd395-128g`（AMD Ryzen AI Max+ 395 / Strix Halo 128GB 统一内存）：行为锁。
+"""硬件档位 `amd395-128g` / `dgxspark-128g`（大统一内存家族：AMD Ryzen AI Max+ 395 / Strix Halo 与 NVIDIA DGX Spark / Project Digits GB10，均 128GB 统一内存）：行为锁。
 
 为什么值得单独一档、单独一组测试：
 
@@ -27,6 +27,7 @@ if ROOT not in sys.path:
 import config_env as ce  # noqa: E402
 
 AMD395 = "amd395-128g"
+DGXSPARK = "dgxspark-128g"
 
 # (ascii_id, 说明, hw dict, 期望档位)
 HW_CASES = [
@@ -58,6 +59,25 @@ HW_CASES = [
     ("no_gpu",
      "无显卡 —— cpu",
      {"vendor": None, "gpu_name": None, "vram_gb": 0.0, "ram_gb": 64.0}, "cpu"),
+    # ---- DGX Spark（GB10，128GB 统一内存）—— 大统一内存机的 NVIDIA 同族 ----
+    ("dgx_spark_gb10_nvidia_smi",
+     "DGX Spark（GB10）经 nvidia-smi 报 NVIDIA + 型号线索 + 大内存 → dgxspark",
+     {"vendor": "NVIDIA", "gpu_name": "NVIDIA GB10 [DGX Spark]",
+      "vram_gb": 120.0, "ram_gb": 128.0}, DGXSPARK),
+    ("dgx_spark_nameless_fallback",
+     "DGX Spark：型号无线索，靠『NVIDIA + 大内存 + 显存极小』兜底 → dgxspark",
+     {"vendor": "NVIDIA", "gpu_name": "NVIDIA GB10", "vram_gb": 0.0, "ram_gb": 128.0}, DGXSPARK),
+    ("dgx_spark_wmi_other_vendor",
+     "DGX Spark：Windows WMI 把 NVIDIA 标成 OTHER（名字含 NVIDIA）—— 仍能识别",
+     {"vendor": "OTHER", "gpu_name": "NVIDIA GB10 [DGX Spark]",
+      "vram_gb": 0.0, "ram_gb": 128.0}, DGXSPARK),
+    ("dgx_a100_not_spark",
+     "DGX A100 / H100（数据中心、独立 HBM，非统一内存）—— 不该误判成 dgxspark → high",
+     {"vendor": "NVIDIA", "gpu_name": "NVIDIA A100-SXM4-80GB", "vram_gb": 80.0, "ram_gb": 128.0}, "high"),
+    ("nvidia_discrete_128g_not_spark",
+     "RTX 5090 32GB + 128G 内存：显存大、无 DGX 线索 → high 而非 dgxspark",
+     {"vendor": "NVIDIA", "gpu_name": "NVIDIA GeForce RTX 5090",
+      "vram_gb": 32.0, "ram_gb": 128.0}, "high"),
 ]
 
 
@@ -103,6 +123,37 @@ def test_amd395_profile_content():
 def test_amd395_is_a_registered_tier():
     assert AMD395 in ce.HW_TIER_PROFILES
     assert ce.AMD395_TIER == AMD395
+
+
+DGXSPARK_ALIASES = [
+    "dgxspark", "dgx-spark", "dgx_spark", "dgx spark", "dgxspark-128g", "dgxspark128g",
+    "dgx-spark-128g", "dgx", "digits", "project-digits", "project digits",
+    "nvidia dgx spark", "nvidia dgxspark", "gb10",
+    "DGXSPARK", "  Project Digits  ",      # 大小写 / 空白
+]
+
+
+@pytest.mark.parametrize("alias", DGXSPARK_ALIASES)
+def test_normalize_tier_accepts_dgxspark_aliases(alias):
+    assert ce.normalize_tier(alias) == DGXSPARK
+
+
+def test_dgxspark_is_a_registered_tier():
+    assert DGXSPARK in ce.HW_TIER_PROFILES
+    assert ce.DGXSPARK_TIER == DGXSPARK
+
+
+def test_dgxspark_profile_content():
+    """DGX Spark 与 AMD 395 同属『128G 统一内存』档位家族：覆盖项应一致。"""
+    prof = ce.HW_TIER_PROFILES[DGXSPARK]
+    amd = ce.HW_TIER_PROFILES[AMD395]
+    assert prof["engine.comfyui_ltx.precision"] == "bf16"
+    assert prof["engine.offload"] is False
+    assert prof["engine.comfyui_mmH3.two_pass.enable"] is True
+    assert prof["engine.comfyui_mmH3.block_cache.enable"] is True
+    assert prof["engine.comfyui_mmH3.num_frames"] == amd["engine.comfyui_mmH3.num_frames"]
+    assert prof["blender.samples"] == amd["blender.samples"]
+    assert prof["qa.max_rerolls"] == amd["qa.max_rerolls"]
 
 
 def test_apply_hw_overrides_via_env_alias(monkeypatch):

@@ -489,9 +489,10 @@ def main():
     p.add_argument("--gpu", choices=["nvidia", "amd", "none", "auto"], default="auto")
     p.add_argument("--engine", choices=["comfyui_mmH3", "comfyui_ltx", "sol_h3"], default=None)
     p.add_argument("--tier", default=None,
-                   help="硬件档位：high / mid / low / cpu / amd395-128g"
+                   help="硬件档位：high / mid / low / cpu / amd395-128g / dgxspark-128g"
                         "（amd395-128g = AMD Ryzen AI Max+ 395, 128GB 统一内存；"
-                        "别名 amd395 / 395 / strix-halo）。会写入 .env 的 HW_TIER")
+                        "dgxspark-128g = NVIDIA DGX Spark / Project Digits GB10, 128GB 统一内存；"
+                        "别名 amd395 / 395 / strix-halo / dgxspark / dgx / digits / gb10）。会写入 .env 的 HW_TIER")
     p.add_argument("--models-dir", default=None, help="视频权重目录（--with-weights 时需要）")
     p.add_argument("--apply", action="store_true", help="执行安全部分（venv/依赖/.env/compose up）")
     p.add_argument("--with-weights", action="store_true", help="授权下载视频权重（需同时 --apply）")

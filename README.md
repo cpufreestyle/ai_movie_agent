@@ -60,7 +60,7 @@ ComfyUI 上（本机或远程，应用与引擎解耦）：
 
 - **Docker Compose（推荐交付）**：`cp .env.example .env` → `docker compose up -d` → 拉 LLM → 开 `http://localhost:8000`。
 - **原生一键脚本**：Windows `setup_windows.bat` / `start_webui_windows.bat`；Linux/macOS `bash setup_unix.sh` / `./start_webui.sh`。
-- **显卡后端**：NVIDIA 开箱即用；AMD 走 ROCm（`docker compose -f docker-compose.yml -f docker-compose.amd.yml --profile gpu up -d`，权重用 `--gpu amd` 下载）。`bash detect_gpu.sh` 自动探测给建议。**AMD Ryzen AI Max+ 395（128GB 统一内存）** 有专属档位：`python deploy.py --gpu amd --tier amd395-128g`（或 `HW_TIER=amd395-128g`），可本地直跑 BF16 版 LTX-2.5，详见 [DEPLOY.md](DEPLOY.md#amd-ryzen-ai-max-395strix-halo-128gb-统一内存)。
+- **显卡后端**：NVIDIA 开箱即用；AMD 走 ROCm（`docker compose -f docker-compose.yml -f docker-compose.amd.yml --profile gpu up -d`，权重用 `--gpu amd` 下载）。`bash detect_gpu.sh` 自动探测给建议。**AMD Ryzen AI Max+ 395（128GB 统一内存）** 有专属档位：`python deploy.py --gpu amd --tier amd395-128g`（或 `HW_TIER=amd395-128g`），可本地直跑 BF16 版 LTX-2.5，详见 [DEPLOY.md](DEPLOY.md#amd-ryzen-ai-max-395strix-halo-128gb-统一内存)。**NVIDIA DGX Spark / Project Digits（GB10, 128GB 统一内存）** 同属大统一内存家族，有专属档位 `dgxspark-128g`（`python deploy.py --tier dgxspark-128g` 或 `HW_TIER=dgxspark-128g`），覆盖与 amd395-128g 完全相同，详见 [DEPLOY.md](DEPLOY.md#nvidia-dgx-sparkproject-digits-gb10-blackwell-128gb-统一内存)。
 - **视频权重**：NVIDIA 用 `python download_mmh3_models.py` / `download_ltx_models.py`（免 token，走 hf-mirror，多源续传）；AMD 加 `--gpu amd` 切 bf16/INT8 变体。
 
 ## 架构
@@ -162,7 +162,7 @@ python cli.py webui --port 9000   # 自定义端口
 | `COMFYUI_API` | 视频服务地址，写入 `engine.comfyui_mmH3.api`、`engine.comfyui_ltx.api`、`image_prompt.comfyui.api` 及所有 comfyui 档案 |
 | `ENGINE_BACKEND` | 默认视频引擎：`comfyui_mmH3`(MiniMax H3) / `comfyui_ltx`(LTX-2.5) |
 | `GPU_BACKEND` | `nvidia`(默认) / `amd`；`amd` 时自动把 LTX 精度降为 bf16 |
-| `HW_TIER` | 硬件档位：`high` / `mid` / `low` / `cpu` / `amd395-128g`。`amd395-128g` = AMD Ryzen AI Max+ 395（Strix Halo, 128GB 统一内存），会钉死 bf16 并放大分辨率/帧数/采样；别名 `amd395` / `395` / `strix-halo` |
+| `HW_TIER` | 硬件档位：`high` / `mid` / `low` / `cpu` / `amd395-128g` / `dgxspark-128g`。`amd395-128g` = AMD Ryzen AI Max+ 395（Strix Halo, 128GB 统一内存）；`dgxspark-128g` = NVIDIA DGX Spark / Project Digits（GB10, 128GB 统一内存）。两者同属「大统一内存」家族，会钉死 bf16 并放大分辨率/帧数/采样；别名 `amd395` / `395` / `strix-halo` / `dgxspark` / `dgx` / `digits` / `gb10` |
 | `AUTO_HW` | `1` / `true` 时自动检测本机硬件并选档（AMD 395 128G 机器也会被正确识别为该档） |
 | `COMFYUI_IMAGE` / `COMFYUI_IMAGE_ROCM` | 仅 docker compose 的 `--profile gpu` 启用视频服务时使用 |
 

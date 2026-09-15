@@ -149,6 +149,27 @@ AMD 上把 `.env` 的 `GPU_BACKEND=amd`，Agent 会自动把 LTX 精度注入改
 - 完整环境搭建（ROCm / ComfyUI / BF16 权重 / 文本编码器与 VAE）：见
   [LTX25_AMD395_PLAN.md](LTX25_AMD395_PLAN.md) 与 `bash setup_amd.sh`。
 
+### NVIDIA DGX Spark（Project Digits, GB10 Blackwell, 128GB 统一内存）
+
+DGX Spark 与 AMD 395 同属「大统一内存」机器：128GB 统一内存足够直接跑官方 **BF16 权重（~44GB）**，
+不必 GGUF 量化。档位 `dgxspark-128g` 与 `amd395-128g` 的覆盖**完全相同**（bf16、1024x576 / 90 帧、
+两遍采样、不 offload、Blender 64 采样、QA 3 次 reroll）。三种选法任选：
+
+| 方式 | 命令 / 配置 |
+|---|---|
+| 环境变量 | `.env` 里设 `HW_TIER=dgxspark-128g`（NVIDIA 机器默认后端即 `nvidia`，无需 `GPU_BACKEND=amd`） |
+| 部署入口 | `python deploy.py --tier dgxspark-128g`（会把 `HW_TIER` 写进 `.env`） |
+| config.yaml | `hw_tier: dgxspark-128g`（或 `auto_hardware: true`，在真机上会自动识别成这一档） |
+
+别名 `dgxspark` / `dgx-spark` / `dgx` / `digits` / `project-digits` / `gb10` 均可。
+
+**为什么要显式选**：DGX Spark 的「显存」也是从 128GB 统一内存切出来的，`nvidia-smi` 上报的 VRAM 偏小，
+且常被误认成独立 HBM 卡（DGX A100/H100、RTX 5090）——后者应留在 `high` 档。本档位改用
+「NVIDIA + 内存 ≥96GB + 型号线索（GB10 / DGX SPARK / DIGITS）+ 极低显存兜底」识别，绕开这个坑。
+
+- 验证档位生效：`python tools/hw_profile.py --tier dgxspark`（打印将应用的覆盖）；
+  在真机上直接 `python tools/hw_profile.py` 应自动推荐 `dgxspark-128g`。
+
 ## 环境变量（Docker / 远程部署用，免改 config.yaml）
 | 变量 | 作用 |
 |---|---|
@@ -159,7 +180,7 @@ AMD 上把 `.env` 的 `GPU_BACKEND=amd`，Agent 会自动把 LTX 精度注入改
 | `SOL_H3_API` | Sol-H3 服务地址（sol_h3 引擎，如 http://<DGX-IP>:8000） |
 | `ENGINE_BACKEND` | `comfyui_mmH3` / `comfyui_ltx` / `sol_h3` |
 | `GPU_BACKEND` | `nvidia`(默认) / `amd`；`amd` 时自动把 LTX 精度降为 bf16 |
-| `HW_TIER` | 硬件档位：`high` / `mid` / `low` / `cpu` / `amd395-128g`（AMD Ryzen AI Max+ 395, 128G 统一内存）。也可用 `AUTO_HW=1` 自动检测 |
+| `HW_TIER` | 硬件档位：`high` / `mid` / `low` / `cpu` / `amd395-128g` / `dgxspark-128g`。`amd395-128g`=AMD Ryzen AI Max+ 395(128G 统一内存)；`dgxspark-128g`=NVIDIA DGX Spark / Project Digits(GB10, 128G 统一内存)。也可用 `AUTO_HW=1` 自动检测 |
 
 ## 视频引擎四：Sol-H3-Spark（DGX Spark 远程）
 

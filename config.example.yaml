@@ -397,11 +397,11 @@ blender:
 # 硬件档位（可选）：按机器规格一次性套用一组覆盖（分辨率 / 帧数 / 精度 / 采样 …）
 #
 # 三种选法（任一即可，优先级 HW_TIER 环境变量 > 本文件）：
-#   1) 环境变量：HW_TIER=amd395-128g    （另可 AUTO_HW=1 自动检测本机）
-#   2) 部署入口：python deploy.py --gpu amd --tier amd395-128g
+#   1) 环境变量：HW_TIER=amd395-128g  （或 HW_TIER=dgxspark-128g；另可 AUTO_HW=1 自动检测本机）
+#   2) 部署入口：python deploy.py --gpu amd --tier amd395-128g   /   python deploy.py --tier dgxspark-128g
 #   3) 本文件：  取消文件末尾两行的注释
 #
-# 可选档位：high / mid / low / cpu / amd395-128g
+# 可选档位：high / mid / low / cpu / amd395-128g / dgxspark-128g
 #   amd395-128g = AMD Ryzen AI Max+ 395（Strix Halo, 128GB 统一内存）
 #     效果：LTX 精度钉死 bf16、1024x576 / 90 帧、开 block_cache 与两遍采样、
 #           不 offload、Blender 64 采样、QA 允许 3 次 reroll。
@@ -410,8 +410,16 @@ blender:
 #     Windows WMI 会把 iGPU 报成 512MB~4GB、Linux lspci 报 0，自动检测会误判成
 #     cpu 档；故改用「AMD + 内存 ≥96GB + 型号线索」来识别。
 #     部署前务必先在 BIOS 把 UMA Frame Buffer Size 设为 75–96GB。
+#   dgxspark-128g = NVIDIA DGX Spark（Project Digits, GB10 Blackwell, 128GB 统一内存）
+#     与 amd395-128g 同属「大统一内存」档位家族，覆盖完全相同（bf16、1024x576 / 90 帧、
+#     两遍采样、不 offload、Blender 64 采样、QA 3 次 reroll）。
+#     别名：dgxspark / dgx-spark / dgx / digits / project-digits / gb10
+#     为何单列一档：DGX Spark 的「显存」同样由 128GB 统一内存切出，nvidia-smi 报的 VRAM 偏小，
+#     且与独立 HBM 卡（DGX A100/H100、RTX 5090）易混淆；故用「NVIDIA + 内存 ≥96GB +
+#     型号线索（GB10 / DGX SPARK / DIGITS）+ 极低显存兜底」识别，避免误判成 high 或 cpu。
 #
 # 查看将应用的覆盖（dry-run，不改文件）：python tools/hw_profile.py --tier amd395
+#                                      python tools/hw_profile.py --tier dgxspark
 # 写回本文件（追加 auto_hardware / hw_tier）：python tools/hw_profile.py --tier amd395 --write
 # ============================================================================
 # auto_hardware: true        # 自动检测本机硬件并选档
