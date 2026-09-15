@@ -50,3 +50,6 @@ tmp_vae_test.py
 *.egg-info/
 build/
 dist/
+
+# 本地测试 / 截图临时目录（agent-browser 自测产物）
+.workbuddy/tmp/
