@@ -77,6 +77,7 @@
 
 ## 十、环境守卫 / 工具坑
 - SAFE_DELETE：Python 删除 API turn 级批量拦截（阈值 50）。绕过用 `os.system("del /q")`（项目惯例见 gen_blocking.py）。
+  ⚠️ **它会让本机 `pytest` 的退出码失真**：一轮跑完累计删除数超阈值后，用例内的 `os.unlink/shutil.move` 与 pytest 自己的 `basetemp` 清理都会被拦 → 输出全点却 `rc=1`（表现为「1 failed」，堆栈在 `sitecustomize._check_bulk_delete_guard`）。**判绿看 stdout 的 `N passed` 而非 rc**；可疑失败隔离单跑（rc=0 即证明是守卫非代码）。CI（Linux）无此守卫，是最终判据。
 - Bash shim 损坏：`cd/dirname/ls/head/tail/grep/rm/wc` 不可用（Exit 127）。删除改用 `cmd /c del` 或 Python；结果落文件再用 Read 读（PowerShell 直出 stdout 有时抓不到）。
 - **`python -c "…\n…"` 里的 `\n` 会被 shim 变成字面 `/n`** → 含换行的脚本一律 Write 成文件再执行。
 - 预览：沙箱 loopback 不可用于预览 running Flask；用 Bash run_in_background 起 webui.py(:8000)。**改 .py 需重启服务**，HTML 即时生效。
