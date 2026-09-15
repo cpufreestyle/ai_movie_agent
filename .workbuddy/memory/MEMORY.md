@@ -9,6 +9,8 @@
 - 模型根 `E:/ComfyUI_models/`（extra_model_paths.yaml，E/D 都查）。代理 127.0.0.1:7897；**访问本机 ComfyUI 须 NO_PROXY/ProxyHandler({}) 防 502**。
 - **cu130 必须**（cu128→CUDA 禁用→latent 全噪）。venv: `d:/ai sheare/repo/ai管理/.venv/Scripts/python.exe`。终端 PowerShell；长任务 Start-Process 后台 + Get-Content 轮询。
 - AMD395(128GB) 须 BF16/FP8（NVFP4 不兼容）。
+- **硬件档位 `HW_TIER`（部署选择，2026-09-15 新增 `amd395-128g`）**：`config_env.HW_TIER_PROFILES` 是唯一权威；档位 = `high/mid/low/cpu/amd395-128g`。三处入口：`HW_TIER` 环境变量、`config.hw_tier`、`python deploy.py --tier amd395-128g`（会写进 `.env`，compose 已透传）；`AUTO_HW=1` 自动检测。别名（`amd395`/`395`/`strix-halo`/`ai-max-395-128g`）统一由 `normalize_tier()` 归一，**别再各处硬列档位名**。
+- **AMD 395 为什么要单列一档**：其「显存」由 128G 统一内存切出（BIOS UMA 75–96GB），而 WMI 的 `AdapterRAM` 是 32 位字段、iGPU 常报 512MB~4GB，Linux `lspci` 报 0 → 老 `pick_tier()` 会把这台顶级机判成 **cpu**。识别改走「AMD + 内存 ≥96GB + 型号线索（395/STRIX/AI MAX/8060）+ 显存被低估兜底」；**注意别误伤 AMD 真独显**（RX 7900 XTX 24GB+128G 内存应仍是 high，已锁测试）。
 
 ## 二、SageAttention（2026-09-10）
 - wheel: HF `ussoewwin/Sage-Attention-for-Windows`（cu130torch2.11.0-cp313，SA2/SA3），装须 `--no-deps`；另 `pip install triton-windows`。
