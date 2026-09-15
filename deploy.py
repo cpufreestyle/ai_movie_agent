@@ -17,6 +17,7 @@ docker compose up（原生则只装依赖，启动命令另行打印）。
   python deploy.py --apply          # 执行安全部分（建 venv / 装依赖 / 写 .env / compose up）
   python deploy.py --apply --with-weights --models-dir D:/ComfyUI/models   # 授权下载视频权重
   python deploy.py --method native --gpu amd --engine comfyui_ltx          # 手动覆盖探测结果
+  python deploy.py --gpu amd --tier amd395-128g    # AMD Ryzen AI Max+ 395（128GB 统一内存）
 """
 from __future__ import annotations
 
@@ -29,6 +30,42 @@ import sys
 from urllib.parse import urlparse
 
 REPO = os.path.dirname(os.path.abspath(__file__))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+
+# ---------------------------------------------------------------- 硬件档位
+def _config_env():
+    """惰性导入 config_env（纯标准库，venv 前也能用）；失败返回 None。"""
+    try:
+        import config_env
+        return config_env
+    except Exception:
+        return None
+
+
+def resolve_tier_arg(value: str) -> str:
+    """把 --tier 值归一为规范档位（支持 amd395 / 395 / strix-halo 等别名）；未知则报错退出。"""
+    if not value:
+        return ""
+    ce = _config_env()
+    tier = ce.normalize_tier(value) if ce else value.strip().lower()
+    if not tier:
+        tiers = " / ".join(ce.HW_TIER_PROFILES) if ce else "high / mid / low / cpu / amd395-128g"
+        print(f"[错误] 未知档位：{value}（可选：{tiers}）")
+        sys.exit(2)
+    return tier
+
+
+def detect_hw_tier() -> str:
+    """自动检测本机硬件档位（跨平台，纯标准库）；失败返回空串。"""
+    ce = _config_env()
+    if ce is None:
+        return ""
+    try:
+        return ce.pick_tier(ce.detect_hardware())
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------- 环境探测
@@ -143,12 +180,41 @@ def cfg_get(cfg: dict, *keys, default=None):
 
 
 # ---------------------------------------------------------------- 方案求解
+def _cfg_tier(cfg: dict) -> str:
+    """读 config.hw_tier 并归一；无则空串。"""
+    raw = cfg_get(cfg, "hw_tier", default="")
+    if not raw:
+        return ""
+    ce = _config_env()
+    return ce.normalize_tier(raw) if ce else str(raw).strip().lower()
+
+
+def resolve_tier_choice(args, cfg: dict, gpu: str) -> tuple:
+    """决定本次部署用的硬件档位，返回 (tier, 来源)。优先级：--tier > config.hw_tier > 自动识别。
+
+    只在自动识别命中 AMD Ryzen AI Max+ 395（amd395-128g）时才自动采用——那台机器上
+    iGPU 显存会被低估成 cpu 档，必须显式纠正；其余档位不自动写入，避免改变既有行为。
+    """
+    if args.tier:
+        return resolve_tier_arg(args.tier), "手动 --tier"
+    t = _cfg_tier(cfg)
+    if t:
+        return t, "config.hw_tier"
+    if gpu == "amd":
+        ce = _config_env()
+        auto = detect_hw_tier()
+        if auto and ce is not None and auto == ce.AMD395_TIER:
+            return auto, "自动识别 AMD 395 128G"
+    return "", ""
+
+
 def resolve_scheme(cfg: dict, args) -> dict:
     env_gpu = detect_gpu()
     gpu = args.gpu if args.gpu != "auto" else env_gpu
     # gpu=none 时仍当作 nvidia 走占位（权重在远程机下）；但方案里标注"远程"
     engine = args.engine or cfg_get(cfg, "engine", "backend", default="comfyui_mmH3")
     blender = bool(cfg_get(cfg, "blender", "enabled", default=False))
+    tier, tier_source = resolve_tier_choice(args, cfg, gpu)
 
     api = cfg_get(cfg, "engine", engine, "api",
                   default=cfg_get(cfg, "engine", "comfyui_mmH3", "api",
@@ -169,6 +235,7 @@ def resolve_scheme(cfg: dict, args) -> dict:
         "COMFYUI_API": api,
         "ENGINE_BACKEND": engine,
         "GPU_BACKEND": gpu if gpu != "none" else "nvidia",
+        "HW_TIER": tier,          # 硬件档位；amd395-128g = AMD Ryzen AI Max+ 395（128G UMA）
         "COMFYUI_IMAGE": "your-registry/comfyui-ltx-mmh3:latest",
         "COMFYUI_IMAGE_ROCM": "your-registry/comfyui-rocm:latest",
         "SOL_H3_API": api if engine == "sol_h3" else "",
@@ -178,6 +245,8 @@ def resolve_scheme(cfg: dict, args) -> dict:
         "docker": docker,
         "env_gpu": env_gpu,
         "gpu": gpu,
+        "tier": tier,
+        "tier_source": tier_source,
         "engine": engine,
         "blender": blender,
         "api": api,
@@ -355,6 +424,10 @@ def print_plan(sch: dict, steps: list):
     print(f"  OS          : {sch['os']}")
     print(f"  Docker      : {'有' if sch['docker'] else '无'}  → 采用方式: {sch['method']}")
     print(f"  GPU 探测    : {sch['env_gpu']}  → 显卡后端: {sch['gpu']}")
+    tier_line = sch["tier"] or "(未指定，用 config 默认)"
+    if sch.get("tier_source"):
+        tier_line += f"   ← {sch['tier_source']}"
+    print(f"  硬件档位    : {tier_line}")
     print(f"  视频引擎    : {sch['engine']}")
     svc_label = "Sol-H3 服务" if sch["engine"] == "sol_h3" else "ComfyUI"
     print(f"  {svc_label:<12}: {'本机 ' if sch['comfyui_local'] else '远程 '}{sch['api']}")
@@ -415,6 +488,10 @@ def main():
     p.add_argument("--method", choices=["docker", "native", "auto"], default="auto")
     p.add_argument("--gpu", choices=["nvidia", "amd", "none", "auto"], default="auto")
     p.add_argument("--engine", choices=["comfyui_mmH3", "comfyui_ltx", "sol_h3"], default=None)
+    p.add_argument("--tier", default=None,
+                   help="硬件档位：high / mid / low / cpu / amd395-128g"
+                        "（amd395-128g = AMD Ryzen AI Max+ 395, 128GB 统一内存；"
+                        "别名 amd395 / 395 / strix-halo）。会写入 .env 的 HW_TIER")
     p.add_argument("--models-dir", default=None, help="视频权重目录（--with-weights 时需要）")
     p.add_argument("--apply", action="store_true", help="执行安全部分（venv/依赖/.env/compose up）")
     p.add_argument("--with-weights", action="store_true", help="授权下载视频权重（需同时 --apply）")

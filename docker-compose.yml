@@ -7,6 +7,8 @@
 # 视频生成（G 阶段）需要 NVIDIA 显卡 + ComfyUI：
 #   - 若本机/同局域网有 GPU：在 .env 设 COMFYUI_IMAGE，再 `docker compose --profile gpu up -d`
 #   - macOS / 无显卡机器：不加 --profile gpu，把 .env 的 COMFYUI_API 指向远程有显卡的 ComfyUI
+#   - AMD(ROCm)：叠加 docker-compose.amd.yml，并在 .env 设 GPU_BACKEND=amd
+#     （AMD Ryzen AI Max+ 395 / 128G 统一内存可再加 HW_TIER=amd395-128g，见 DEPLOY.md）
 
 services:
   agent:
@@ -18,6 +20,8 @@ services:
       - COMFYUI_API=${COMFYUI_API:-http://comfyui:8188}
       - ENGINE_BACKEND=${ENGINE_BACKEND:-comfyui_mmH3}
       - GPU_BACKEND=${GPU_BACKEND:-nvidia}
+      # 硬件档位：留空=用 config.yaml 默认；amd395-128g = AMD Ryzen AI Max+ 395（128GB 统一内存）
+      - HW_TIER=${HW_TIER:-}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b}
     volumes:
       - ./config.yaml:/app/config.yaml:ro

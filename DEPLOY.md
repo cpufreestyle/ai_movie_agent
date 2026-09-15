@@ -124,6 +124,31 @@ AMD 上把 `.env` 的 `GPU_BACKEND=amd`，Agent 会自动把 LTX 精度注入改
 
 > Windows 上的 AMD 需经 Zluma/DirectML 跑 ComfyUI，不稳定，本交付未内置专门配置；建议 AMD 视频在 Linux(ROCm) 或远程 NVIDIA 机器上跑。
 
+### AMD Ryzen AI Max+ 395（Strix Halo, 128GB 统一内存）
+
+这台机器是目前**本地跑满血 LTX-2.5 22B** 最省事的方案：128GB 统一内存足够直接用官方
+**BF16 权重（~44GB）**，不必 GGUF 量化（量化是给 16GB 卡准备的）。三种选法任选：
+
+| 方式 | 命令 / 配置 |
+|---|---|
+| 环境变量 | `.env` 里设 `GPU_BACKEND=amd` + `HW_TIER=amd395-128g` |
+| 部署入口 | `python deploy.py --gpu amd --tier amd395-128g`（会把 `HW_TIER` 写进 `.env`） |
+| config.yaml | `hw_tier: amd395-128g`（或 `auto_hardware: true`，在真机上会自动识别成这一档） |
+
+档位 `amd395-128g` 做的事：LTX 精度钉死 `bf16`、`1024x576` / `90` 帧、开 block_cache 与两遍采样、
+不 offload、Blender 64 采样、QA 允许 3 次 reroll。别名 `amd395` / `395` / `strix-halo` 均可。
+
+**为什么要显式选**：395 的「显存」是从统一内存切出来的（BIOS 的 UMA Frame Buffer），
+而 Windows WMI 的 `AdapterRAM` 是 32 位字段、iGPU 常被报成 512MB~4GB，Linux `lspci` 更是 0 ——
+自动检测会把这台顶级机器判成 `cpu` 档。本档位改用「AMD + 内存 ≥96GB + 型号线索」识别，绕开这个坑。
+
+> ⚠️ **BIOS 必须先设 UMA Frame Buffer Size = 75–96GB**（默认只给 iGPU 16–32GB，44GB 模型会 OOM）。
+
+- 验证档位生效：`python tools/hw_profile.py --tier amd395`（打印将应用的覆盖）；
+  在真机上直接 `python tools/hw_profile.py` 应自动推荐 `amd395-128g`。
+- 完整环境搭建（ROCm / ComfyUI / BF16 权重 / 文本编码器与 VAE）：见
+  [LTX25_AMD395_PLAN.md](LTX25_AMD395_PLAN.md) 与 `bash setup_amd.sh`。
+
 ## 环境变量（Docker / 远程部署用，免改 config.yaml）
 | 变量 | 作用 |
 |---|---|
@@ -133,6 +158,8 @@ AMD 上把 `.env` 的 `GPU_BACKEND=amd`，Agent 会自动把 LTX 精度注入改
 | `COMFYUI_API` | 视频服务地址（ComfyUI 引擎） |
 | `SOL_H3_API` | Sol-H3 服务地址（sol_h3 引擎，如 http://<DGX-IP>:8000） |
 | `ENGINE_BACKEND` | `comfyui_mmH3` / `comfyui_ltx` / `sol_h3` |
+| `GPU_BACKEND` | `nvidia`(默认) / `amd`；`amd` 时自动把 LTX 精度降为 bf16 |
+| `HW_TIER` | 硬件档位：`high` / `mid` / `low` / `cpu` / `amd395-128g`（AMD Ryzen AI Max+ 395, 128G 统一内存）。也可用 `AUTO_HW=1` 自动检测 |
 
 ## 视频引擎四：Sol-H3-Spark（DGX Spark 远程）
 
