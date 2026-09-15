@@ -84,6 +84,7 @@
 - Bash shim 损坏：`cd/dirname/ls/head/tail/grep/rm/wc` 不可用（Exit 127）。删除改用 `cmd /c del` 或 Python；结果落文件再用 Read 读（PowerShell 直出 stdout 有时抓不到）。
 - **`python -c "…\n…"` 里的 `\n` 会被 shim 变成字面 `/n`** → 含换行的脚本一律 Write 成文件再执行。
 - 预览：沙箱 loopback 不可用于预览 running Flask；用 Bash run_in_background 起 webui.py(:8000)。**改 .py 需重启服务**，HTML 即时生效。
+  ⚠️ **端口双绑定会骗你**：旧实例仍挂 :8000 时，Windows `SO_REUSEADDR` 让新进程也能 bind 且日志照打「Running on …」，但请求被先绑的旧进程接走 → **新加的路由 404**（表现为「代码没问题却找不到端点」）。排查：`netstat -ano -p TCP` 列出 `:8000` 的**全部** `LISTENING` PID，全部 `taskkill /PID x /F` 后再起一个；别只看启动日志。
 - 偶发 Edit 报成功但未落盘：改完必须 grep/read 复核。**并行 Edit 同一文件会互相覆盖，必须串行 + 改后复核**。
 - ⚠️ **曾出现工作树内 `webui/pipeline.html`、`webui/timeline.html` 无故从磁盘消失**（内容在 git 里完好，`git checkout --` 即恢复）。提交前务必 `git status` 检查是否有意外 `D`，别盲目 `git add -A`。
 - `git ls-files` 默认 `core.quotepath=true`，非 ASCII 路径输出成 `\345\217\202...` 转义形式 → 脚本据此遍历会误报「索引里有但工作区没有」。要加 `-c core.quotepath=false`。
