@@ -99,18 +99,29 @@ def test_invalidate_config_cache_forces_reload(cfg_file, monkeypatch):
     assert calls["n"] == 2
 
 
-def test_missing_config_file_does_not_raise(monkeypatch):
+def test_missing_config_file_falls_back_to_example(monkeypatch):
+    """config.yaml 不入库 —— 缺失时应回退读 config.example.yaml 而不是让接口 500。"""
     state.invalidate_config_cache()
     monkeypatch.setattr(state, "CONFIG_PATH", os.path.join(ROOT, "__no_such_config__.yaml"))
-    with pytest.raises(OSError):
-        state.load_config()
-    # 失败后缓存不能被填成脏值
-    assert state._cfg_cache["data"] is None
+    data = state.load_config()
+    assert isinstance(data, dict) and data, "应回退到模板并读到内容"
+    assert state._cfg_cache["data"] is not None
 
 
-def test_signature_is_empty_tuple_when_missing(monkeypatch):
+def test_signature_follows_fallback_when_config_missing(monkeypatch):
+    """config.yaml 缺失但模板在 → 指纹取自模板，模板变化时仍能失效缓存。"""
     monkeypatch.setattr(state, "CONFIG_PATH", os.path.join(ROOT, "__no_such_config__.yaml"))
+    sig = state._config_signature()
+    assert sig != () and len(sig) == 2
+
+
+def test_config_and_example_both_missing(monkeypatch, tmp_path):
+    """连模板都不在（极端情况）：不抛异常，用空配置起服务，指纹为空。"""
+    state.invalidate_config_cache()
+    monkeypatch.setattr(state, "CONFIG_PATH", str(tmp_path / "__no__.yaml"))
+    monkeypatch.setattr(state, "CONFIG_EXAMPLE", str(tmp_path / "__no_example__.yaml"))
     assert state._config_signature() == ()
+    assert state.load_config() == {}
 
 
 def test_nested_structure_survives_deepcopy(cfg_file):

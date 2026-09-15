@@ -37,6 +37,19 @@ def ensure(cond, msg: str):
 
 
 def load_config(path: str) -> dict:
+    """读配置。config.yaml 缺失时回退到同目录的 config.example.yaml。
+
+    config.yaml 不入库（WebUI 的「接口与模型设置」会把 api_key 写回它，
+    公开仓库里放不得），所以新克隆的仓库里只有模板；这里回退一次，
+    免得每条子命令都抛 FileNotFoundError。
+    """
+    if not os.path.exists(path):
+        example = os.path.join(os.path.dirname(path) or ".", "config.example.yaml")
+        if os.path.exists(example):
+            path = example
+        else:
+            sys.exit(f"找不到配置文件 {path}；请先 "
+                     f"`cp config.example.yaml config.yaml` 再重试。")
     with open(path, "r", encoding="utf-8") as f:
         return apply_env_overrides(yaml.safe_load(f) or {})
 

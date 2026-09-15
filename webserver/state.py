@@ -25,6 +25,18 @@ from config_env import apply_env_overrides
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(HERE, "config.yaml")
+#: config.yaml 不入库（WebUI 会把 api_key 写回它，公开仓库不能放），
+#: 仓库里只有模板；文件缺失时回退读它，保证新克隆能直接起服务。
+CONFIG_EXAMPLE = os.path.join(HERE, "config.example.yaml")
+
+
+def _config_read_path() -> str:
+    """实际读取路径：优先 config.yaml，缺失时回退 config.example.yaml。
+
+    注意：**写入永远走 CONFIG_PATH**（见 views/core.py 的 save_config），
+    这里只是「读」的回退，不会把模板写坏。
+    """
+    return CONFIG_PATH if os.path.exists(CONFIG_PATH) else CONFIG_EXAMPLE
 WORKDIR = os.path.join(HERE, "outputs")
 
 # 媒体文件白名单（仅允许预览这些，避免任意路径遍历）
@@ -168,7 +180,7 @@ _cfg_lock = threading.Lock()
 def _config_signature() -> tuple:
     """配置文件的变更指纹（mtime_ns + size）。文件不存在/读不到时返回空元组。"""
     try:
-        st = os.stat(CONFIG_PATH)
+        st = os.stat(_config_read_path())
     except OSError:
         return ()
     return (st.st_mtime_ns, st.st_size)
@@ -201,8 +213,13 @@ def load_config() -> dict:
     with _cfg_lock:
         if _cfg_cache["key"] == sig and _cfg_cache["data"] is not None:
             return copy.deepcopy(_cfg_cache["data"])
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        data = apply_env_overrides(yaml.safe_load(f) or {})
+    try:
+        with open(_config_read_path(), "r", encoding="utf-8") as f:
+            data = apply_env_overrides(yaml.safe_load(f) or {})
+    except OSError:
+        # config.yaml 与模板都不在（极端情况）：用空配置起服务，
+        # 前端点「保存接口与阶段选择」时会写出新的 config.yaml。
+        data = {}
     with _cfg_lock:
         _cfg_cache["key"] = sig
         # 存一份私有副本，避免外部改坏了缓存本体

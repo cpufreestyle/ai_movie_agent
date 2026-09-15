@@ -95,6 +95,7 @@ cli.py ──> agent/agent.py (MovieAgent, 统一编排 A→H)
 cd ai_movie_agent
 bash setup_wsl.sh                 # 克隆 SkyReels + 建 venv + 装依赖
 source .venv/bin/activate
+cp config.example.yaml config.yaml   # 本地配置：含 api_key 且 WebUI 会写回，故不入库
 
 # 持续创作（Ctrl-C 停止，已生成的影片会保留）
 python cli.py run --continuous

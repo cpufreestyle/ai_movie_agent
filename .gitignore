@@ -1,3 +1,8 @@
+# 本地配置：含 api_key，且 WebUI 的「接口与模型设置」会写回该文件。
+# 本仓库为公开仓库 —— 一旦提交即等于公开泄露密钥。仓库只保留 config.example.yaml。
+config.yaml
+config.local.yaml
+
 # 虚拟环境
 .venv/
 .venv-win/
