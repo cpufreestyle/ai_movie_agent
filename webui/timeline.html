@@ -24,6 +24,25 @@
   .nav button { padding: 3px 8px; font-size: 12px; }
   .empty { color: #8b93a3; padding: 30px; text-align: center; }
 </style>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232b6cff'/><path d='M13 10l10 6-10 6z' fill='white'/></svg>">
+<style id="ui-aesthetic">
+/* ===== 时间轴页美化层（附加增强） ===== */
+*{ scrollbar-width:thin; scrollbar-color:#2a2f3a #0f1115; }
+::-webkit-scrollbar{ width:10px; height:10px; }
+::-webkit-scrollbar-thumb{ background:#2a2f3a; border-radius:6px; border:2px solid #0f1115; }
+::-webkit-scrollbar-thumb:hover{ background:#39414f; }
+button{ transition:background .15s, transform .08s, box-shadow .15s; }
+button:hover{ filter:brightness(1.08); }
+button:active{ transform:translateY(1px); }
+input[type=text], input[type=number]{ transition:border-color .15s, box-shadow .15s; }
+input[type=text]:focus, input[type=number]:focus{ outline:none; border-color:#2b6cff; box-shadow:0 0 0 3px rgba(43,108,255,.2); }
+tbody tr{ transition:background .15s; }
+tbody tr:hover{ background:rgba(255,255,255,.03); }
+header h1{ letter-spacing:.3px; }
+.bar{ position:sticky; top:0; z-index:5; }
+.wrap{ animation:fade .25s ease both; }
+@keyframes fade{ from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:none;} }
+</style>
 </head>
 <body>
 <header>
