@@ -16,6 +16,8 @@
 - 验证工具：`python tools/verify_blocking_render.py render <tag> [--legacy|--size|--line-engine]` / `compare A B`（需 Blender MCP 9876 在线）。
 - 配置键：`qa.agent_enabled`(默认 false，逐镜质检重 roll 开关)、`preflight.{enabled,block_publish}`（只管自动投稿，显式投稿不拦）。
 - webui 结构：`webserver/{state.py,services/,views/}` + `webui.py` 只做组装；路由回归靠 dump url_map 比对（`tests/test_webui_routes.py` 固化 39 条）。
+- webui 外观：`webui/pipeline.html` 里有三块 `<style>`（基础 / `#ui-aesthetic` 打磨层 / `#ui-theming` 主题化）；主题/密度/强调色走 `html[data-theme|data-density|data-accent]` + `localStorage(ui-*)`，`<head>` 里有防 FOUC 的早期脚本。`/timeline` 只跟随不自带控件。
+- **悬停解释 tooltip 模式**（已用于白模专业选项 + 设置页阶段选择）：内容包 `<span class="tip" data-tip="…">`；JS 建单一 `#ui-tip` 浮层（fixed + `pointer-events:none` + `white-space:pre-wrap`），用 document 级 `mouseover/mouseout/focusin` 委托 + `closest('[data-tip]')` 定位，越界翻边。**务必把 span 的 data-tip 复制到外层 `<label>`**，否则悬停 select/input 本体不触发。多行用 `&#10;`。
 - 中文 JSON body 别用 PowerShell 的 Invoke-WebRequest 发（会乱码）；用 Python urllib + utf-8。
 - 并行 Edit 同一文件会互相覆盖，必须串行 + 改后 grep 复核。
 
@@ -34,10 +36,11 @@
 ## Git 同步（仓库 / 凭据 / 行尾）
 - 仓库实际路径：`C:\Users\michael\CodeBuddy\ai_movie_agent` 是 Junction → `D:\ai sheare\repo\ai_movie_agent`（show-toplevel 落在 D:）。
 - 远端：GitHub `cpufreestyle/ai_movie_agent`（origin，https）；本地 main 跟踪 origin/main。
-- **推送走代理 127.0.0.1:11268**（全局 `http.proxy=7897` 已不通，会 schannel 握手失败）：
-  `git -c http.proxy=http://127.0.0.1:11268 -c https.proxy=http://127.0.0.1:11268 push origin main`
-  备选：禁用 helper 并内嵌 token：`git -c credential.helper= push https://cpufreestyle:<TOKEN>@github.com/cpufreestyle/ai_movie_agent.git main`
-  只读操作(fetch/ls-remote)匿名即可。
+- **推送通道会变，按序试**：
+  1) `git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push origin main`（**保留默认 credential.helper**；2026-09-15 实测可用、约 2min。禁用 helper 会报 `could not read Username`）
+  2) 备选 `127.0.0.1:11268`（曾长期可用；2026-09-15 起 `Could not connect` / `CONNECT tunnel failed 502`，说明该代理已挂）
+  - 直连通常被墙；只读操作(fetch/ls-remote)匿名即可。
+  - 看报错判代理状态：`schannel ...` / `CONNECT tunnel failed 502` / `Could not connect` = 代理不通；`could not read Username` = 隧道通但没带凭据（去掉 `-c credential.helper=`）。
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
 - 提交习惯：`_*.py/_*.ps1/_*.bat`、`outputs/`、`.venv/` 均 gitignore；每个独立变更批次单独 commit。
