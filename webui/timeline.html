@@ -4,6 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>时间轴 · AI 电影 Agent</title>
+<script>
+/* 跟随主应用的外观偏好（避免首屏闪烁） */
+(function(){try{var r=document.documentElement;["theme","accent"].forEach(function(k){var v=localStorage.getItem("ui-"+k);if(v)r.setAttribute("data-"+k,v);});}catch(e){}})();
+</script>
 <style>
   body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
   header { padding: 14px 20px; background: #171a21; border-bottom: 1px solid #2a2f3a; display: flex; gap: 12px; align-items: center; }
@@ -42,6 +46,26 @@ header h1{ letter-spacing:.3px; }
 .bar{ position:sticky; top:0; z-index:5; }
 .wrap{ animation:fade .25s ease both; }
 @keyframes fade{ from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:none;} }
+</style>
+<style id="ui-theme">
+/* ===== 亮/暗主题（跟随主应用 WebUI 的偏好）===== */
+html{ color-scheme:dark; }
+html[data-theme="light"]{ color-scheme:light; }
+html[data-theme="light"] body{ background:#eef1f6; color:#18222e; }
+html[data-theme="light"] header{ background:#ffffff; border-bottom-color:#d3dbe5; }
+html[data-theme="light"] .bar{ background:#f1f5fa; }
+html[data-theme="light"] button.sec{ background:#e4eaf2; color:#18222e; }
+html[data-theme="light"] th, html[data-theme="light"] td{ border-bottom-color:#dbe2ea; }
+html[data-theme="light"] th{ color:#66748a; }
+html[data-theme="light"] input[type=text], html[data-theme="light"] input[type=number]{ background:#ffffff; color:#18222e; border-color:#d3dbe5; }
+html[data-theme="light"] .status, html[data-theme="light"] .empty{ color:#66748a; }
+html[data-theme="light"] tbody tr:hover{ background:rgba(0,0,0,.025); }
+html[data-theme="light"] ::-webkit-scrollbar-thumb{ background:#c2ccd8; border-color:#eef1f6; }
+html[data-accent="green"] button:not(.sec){ background:#2f9d63; }
+html[data-accent="purple"] button:not(.sec){ background:#8b5cf6; }
+html[data-accent="amber"] button:not(.sec){ background:#c9821a; }
+html[data-accent="pink"] button:not(.sec){ background:#e0555f; }
+html[data-accent="cyan"] button:not(.sec){ background:#2b9fb8; }
 </style>
 </head>
 <body>
