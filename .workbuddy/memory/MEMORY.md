@@ -44,3 +44,4 @@
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
 - 提交习惯：`_*.py/_*.ps1/_*.bat`、`outputs/`、`.venv/` 均 gitignore；每个独立变更批次单独 commit。
+- **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest `v0.11.0`（2026-09-15）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理 `127.0.0.1:7897`、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用 `## 亮点` + `## 工程 / 质量`。**完整流程见 skill `github-release-no-gh`**，发版时直接调用。
