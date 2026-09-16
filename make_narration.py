@@ -241,7 +241,12 @@ def seg_start(k: int) -> float:
 
 
 def _trim_silence() -> None:
-    """FIT 模式：去掉每段旁白首尾静音，缩短总时长、降低所需压缩比（避免念稿腔）。"""
+    """FIT 模式：去掉每段旁白首尾静音，缩短总时长、降低所需压缩比（避免念稿腔）。
+
+    ⚠️ 目前**未被任何代码调用**（死代码）。若要启用请先注意：下面滤镜的
+    ``stop_periods=1`` 会**在句内首个 ≥0.25s 停顿处截断**，把后半句整段丢掉
+    （2026-09-16 实测：2.0s 语音 → 输出 1.19s；改 ``stop_periods=-1`` 才得 2.46s）。
+    """
     ff = ffmpeg_exe()
     for i in range(1, len(TTS_LINES) + 1):
         src = os.path.join(NAR, f"nar_{i:02d}.wav")
@@ -665,8 +670,6 @@ def main():
     OUT = a.out if os.path.isabs(a.out) else os.path.normpath(os.path.join(ROOT, a.out))
     T = a.t
     X = a.xfade
-    if a.shots:
-        N_SHOTS = a.shots
     AUTO_DUR = a.auto_dur or a.fit_film   # --fit-film 隐含 --auto-dur
     FIT_FILM = a.fit_film
     ALIGN = a.align
@@ -689,6 +692,10 @@ def main():
     AMBIENT_VOL = a.orig_vol
     # LANG/SUBS 变了，分镜覆盖的分支判定也要跟着重跑一次
     _apply_storyboard()
+    # 显式 CLI 优先：_apply_storyboard() 会用 storyboard.json 的镜数覆盖 N_SHOTS，
+    # 故 --shots 必须在它之后再应用一次（否则本开关形同失效，与 --help 的说法不符）。
+    if a.shots:
+        N_SHOTS = a.shots
     # 台词优先级：系列剧本(--series-script + --ep) > 单集台词文件 > storyboard > 内置
     if a.series_script:
         if not a.ep:
