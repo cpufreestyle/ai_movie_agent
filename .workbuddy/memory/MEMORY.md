@@ -5,7 +5,7 @@
 > 旧目录已停止跟踪（`git rm --cached .codebuddy`），原文件保留在磁盘仅作备份。
 
 ## 一、硬件 / 环境
-- GPU: RTX 5070 Ti 16GB (sm_120)。ComfyUI `D:/ComfyUI` 常驻 8188（venv python；GGUF+LTXVideo+T8/VideoHelperSuite）。
+- GPU: RTX 5070 Ti 16GB (sm_120)。ComfyUI `D:/ComfyUI` 常驻 8188（venv python；GGUF+LTXVideo+T8/VideoHelperSuite）。⚠️ **本机 venv 曾因 base 解释器被删而起不来、且不能用 `launch_comfy.py` 常驻 —— 起服务前先看「十」头条两条**。
 - 模型根 `E:/ComfyUI_models/`（extra_model_paths.yaml，E/D 都查）。代理 127.0.0.1:7897；**访问本机 ComfyUI 须 NO_PROXY/ProxyHandler({}) 防 502**。
 - **cu130 必须**（cu128→CUDA 禁用→latent 全噪）。venv: `d:/ai sheare/repo/ai管理/.venv/Scripts/python.exe`。终端 PowerShell；长任务 Start-Process 后台 + Get-Content 轮询。
 - AMD395(128GB) 须 BF16/FP8（NVFP4 不兼容）。
@@ -36,7 +36,7 @@
   - 落地：`gen_blocking.py --depth`（相机视距 MapRange 近白远黑，背景/地面压黑只留角色）；`run_h3_funcontrol.py`（FunControlApply 插 LoRA 后/采样前，VHS_LoadVideo 锁 768×448×56；支持 `--walk` 端到端自动生成控制视频）。
   - **主线集成**：`agent/mmh3_engine.py` 已内建 → `generate(control_video=.., fc_strength=..)` 或 config `engine.comfyui_mmH3.fun_control`（enable/control_net/control_kind/fit_mode/strength/end_percent/video）；引擎自动插节点 41/42/43（避让 ref_images 20~28 / post 30~32 / BlockCache 40 / 二采 50~57），guider 改接 Apply 输出。真机引擎路径 net_shift +223.7px(右移) ✓。
   - **全链路接入（agent.py + blocking.py）**：config `blender.use_as_fun_control: true` → `render_assets` 每镜产 **fcvideos**（走位 depth 序列→fc.mp4）→ `generate_one_scene` 自动作 control_video 喂引擎。走位来源：`blender.fun_control_walk`（默认 `-1,0:1,0`，归一化 ±1=画面左右）+ 分镜文本识别（左→右/走近/来回/绕圈，`parse_spec`）。`_FC_TAIL` 模板按镜头距离自动换算世界坐标+留边距→不出画；控制序列分辨率/帧数严格对齐出片（fit_mode=exact，帧数吸附 17n+5）。需 Blender + BlenderMCP(9876) 运行。
-  - 坑：FunControl int8 2.3GB + H3 累积易 OOM 使 ComfyUI 崩（连续 A/B 两版后崩）；重启 `python launch_comfy.py --sage-attention`；脚本须用 `/prompt` 返回的 prompt_id 轮询（非本地 uuid）。
+  - 坑：FunControl int8 2.3GB + H3 累积易 OOM 使 ComfyUI 崩（连续 A/B 两版后崩）；重启 ComfyUI **别再用 `launch_comfy.py`**（沙箱会回收它 detach 的子进程，见「十」），改用常驻后台任务（命令见「十」）；脚本须用 `/prompt` 返回的 prompt_id 轮询（非本地 uuid）。
 - 驱动模板：`gen_ep5_fc.py`（BlockingGenerator 渲 fc_*.png → export_fc_video 合 fc.mp4 → MMH3Engine.generate → ffmpeg xfade 拼接）。
 - 走位归一化：±1=画面左右；`parse_spec` 走**规则表**（`agent/blocking.py` 约 225~245 行）而非 if/elif 链 —— approach(走近/走向/靠近镜头)、away(远离/走远)、back_forth(来回/徘徊/踱步/走来走去)、circle(绕圈/环绕走/绕着/**走了一圈**/绕一圈/绕一)；「左/右同时出现」按出现先后定方向（兼容 从左到右 / 由左向右）。⚠️ **「走了一圈」早已覆盖**（旧记的「口语未覆盖、需补关键词」已过时，勿再当待办）。
 - `fc_dir` 须用独立时间戳子目录(RUN)，避免 `_clean` 命中上一轮旧帧。
@@ -49,7 +49,7 @@
 - Blender 5.2 事实：引擎枚举 `BLENDER_EEVEE`（无 EEVEE_NEXT，设置引擎走 try/except 链）；`scene.node_tree` 已移除（→`compositing_node_group`）；EEVEE **能**出 freestyle 线，BLENDER_WORKBENCH 不能且忽略材质节点（depth/normal 材质法失效）。
 - 建探针场景必须先 `bpy.context.window.scene = scn` 再 `bpy.ops.*_add`，否则渲全黑图、任何开关的像素差恒 0 → 会得出错误结论。
 - 验证工具：`python tools/verify_blocking_render.py render <tag> [--legacy|--size|--line-engine]` / `compare A B`（需 Blender MCP 9876 在线）。
-- 相关配置键：`qa.agent_enabled`(默认 false，逐镜质检重 roll 开关)、`preflight.{enabled,block_publish}`（只管自动投稿，显式投稿不拦）。
+- 相关配置键：`qa.agent_enabled`（逐镜质检重 roll 开关；**2026-09-16 起默认 `true`**，见「十二之二」）、`preflight.{enabled,block_publish}`（只管自动投稿，显式投稿不拦）。
 
 ## 六、无真人脸 / 动漫化（用户硬性要求）
 - **成片不得出现真人脸，且反对全片模糊**。画风由参考图定，文本说了不算（写实锚定→真人）。
