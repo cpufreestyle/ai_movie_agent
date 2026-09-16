@@ -106,6 +106,9 @@
   （`is_ready()` 假报「ComfyUI 未就绪」）。修法：**别用 launch_comfy.py**，直接以 `run_in_background` 常驻起
   `D:/ComfyUI/venv/Scripts/python.exe D:/ComfyUI/main.py --listen 127.0.0.1 --port 8188 --fp32-vae --use-sage-attention`
   （cwd=`D:/ComfyUI`，带 `NO_PROXY` + 清空 `PYTHONPATH` + `TORCH_COMPILE_DISABLE=1`），实测 16s READY 并可持续。
+- ⚠️ **`run_in_background` 的常驻服务也会被回收，别当永久在线**：实测 WebUI 后台任务跑了 **15h22m 后 `failed`**（`:8000` 掉线，且它的
+  `> _wb_webui.log` 因 shim 的 `cd` 报错根本没落盘 → 拿不到崩溃原因）。→ 需要预览时**重新起**并即时验证，别假设上次那个还活着；
+  起服务时一律把日志写到**确定存在的绝对路径**（如 `outputs/_webui.log`），别依赖 shim 里的 `cd`。
 - ⚠️ **访问本机服务必须带 `NO_PROXY`**：env 里 `HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:13761`（沙箱注入），
   `NO_PROXY` **为空** → 对 `127.0.0.1:8188` 的请求会被送去代理，回 **502 Bad Gateway**（或 `ConnectionRefused`），
   造成「服务明明在跑却探不到」的假故障。跑 `run_series.py` / 任何探测前一律
