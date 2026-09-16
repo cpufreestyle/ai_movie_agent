@@ -112,7 +112,7 @@
 - 远端：GitHub `cpufreestyle/ai_movie_agent`（origin，https）；本地 main 跟踪 origin/main。
 - **推送通道会变，按序试**（**别记死端口，先探测**：`socket.connect(('127.0.0.1', p))` 扫 `7897/11268/7890/10809/1080/10808`，或直接试直连）：
   1) 代理 `127.0.0.1:7897`（gitconfig 里的**全局默认**）—— **2026-09-15 晚实测可用**，`git push` **不加任何 `-c`** 即走它（数秒推完 5db6a82）。**别手动 `-c http.proxy= -c https.proxy=` 清空**（清了反而不通）。
-  2) 直连 `git -c http.proxy= -c https.proxy= push origin main`：同晚实测报 `Recv failure: Connection was reset`（**当前不通**）。
+  2) 直连 `git -c http.proxy= -c https.proxy= push origin main`：09-15 晚报 `Recv failure: Connection was reset`（当时不通），**但 09-16 实测可用**（83bb132 即用此推上）；而同晚 `git fetch` 直连反报 `Failed to connect ... 443`（push/fetch 行为不一致，疑似代理/抖动差异）。
   3) 代理 `127.0.0.1:11268`：曾长期可用；09-15 起 `Could not connect`（已挂）。
   4) 代理 `127.0.0.1:13761`（沙箱注入的 `HTTP_PROXY`）：`CONNECT tunnel failed 502` / `schannel: server closed abruptly`（不通）。
   - 同一端口**会时通时不通**（09-15 早 7897 曾报 `schannel: failed to receive handshake`）→ 别因一次失败就跳过，按序都试一遍再换招。
@@ -121,10 +121,11 @@
 - **禁止在本沙箱用 `git rebase`**：曾导致 `.git` 目录消失（工作树无损）。恢复法：`git init -b main` → add origin → `fetch origin main` → `git reset --mixed origin/main` → 精确 stage 目标文件 → commit → push。
 - **重建/新 clone 后立刻 `git config core.autocrlf true`**：否则 CRLF 检出会让 ~180 文件全标 M（用 `--ignore-cr-at-eol` 判定）。
 - 提交习惯：`_*.py/_*.ps1/_*.bat/_*.txt`、`outputs/`、`.pytest_tmp/`、`.venv/`、`config.yaml` 均 gitignore；每个独立变更批次单独 commit。
-- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 `00e950d`（四项实用性改进批次，CI run 2 job 全 success）**；此前 `0691935`(README/`34986481287`)、`6227b7d`(dgxspark/`34985316308`)、`5db6a82`(run #54/`34980375326`)、`85bca4b`(v0.12.0) 亦全绿。
+- **CI（`.github/workflows/ci.yml`）**：py3.10 + py3.12 双矩阵，8 步 —— 装依赖 → compileall（含根目录出片脚本）→ `ruff check .` → `tests/smoke_test.py` → `pytest -q tests/`，无 continue-on-error。**2026-09-15 全绿于 `00e950d`（四项实用性改进批次，CI run 2 job 全 success）**；此前 `0691935`(README/`34986481287`)、`6227b7d`(dgxspark/`34985316308`)、`5db6a82`(run #54/`34980375326`)、`85bca4b`(v0.12.0) 亦全绿。**2026-09-16 `83bb132`（人脸策略文档批次）CI run `35036355945` 全绿（发版前复核 HEAD 用）**。
 - **无 gh CLI 查 CI**：`GET /actions/runs?per_page=10`（按 sha 找 run，**sha 必须传完整 40 位**，传短 sha 会匹配不到、误判「还没有 run」）、`GET /actions/runs/<id>/jobs`（看**每个 step** 的 conclusion，比整体红绿有用得多）；日志 `/actions/jobs/<id>/logs` 会 302 到 Azure 签名 URL，**跳转时必须摘掉 Authorization** 否则 403，且单 job 返回纯文本、多 job 是 zip。**完整步骤见 skill `github-release-no-gh` 第 7 节**。
 - 坑：`git …push | tail` 会因 shim 缺 `tail` 报错并可能吞掉输出 → 一律重定向到文件再 Read。
-- **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest **`v0.12.0`**（2026-09-15，tag→`85bca4b`）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、经代理、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用「开头一句话统计 + `## 亮点` + `## 工程 / 质量` + `## 升级提示`」。**完整流程见 skill `github-release-no-gh`**。
+- **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest **`v0.13.0`**（2026-09-16，tag→`83bb132`）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、直接（urllib 直连 `api.github.com` 200，`_rel_*.py` 跑完即删）、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用「开头一句话统计 + `## 亮点` + `## 工程 / 质量` + `## 升级提示`」。**完整流程见 skill `github-release-no-gh`**。
+  - ⚠️ **本地 `git fetch` 校验 tag 不可靠**：本沙箱 `git -c http.proxy= -c https.proxy= fetch origin --tags --force` 会偶发 `Failed to connect to github.com port 443`（与 `git push` 直连互通不同，疑似网络抖动/代理差异）。**改走 API 校验**：`GET /repos/<o>/<r>/commits/v0.13.0` 的 `sha` 应 == `git rev-parse HEAD`（2026-09-16 实测一致），免得 fetch 失败误判 tag 没建。
 - ⚠️ **写 notes 前必须用 tag 区间取事实**：`git log <prev-tag>..HEAD` / `git diff --shortstat <prev-tag>..HEAD` / `--name-status`。**别拿工作区观感代替 tag 内容** —— 已踩过：v0.11.0 的 notes 把「复杂度治理 / config.yaml 出库 / 测试 128 例」都算进去了，但这些提交并不在 v0.11.0 的 tag（`32f1e8d`）里，实际落在 v0.12.0 区间（`merge-base --is-ancestor` 判定）。另 `--diff-filter=A` 会漏掉**重命名**的文件（`config.yaml`→`config.example.yaml` 记为 `R`），要按 tag 逐个 `git cat-file -e` 确认。
 
 ## 十二之二、质检 / 档位可解释 / 防 OOM（2026-09-15 新增，commit `00e950d`）
