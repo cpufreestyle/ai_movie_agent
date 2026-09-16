@@ -93,6 +93,23 @@
 - ⚠️ **曾出现工作树内 `webui/pipeline.html`、`webui/timeline.html` 无故从磁盘消失**（内容在 git 里完好，`git checkout --` 即恢复）。提交前务必 `git status` 检查是否有意外 `D`，别盲目 `git add -A`。
 - `git ls-files` 默认 `core.quotepath=true`，非 ASCII 路径输出成 `\345\217\202...` 转义形式 → 脚本据此遍历会误报「索引里有但工作区没有」。要加 `-c core.quotepath=false`。
 - `-c http.proxy=` 只作用于**那一条命令**：`git ls-remote` / `git log origin/main`（不带 `-c`）会走全局死代理而报错，别据此判定远端有问题。
+- 🔧 **ComfyUI 起不来第一嫌疑：venv 的 base 解释器没了（2026-09-16 实测修复）**。症状：`launch_comfy.py` 报
+  `did not find executable at 'D:\Program\python.exe'` / 日志只有 68 字节。根因：`D:/ComfyUI/venv/pyvenv.cfg` 写着
+  `home = D:\Program`、`executable = D:\Program\python.exe`（3.13.15），而沙箱把 `D:\Program` 改名成 `D:\Program.backup`
+  （`D:/Program.backup/python.exe` 还在，但它自己的 prefix 也指向 `D:\Program`，**独立跑同样 `Failed to import encodings`，不能直接用**）。
+  **修法（可回滚）**：备份 `pyvenv.cfg` → `.bak`，把 `home`/`executable` 指向现存完整 3.13
+  （`C:\Users\michael\.workbuddy\binaries\python\versions\3.13.12\`），`version` 同步改写。3.13.x 内 ABI 兼容（cp313），
+  venv 的 site-packages（含 torch/sage）无需重装 → 实测 `torch 2.11.0+cu130`、`cuda True` 正常。
+- ⚠️ **沙箱会回收「detach 的子进程」→ ComfyUI 必须作为常驻后台任务跑**。`launch_comfy.py` 用
+  `creationflags=DETACHED_PROCESS` 起 ComfyUI，前台命令一结束**整棵进程树被回收**：日志停在
+  `Starting server / To see the GUI go to: http://127.0.0.1:8188` 且**无任何报错**，随即 8188 连接被拒
+  （`is_ready()` 假报「ComfyUI 未就绪」）。修法：**别用 launch_comfy.py**，直接以 `run_in_background` 常驻起
+  `D:/ComfyUI/venv/Scripts/python.exe D:/ComfyUI/main.py --listen 127.0.0.1 --port 8188 --fp32-vae --use-sage-attention`
+  （cwd=`D:/ComfyUI`，带 `NO_PROXY` + 清空 `PYTHONPATH` + `TORCH_COMPILE_DISABLE=1`），实测 16s READY 并可持续。
+- ⚠️ **访问本机服务必须带 `NO_PROXY`**：env 里 `HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:13761`（沙箱注入），
+  `NO_PROXY` **为空** → 对 `127.0.0.1:8188` 的请求会被送去代理，回 **502 Bad Gateway**（或 `ConnectionRefused`），
+  造成「服务明明在跑却探不到」的假故障。跑 `run_series.py` / 任何探测前一律
+  `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost`。
 
 ## 十一、Lint / 测试门槛（ruff.toml 已入库）
 - 根目录 `ruff.toml`：line-length 100、target py310、select = `E9,F63,F7,F82` + **F 全类** + **`C901`**（暂不开 E4/E7：E402 与项目「刻意延迟 import 重依赖」的设计冲突）；exclude 含 legacy/outputs。
@@ -127,6 +144,9 @@
 - **Release**：tag-only 版本管理，仓库无版本文件（版本号只存在于 tag）。当前 latest **`v0.13.0`**（2026-09-16，tag→`83bb132`）。本机**无 `gh`** → 走 GitHub REST API：token 用 `git credential fill` 取、直接（urllib 直连 `api.github.com` 200，`_rel_*.py` 跑完即删）、`POST /releases`（`target_commitish=main`，自动建 tag 并成 latest）。notes 沿用「开头一句话统计 + `## 亮点` + `## 工程 / 质量` + `## 升级提示`」。**完整流程见 skill `github-release-no-gh`**。
   - ⚠️ **本地 `git fetch` 校验 tag 不可靠**：本沙箱 `git -c http.proxy= -c https.proxy= fetch origin --tags --force` 会偶发 `Failed to connect to github.com port 443`（与 `git push` 直连互通不同，疑似网络抖动/代理差异）。**改走 API 校验**：`GET /repos/<o>/<r>/commits/v0.13.0` 的 `sha` 应 == `git rev-parse HEAD`（2026-09-16 实测一致），免得 fetch 失败误判 tag 没建。
 - ⚠️ **写 notes 前必须用 tag 区间取事实**：`git log <prev-tag>..HEAD` / `git diff --shortstat <prev-tag>..HEAD` / `--name-status`。**别拿工作区观感代替 tag 内容** —— 已踩过：v0.11.0 的 notes 把「复杂度治理 / config.yaml 出库 / 测试 128 例」都算进去了，但这些提交并不在 v0.11.0 的 tag（`32f1e8d`）里，实际落在 v0.12.0 区间（`merge-base --is-ancestor` 判定）。另 `--diff-filter=A` 会漏掉**重命名**的文件（`config.yaml`→`config.example.yaml` 记为 `R`），要按 tag 逐个 `git cat-file -e` 确认。
+- ⚠️ **notes 里引用 CLI 开关/配置键前，必须 grep 代码确认真实名字**：v0.13.0 的 notes 我凭印象把 `--free-every` 写成
+  `--vram-every`（记错 2 处）并发到了公开 release，事后用 `GET /releases/tags/<tag>` 取 body、`replace` 后
+  `PATCH /releases/<id>` 修正（**API 可改已发布 release 的 body，tag 不受影响**）。教训：文档与代码不一致是硬伤，发布前逐字对齐。
 
 ## 十二之二、质检 / 档位可解释 / 防 OOM（2026-09-15 新增，commit `00e950d`）
 - **`qa.agent_enabled` 默认已改为 `true`**（逐镜链路：WebUI 一键出片 / `cli run`）。原默认 `false` = 糊/静帧/全黑镜头直接进成片无兜底。仍与 `qa.enabled`（run_series 批量链路，历史就开）**解耦**，阈值共用同一段 `qa:*`。
@@ -135,7 +155,7 @@
   **`pick_tier()` 直接委托它**（单一真相源，防解释与判定漂移）。三入口均展示依据：WebUI `/api/hw?detect=1` 的 `reason` 字段 + 前端 `hwStatus`、`tools/hw_profile.py` CLI 打印「判定依据」、测试断言 `pick_tier == explain_tier[0]`（跑遍 HW_CASES 矩阵）。
   坑：线索表**别放互为子串的项**（`"GB10"` 与 `"NVIDIA GB10"` 会让 `matched_hints` 重复）→ 已去重。
 - **长片防 OOM**：`tools/comfyui_client.py.free_memory()`（POST `/free`，best-effort 失败只 warn）；
-  `run_series.run_episode(..., vram_every=N)` + CLI `--vram-every N`（`0`=关，默认 0）。**只在「新渲染」的镜上计数**（缓存命中不占新显存），每 N 镜放一次。背景：FunControl int8 2.3GB + H3 累积易 OOM（连续出片后 ComfyUI 崩）。
+  `run_series.run_episode(..., free_every=N)` + CLI `--free-every N`（`0`=关，默认 0）。**只在「新渲染」的镜上计数**（缓存命中不占新显存），每 N 镜放一次。背景：FunControl int8 2.3GB + H3 累积易 OOM（连续出片后 ComfyUI 崩）。
 
 ## 十三、已知隐患 / 待办
 - ~~记忆分叉~~ **已解决（2026-09-15）**：`.codebuddy/memory` 的 13 天历史已并入 `.workbuddy/memory`，重叠的 09-14/09-15 以「附」区保留，`.codebuddy/` 已停止跟踪（文件仍在磁盘）。**权威目录 = `.workbuddy/memory/`**。
