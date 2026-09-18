@@ -15,6 +15,10 @@
 - `SR_MODELS`：anime→`RealESRGAN_x4plus_anime_6B.pth`，real→`4x-UltraSharp.pth`。
 - `enhance_video.py`：**RIFE 插帧 → ESRGAN 超分 → 高质量重编码**（Video2X：高动态先插值再放大）。ComfyUI 不在则降级为仅重编码；失败保留原片。
 - 接入：`cli.py enhance`；`run_series.py --enhance <档位>` / `config.quality.enhance_profile`（CLI 优先）。产物 `*_enhanced.mp4`。
+- **`agent/comfy_models.py`：权重一律以 ComfyUI `/object_info` 实际扫到的为准**，缺失即回退+告警。
+  曾踩「动漫默认推荐的模型本机根本没有 → 超分被静默跳过」的假成功。RIFE 自动选版本号最大的（本机 rife426）。
+- **`quality_probe.py`**：VMAF/PSNR/SSIM 客观度量（ffmpeg 自带）。自比 98.1、crf38 劣化片 65.9。
+- `--loudnorm`：EBU R128 -16 LUFS，多集发布响度一致。
 - 实测：原成片 `moov` 在尾部（不能边下边播），增强后 `moov@36` ✓。
 
 ## 配音 / 发布
