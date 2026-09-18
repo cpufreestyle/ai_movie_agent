@@ -73,7 +73,8 @@ def _run(cmd: list[str], timeout: int = 3600) -> bool:
     return True
 
 
-def _build_steps(a, cur: str, tmp_dir: str, sr_model: str) -> tuple[list[list[str]], str]:
+def _build_steps(a, cur: str, tmp_dir: str, sr_model: str,
+                 rife_ckpt: str) -> tuple[list[list[str]], str]:
     """编排 GPU 阶段。顺序固定：先 RIFE（在低分辨率上补帧最省显存/时间），
     后 ESRGAN 超分 —— Video2X 文档对「高动态场景」给出的推荐顺序。
 
@@ -83,7 +84,8 @@ def _build_steps(a, cur: str, tmp_dir: str, sr_model: str) -> tuple[list[list[st
     if not a.no_rife:
         step1 = os.path.join(tmp_dir, "01_rife.mp4")
         steps.append([sys.executable, os.path.join(HERE, "rife_interp.py"),
-                      cur, step1, "--multiplier", str(a.multiplier), "--api", a.api])
+                      cur, step1, "--multiplier", str(a.multiplier),
+                      "--ckpt", rife_ckpt, "--api", a.api])
         cur = step1
     if not a.no_sr:
         step2 = os.path.join(tmp_dir, "02_sr.mp4")
@@ -106,16 +108,30 @@ def _final_cmd(a, ff: str, cur: str, fps: float, profile: str) -> list[str]:
         maps = ["-map", "0:v:0", "-map", "0:a:0?"]
     if a.denoise:
         cmd += ["-vf", "hqdn3d=1.5:1.0:6:4.5"]
-    return cmd + maps + enc.quality_args(profile, fps) + ["-shortest", a.dst]
+    return cmd + maps + enc.quality_args(profile, fps, loudnorm=a.loudnorm) + ["-shortest", a.dst]
 
 
-def _resolve_settings(a) -> tuple[str, str, str]:
-    """推断 (内容类型, 编码档位, 超分模型)。显式参数优先，其次猜画风。"""
+def _resolve_settings(a) -> tuple[str, str]:
+    """推断 (内容类型, 编码档位)。显式参数优先，其次猜画风。"""
     kind = (a.kind or "").strip().lower()
     if not kind:
         kind = "anime" if _style_looks_anime() else "real"
     profile = a.profile or ("anime" if kind == "anime" else "standard")
-    return kind, profile, enc.sr_model_for(kind, a.sr_model)
+    return kind, profile
+
+
+def _resolve_models(a, kind: str) -> tuple[str, str]:
+    """按 ComfyUI **实际扫到的权重** 定超分模型与 RIFE 权重，并把回退原因打出来。
+
+    不做这步会出现「以为超分了、其实权重缺失被静默跳过」的假成功。
+    """
+    from agent import comfy_models as cm
+    sr, sr_note = cm.pick_sr_model(kind, api=a.api, explicit=a.sr_model)
+    rife, rife_note = cm.pick_rife_ckpt(api=a.api, explicit=a.rife_ckpt)
+    for note in (sr_note, rife_note):
+        if note:
+            print("[warn] " + note, flush=True)
+    return sr, rife
 
 
 def _apply_comfy_gate(a) -> None:
@@ -141,11 +157,14 @@ def main() -> int:
     ap.add_argument("--kind", default="", choices=["anime", "real"],
                     help="内容类型：决定超分模型与 tune；默认从 config.project.style 猜")
     ap.add_argument("--sr-model", default="", help="超分模型文件名（覆盖 --kind 推荐）")
+    ap.add_argument("--rife-ckpt", default="", help="RIFE 权重文件名（默认取本机最新版本）")
     ap.add_argument("--multiplier", type=int, default=2, help="RIFE 插帧倍数（默认 2）")
     ap.add_argument("--chunk", type=int, default=60, help="超分分段帧数（防 OOM）")
     ap.add_argument("--no-rife", action="store_true", help="跳过插帧")
     ap.add_argument("--no-sr", action="store_true", help="跳过超分")
     ap.add_argument("--denoise", action="store_true", help="轻度降噪（hqdn3d），抑制扩散噪点")
+    ap.add_argument("--loudnorm", action="store_true",
+                    help="响度归一化到 -16 LUFS（EBU R128）；多集发布时听感一致")
     ap.add_argument("--fps", type=float, default=0.0, help="输出帧率；0=沿用处理片")
     ap.add_argument("--api", default=API_DEFAULT)
     ap.add_argument("--strict", action="store_true", help="ComfyUI 不可用时报错退出")
@@ -158,13 +177,15 @@ def main() -> int:
     if not ff:
         raise SystemExit("未找到 ffmpeg（设置 FFMPEG 环境变量或安装 imageio-ffmpeg）")
 
-    kind, profile, sr_model = _resolve_settings(a)
+    kind, profile = _resolve_settings(a)
     _apply_comfy_gate(a)
+    sr_model, rife_ckpt = _resolve_models(a, kind)
 
     src_fps = enc.probe_fps(a.src, ff=ff)
     out_fps = a.fps if a.fps > 0 else 0.0
     print(f"[cfg] kind={kind} profile={profile} sr_model={sr_model} "
-          f"src={src_fps:.3f}fps rife={'关' if a.no_rife else str(a.multiplier) + 'x'} "
+          f"rife_ckpt={rife_ckpt} src={src_fps:.3f}fps "
+          f"rife={'关' if a.no_rife else str(a.multiplier) + 'x'} "
           f"sr={'关' if a.no_sr else '开'}", flush=True)
 
     out_dir = os.path.dirname(os.path.abspath(a.dst)) or "."
@@ -173,7 +194,7 @@ def main() -> int:
     os.makedirs(tmp_dir, exist_ok=True)
 
     cur = os.path.abspath(a.src)
-    steps, cur = _build_steps(a, cur, tmp_dir, sr_model)
+    steps, cur = _build_steps(a, cur, tmp_dir, sr_model, rife_ckpt)
 
     for cmd in steps:
         if a.dry_run:

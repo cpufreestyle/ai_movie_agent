@@ -35,6 +35,10 @@ ENCODE_PROFILES: dict[str, dict] = {
 
 DEFAULT_PROFILE = "standard"
 
+# EBU R128 响度归一化：I=-16 LUFS 是主流平台（B 站 / YouTube）的常见落点，
+# TP=-1.5 dBFS 防真峰值削波，LRA=11 保留动态范围。
+LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
 # 超分模型推荐（参照 Video2X 的「按内容选引擎」表：动漫走动漫专用模型，
 # 真人走通用模型）。当前管线走 ComfyUI 的 UpscaleModelLoader，故这里都是
 # 可放进 models/upscale_models 的权重文件名。
@@ -70,10 +74,12 @@ def sr_model_for(kind: str, explicit: str = "") -> str:
 
 
 def quality_args(profile: str = DEFAULT_PROFILE, fps: float = 0.0,
-                 width: int = 0, height: int = 0) -> list[str]:
+                 width: int = 0, height: int = 0, loudnorm: bool = False) -> list[str]:
     """生成 libx264 + aac 的高质量编码参数（不含 -i / 输出路径）。
 
-    fps 用于算 GOP（2 秒一个关键帧）；width/height 仅用于 4K 时放宽 level。
+    fps 用于算 GOP（2 秒一个关键帧）；width/height 用于放宽 level；
+    loudnorm 开启 EBU R128 响度归一化（发布用：B 站/YouTube 会按 -14~-16 LUFS
+    再归一化，各集响度不一致会被压得忽大忽小；开启后多集听感一致）。
     """
     p = resolve(profile)
     args = ["-c:v", "libx264", "-crf", str(p["crf"]), "-preset", p["preset"]]
@@ -86,6 +92,8 @@ def quality_args(profile: str = DEFAULT_PROFILE, fps: float = 0.0,
     if fps and fps > 0:
         args += ["-g", str(int(round(fps * 2))), "-keyint_min", str(int(round(fps)))]
     args += ["-c:a", "aac", "-b:a", p["abitrate"], "-ar", "48000", "-ac", "2"]
+    if loudnorm:
+        args += ["-af", LOUDNORM_FILTER]
     args += ["-movflags", "+faststart"]
     return args
 

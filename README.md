@@ -307,7 +307,42 @@ python enhance_video.py in.mp4 out.mp4 --sr-model 4x-UltraSharp.pth   # 显式�
 `models/upscale_models` 下的权重；缺失时**自动降级为仅重编码**并提示（`--strict`
 则报错）。任何阶段失败都保留已有成片，不会毁掉已跑出来的片子。
 
-### WebUI 一键增强
+### 模型以「ComfyUI 实际扫到的」为准
+`agent/comfy_models.py` 会查 `/object_info`，**不信任纸面清单**。踩过的坑：本仓库给动漫
+默认推荐 `RealESRGAN_x4plus_anime_6B.pth`，但本机 `models/upscale_models` 里只有
+`4x-UltraSharp.pth` —— 超分阶段因权重缺失失败、被「阶段失败就跳过」静默吞掉，用户以为
+做了超分其实只做了重编码。现在缺失会**回退到真实可用的权重并明确告警**：
+
+```
+[warn] 缺失 RealESRGAN_x4plus_anime_6B.pth，已回退到实际可用的 4x-UltraSharp.pth
+[warn] 本机有更新版 rife426.pth（优于默认 rife49.pth），已改用
+```
+
+RIFE 权重同理：自动选本机**版本号最大**的（`rife47/49/417/426` → 取 426），不再死守
+硬编码的 `rife49.pth`。可用 `--sr-model` / `--rife-ckpt` 显式覆盖。
+
+### 客观画质度量（VMAF / PSNR / SSIM）
+「看起来更清楚」不算数 —— 超分可能只是锐化、插帧可能引入果冻伪影。用 ffmpeg 自带的
+libvmaf/psnr/ssim 做可复现的数字对比（Netflix VMAF / Video2X 评测同款做法）：
+
+```bash
+python quality_probe.py 原片.mp4 增强后.mp4                 # VMAF（默认）
+python quality_probe.py 原片.mp4 增强后.mp4 --mode psnr --json
+python quality_probe.py 原片.mp4 增强后.mp4 --max-sec 20     # 只比前 20 秒（快）
+```
+
+| 指标 | 判读 |
+|---|---|
+| VMAF | ≥97 接近无损 / 93~97 良好 / 80~93 可接受 / <80 明显劣化 |
+| PSNR | ≥40 dB 很好 / 35~40 可接受 |
+| SSIM | ≥0.98 很好 / 0.95~0.98 可接受 |
+
+两侧分辨率/时长不一致会自动对齐（缩放会轻微影响分数，会注明）。实测自比=98.1（无损），
+crf38 劣化片=65.9（明显劣化），能真实区分。
+
+### 发布向：响度归一化
+`--loudnorm` 开启 EBU R128（目标 -16 LUFS / TP -1.5 dBFS）。B 站、YouTube 会再按
+-14~-16 LUFS 归一化，各集响度不一致会被压得忽大忽小，多集发布时建议开。
 发布页签（Publish）里有「画质增强」面板：选源片（默认最新成片）、编码档位、内容类型、
 是否跳过插帧/超分、是否降噪，点「开始增强」后后台运行并轮询进度（输出 `outputs/enhance.log`）。
 后端接口：`POST /api/enhance`、`GET /api/enhance/status`、`GET /api/enhance/profiles`。

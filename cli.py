@@ -189,11 +189,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="编码档位（默认按内容类型推断）")
     p_en.add_argument("--kind", default="", choices=["anime", "real"], help="内容类型")
     p_en.add_argument("--sr-model", default="", help="超分模型文件名")
+    p_en.add_argument("--rife-ckpt", default="", help="RIFE 权重（默认取本机最新版）")
     p_en.add_argument("--multiplier", type=int, default=2, help="RIFE 插帧倍数")
     p_en.add_argument("--chunk", type=int, default=60, help="超分分段帧数（防 OOM）")
     p_en.add_argument("--no-rife", action="store_true", help="跳过插帧")
     p_en.add_argument("--no-sr", action="store_true", help="跳过超分")
     p_en.add_argument("--denoise", action="store_true", help="轻度降噪")
+    p_en.add_argument("--loudnorm", action="store_true", help="响度归一化 -16 LUFS")
     p_en.add_argument("--api", default="http://127.0.0.1:8188", help="ComfyUI 地址")
     p_en.add_argument("--strict", action="store_true", help="ComfyUI 不可用则报错退出")
     p_en.add_argument("--dry-run", action="store_true", help="只打印命令")
@@ -482,10 +484,10 @@ def _cmd_enhance(args, config):
     import subprocess
     dst = args.dst or (os.path.splitext(args.src)[0] + "_enhanced.mp4")
     cmd = [sys.executable, os.path.join(HERE, "enhance_video.py"), args.src, dst]
-    for flag in ("no_rife", "no_sr", "denoise", "strict", "dry_run"):
+    for flag in ("no_rife", "no_sr", "denoise", "strict", "dry_run", "loudnorm"):
         if getattr(args, flag):
             cmd.append("--" + flag.replace("_", "-"))
-    for opt in ("profile", "kind", "sr_model"):
+    for opt in ("profile", "kind", "sr_model", "rife_ckpt"):
         v = getattr(args, opt)
         if v:
             cmd += ["--" + opt.replace("_", "-"), str(v)]
