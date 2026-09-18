@@ -172,6 +172,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_pf.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
     p_pf.add_argument("--json", action="store_true", help="输出 JSON")
 
+    p_md = sub.add_parser("metadata",
+                          help="投稿元数据自动生成：标题候选/简介/标签/动态")
+    p_md.add_argument("--ep", type=int, required=True, help="集号")
+    p_md.add_argument("--script", default=os.path.join(HERE, "outputs", "series_script.json"))
+    p_md.add_argument("--out", default=None, help="写出 JSON 路径（默认 outputs/epN_metadata.json）")
+    p_md.add_argument("--no-llm", action="store_true", help="只用规则法（离线/确定性）")
+    p_md.add_argument("--preflight", action="store_true", help="顺带跑投稿静态校验")
+    p_md.add_argument("--json", action="store_true", help="输出 JSON")
+
+    p_en = sub.add_parser("enhance",
+                          help="画质增强：RIFE 插帧 → ESRGAN 超分 → 统一高质量编码")
+    p_en.add_argument("src", nargs="?", default="", help="源视频")
+    p_en.add_argument("dst", nargs="?", default="", help="输出视频")
+    p_en.add_argument("--profile", default="", choices=["draft", "standard", "high", "anime"],
+                      help="编码档位（默认按内容类型推断）")
+    p_en.add_argument("--kind", default="", choices=["anime", "real"], help="内容类型")
+    p_en.add_argument("--sr-model", default="", help="超分模型文件名")
+    p_en.add_argument("--multiplier", type=int, default=2, help="RIFE 插帧倍数")
+    p_en.add_argument("--chunk", type=int, default=60, help="超分分段帧数（防 OOM）")
+    p_en.add_argument("--no-rife", action="store_true", help="跳过插帧")
+    p_en.add_argument("--no-sr", action="store_true", help="跳过超分")
+    p_en.add_argument("--denoise", action="store_true", help="轻度降噪")
+    p_en.add_argument("--api", default="http://127.0.0.1:8188", help="ComfyUI 地址")
+    p_en.add_argument("--strict", action="store_true", help="ComfyUI 不可用则报错退出")
+    p_en.add_argument("--dry-run", action="store_true", help="只打印命令")
+    p_en.add_argument("--list-profiles", action="store_true", help="列出编码档位")
+
     p_st = sub.add_parser("style", help="风格预设库：列出/查看/应用视觉风格预设")
     p_st.add_argument("--list", action="store_true", help="列出全部预设")
     p_st.add_argument("--show", default=None, metavar="NAME", help="查看某预设")
@@ -406,6 +433,67 @@ def _cmd_preflight(args, config):
     sys.exit(0 if res["ok"] else 1)
 
 
+def _cmd_metadata(args, config):
+    from agent import metadata as md
+    out = args.out or os.path.join(HERE, "outputs", f"ep{args.ep}_metadata.json")
+    meta = md.generate(args.ep, script_path=args.script, config=config,
+                       use_llm=not args.no_llm, out=out)
+    if args.json:
+        print(json.dumps(meta, ensure_ascii=False, indent=2))
+    else:
+        print(f"== {meta['series']}第{md.cn_num(args.ep)}集 · {meta['ep_title']}"
+              f"（生成方式：{meta['source']}）==")
+        print(f"标题最佳：{meta['title']}")
+        print("标题候选：")
+        for t in meta["titles"]:
+            print(f"  - {t}")
+        print("标签： " + " ".join("#" + t for t in meta["tags"]))
+        print(f"动态： {meta['dynamic']}")
+        print("简介：")
+        print(meta["desc"])
+        print(f"英文标题：{meta['en_title']}")
+        print(f"已写出：{out}")
+    if args.preflight:
+        res = md.validate(meta)
+        print(f"\n投稿校验：{'通过' if res['ok'] else '未通过'}")
+        for e in res["errors"]:
+            print(f"  [错误] {e}")
+        for w in res["warnings"]:
+            print(f"  [提醒] {w}")
+        sys.exit(0 if res["ok"] else 1)
+
+
+def _cmd_enhance(args, config):
+    from agent import encode as enc
+
+    if args.list_profiles or not args.src:
+        print("编码档位（crf / preset / tune / 音频码率）：")
+        for name in enc.profiles():
+            p = enc.resolve(name)
+            print(f"  {name:9s} crf={p['crf']:<3} preset={p['preset']:<9s} "
+                  f"tune={p['tune'] or '-':<10s} audio={p['abitrate']}")
+        print("\n超分模型推荐：")
+        for k, v in enc.SR_MODELS.items():
+            print(f"  {k:6s} {', '.join(v)}")
+        if not args.src:
+            print("\n用法: cli.py enhance <src.mp4> <dst.mp4> [--kind anime|real]")
+        return
+
+    import subprocess
+    dst = args.dst or (os.path.splitext(args.src)[0] + "_enhanced.mp4")
+    cmd = [sys.executable, os.path.join(HERE, "enhance_video.py"), args.src, dst]
+    for flag in ("no_rife", "no_sr", "denoise", "strict", "dry_run"):
+        if getattr(args, flag):
+            cmd.append("--" + flag.replace("_", "-"))
+    for opt in ("profile", "kind", "sr_model"):
+        v = getattr(args, opt)
+        if v:
+            cmd += ["--" + opt.replace("_", "-"), str(v)]
+    cmd += ["--multiplier", str(args.multiplier), "--chunk", str(args.chunk),
+            "--api", args.api]
+    raise SystemExit(subprocess.run(cmd).returncode)
+
+
 def _cmd_style(args, config):
     from agent import style_presets as sp
     if args.list:
@@ -583,6 +671,8 @@ COMMANDS = {
     "mmh3": _cmd_mmh3,
     "ab": _cmd_ab,
     "preflight": _cmd_preflight,
+    "metadata": _cmd_metadata,
+    "enhance": _cmd_enhance,
     "style": _cmd_style,
     "mix": _cmd_mix,
     "tts": _cmd_tts,

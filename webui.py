@@ -21,10 +21,20 @@
 from __future__ import annotations
 
 import argparse
+import os
+import socket
+import sys
 
 from flask import Flask
 
 from webserver import register_blueprints
+
+# 访问本机服务（ComfyUI 8188 / 自身探针）必须绕开代理，否则被送代理 → 502。
+# 只在缺失时补充 127.0.0.1,localhost，不破坏用户已有的代理配置。
+for _k in ("NO_PROXY", "no_proxy"):
+    _v = os.environ.get(_k, "")
+    if "127.0.0.1" not in _v:
+        os.environ[_k] = (_v + "," if _v else "") + "127.0.0.1,localhost"
 
 # 兼容旧调用点与既有测试：
 #   - cli.py 的 `from webui import main`
@@ -70,6 +80,18 @@ def main():
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     args = p.parse_args()
+    # 端口占用预检：防止「旧实例没退、新进程却 bind 成功却接不到请求」的 404 幽灵
+    # （Windows SO_REUSEADDR 允许重复 bind，请求会被先绑的旧进程抢走）。
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((args.host, args.port))
+    except OSError:
+        probe.close()
+        print(f"[webui] 端口 {args.port} 已被占用（旧实例未退出？）。"
+              f"查占用：`netstat -ano -p TCP | findstr :{args.port}`，"
+              f"结束后 `taskkill /PID <pid> /F`，再重启。")
+        sys.exit(1)
+    probe.close()
     print(f"[webui] 启动于 http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
 

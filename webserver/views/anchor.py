@@ -57,6 +57,12 @@ def api_anchor_run():
     """
     if _state["running"]:
         return json_resp({"ok": False, "error": "已有任务在运行"}, status=409)
+    # 生成前置自检：ComfyUI 未连接时直接拦截，避免脚本静默退出、只留日志末行提示
+    api = comfy_api()
+    if not comfy_ready(api):
+        return json_resp({"ok": False,
+                          "error": f"ComfyUI 未连接（{api} 探不到）。请先启动 ComfyUI（:8188）后再生成。"},
+                         status=409)
     body = request.get_json(force=True, silent=True) or {}
 
     known = set(generatable_names())

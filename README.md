@@ -60,6 +60,24 @@ python make_narration.py --film outputs/ep1_series_film_mmh3.mp4 \
   `blender.fun_control_walk_gain` 微调，但受画面边界限制**上限只有约 1.25x** ——
   真正的杠杆是 `fun_control_strength`（0.8 干净弱 / 1.2 明显强 / ≥1.5 画面崩坏）。
 
+- **批量多集**：`python run_series.py --eps 1-5`（也支持 `1,3,5` / `all`，按剧本实际集数）。
+  批量模式**单集失败不阻断**后续集，结束汇总成功/失败并返回非零退出码；
+  不带 `--ep/--eps` 时默认出**剧本全部集数**（不再写死三集）。
+- **竖屏输出预设**：`python run_series.py --ratio 9:16`（576x1024，供抖音 / Shorts；
+  显式 `--width/--height` 优先）。引擎要求宽高 32 整除，两个预设均满足；竖屏成片未实测。
+- **投稿元数据自动生成**：参照 MoneyPrinterTurbo / ShortGPT 的「自动标题 / 简介 / 标签」
+  做法，把一集旁白喂给本地 LLM，产出**标题候选（3~5 个，均含「第N集」）+ 简介（钩子+看点+话题）
+  + 标签 + 动态 + 英文标题**，并自动收敛到 B 站约束（标题 ≤80 字、标签 ≤10 个且单个 ≤20 字、
+  动态 ≤233 字）。**无 LLM 也能用**——规则法兜底，确定性强、有单测覆盖。
+
+  ```bash
+  python cli.py metadata --ep 5                  # 生成第五集元数据（默认规则法）
+  python cli.py metadata --ep 5 --preflight      # 顺带做投稿静态校验
+  python cli.py metadata --ep 5 --no-llm --json  # 离线确定性输出，便于管道处理
+  ```
+  WebUI 同名能力：`GET /api/metadata?ep=5`（默认规则法即时返回；`&llm=1` 才调模型）。
+  完全为纯新增：`agent/metadata.py` + `webserver/services/metadata.py`，不改动任何既有流程。
+
 ## 部署方式（跨平台，Docker / 原生脚本 二选一）
 
 详细见 [DEPLOY.md](DEPLOY.md)。两种都支持 Windows / Linux / macOS，视频引擎跑在带显卡的
@@ -251,6 +269,43 @@ python launch_comfy.py --sage-attention
    ```
    > 注意：标签参数是单数 `--tag`（逗号分隔）；`--dtime` 为 10 位时间戳且需晚于
    > 当前时间 4 小时以上；分区 `tid` 请按 B 站实际分区表核对。
+
+## 画质增强（RIFE 插帧 → ESRGAN 超分 → 统一高质量编码）
+
+出片后可选跑一遍增强。顺序固定为 **先 RIFE 插帧、后 ESRGAN 超分** —— 在低分辨率上
+补帧最省显存/时间，这也是 [Video2X](https://github.com/k4yt3x/video2x) 文档对
+「高动态场景」给出的推荐顺序。最终统一按档位重编码。
+
+```bash
+python cli.py enhance --list-profiles                 # 看档位与超分模型推荐
+python enhance_video.py in.mp4 out.mp4                # 默认按画风猜档位
+python enhance_video.py in.mp4 out.mp4 --kind anime   # 动漫：tune animation + 动漫超分模型
+python enhance_video.py in.mp4 out.mp4 --no-sr        # 只插帧
+python enhance_video.py in.mp4 out.mp4 --no-rife --no-sr   # 只重编码（补 faststart）
+python run_series.py --enhance anime                  # 出片后自动增强（产物 *_enhanced.mp4）
+```
+
+也可在 `config.yaml` 里常开：`quality.enhance_profile: anime`（CLI `--enhance` 优先）。
+
+| 档位 | crf | preset | tune | 音频 | 用途 |
+|---|---|---|---|---|---|
+| `draft` | 23 | veryfast | — | 128k | 预览 |
+| `standard` | 18 | medium | — | 192k | 常规成片 |
+| `high` | 16 | slow | film | 192k | 真人高质量 |
+| `anime` | 16 | slow | animation | 192k | 动漫（保线条/平涂） |
+
+编码参数集中在 `agent/encode.py`（crf/preset/tune/GOP/`pix_fmt yuv420p`/
+`-movflags +faststart`），不再散落在各脚本。实测：项目原成片 `moov` 在文件尾部
+（网页播放要整段下载完才能开始播），增强后 `moov` 前置到 36 字节处，可边下边播。
+
+超分模型按内容选（动漫走 `RealESRGAN_x4plus_anime_6B.pth`，真人走 `4x-UltraSharp.pth`）：
+```bash
+python enhance_video.py in.mp4 out.mp4 --sr-model 4x-UltraSharp.pth   # 显式指定
+```
+
+依赖：插帧/超分需要 ComfyUI(8188) + `ComfyUI-Frame-Interpolation` 插件与
+`models/upscale_models` 下的权重；缺失时**自动降级为仅重编码**并提示（`--strict`
+则报错）。任何阶段失败都保留已有成片，不会毁掉已跑出来的片子。
 
 ## 进阶
 - **更长更连贯**：调大 `overlap_history`(17→37)、`addnoise_condition`(20)，或用异步

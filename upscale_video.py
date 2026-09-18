@@ -23,8 +23,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tools.comfyui_client import ComfyUIClient
 import imageio_ffmpeg
 
-COMFY_INPUT = r"D:\ComfyUI\input"
 COMFY_API = "http://127.0.0.1:8188"
+
+
+def _comfy_input() -> str:
+    """ComfyUI input 目录：COMFYUI_INPUT 环境变量 > comfy_paths 推导 > 旧字面兜底。
+
+    原先写死 `D:\\ComfyUI\\input`，换机器/换盘就静默失效（与 `comfy_paths`
+    模块的初衷相悖）。保留字面兜底仅为不改动老机器的既有行为。
+    """
+    env = os.environ.get("COMFYUI_INPUT") or ""
+    if env:
+        return env
+    try:
+        from comfy_paths import comfyui_root
+        root = comfyui_root()
+        if root:
+            return os.path.join(root, "input")
+    except Exception:
+        pass
+    return r"D:\ComfyUI\input"
 
 
 def build_workflow(video_name, model, sharpen, fps, limit, start, crf):
@@ -187,7 +205,7 @@ def main():
 
     # 源片拷到 ComfyUI input 目录，VHS_LoadVideo 按文件名读取（绝对路径在 Win 下易踩坑）
     base = os.path.basename(a.src)
-    dst_in = os.path.join(COMFY_INPUT, base)
+    dst_in = os.path.join(_comfy_input(), base)
     if os.path.abspath(a.src) != os.path.abspath(dst_in):
         shutil.copy(a.src, dst_in)
     print(f"[cfg] 源片已置于 ComfyUI input: {dst_in}", flush=True)

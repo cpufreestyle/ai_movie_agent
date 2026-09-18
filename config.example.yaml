@@ -174,6 +174,13 @@ qa:
 #   仅作用于「配置开启自动投稿」的链路（finalize 自动投稿、WebUI 一键全自动）：
 #   体检有 error 且 block_publish 为真时拦下投稿，成片本身保留。
 #   显式投稿（cli publish / 发布页点按钮）不走这里——用户已明确点了，不该被静默拦下。
+# 成片画质增强（拼接后自动跑；CLI --enhance 优先级高于此）
+#   管线固定顺序：RIFE 插帧（在低分辨率上补帧最省）→ ESRGAN 超分 → 统一高质量编码。
+#   顺序依据 Video2X 文档对「高动态场景」的推荐：先插值再放大。
+#   产物为 *_enhanced.mp4，原成片保留；任一步失败都只保留原片，不阻断出片。
+quality:
+  enhance_profile: ''     # ''=不做；可选 draft / standard / high / anime
+                          # anime = crf16 + slow + tune animation（动漫线条）+ 动漫超分模型
 preflight:
   enabled: true           # false = 完全不跑体检
   block_publish: true     # false = 只告警不拦截

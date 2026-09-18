@@ -240,27 +240,6 @@ def seg_start(k: int) -> float:
     return (k - 1) * SEG_DUR
 
 
-def _trim_silence() -> None:
-    """FIT 模式：去掉每段旁白首尾静音，缩短总时长、降低所需压缩比（避免念稿腔）。
-
-    ⚠️ 目前**未被任何代码调用**（死代码）。若要启用请先注意：下面滤镜的
-    ``stop_periods=1`` 会**在句内首个 ≥0.25s 停顿处截断**，把后半句整段丢掉
-    （2026-09-16 实测：2.0s 语音 → 输出 1.19s；改 ``stop_periods=-1`` 才得 2.46s）。
-    """
-    ff = ffmpeg_exe()
-    for i in range(1, len(TTS_LINES) + 1):
-        src = os.path.join(NAR, f"nar_{i:02d}.wav")
-        tmp = os.path.join(NAR, f"_trim_{i:02d}.wav")
-        subprocess.run([ff, "-y", "-i", src, "-af",
-                        "silenceremove=start_periods=1:start_duration=0.08:"
-                        "start_threshold=-40dB:stop_periods=1:stop_duration=0.25:"
-                        "stop_threshold=-40dB", tmp],
-                       capture_output=True, text=True, timeout=120)
-        if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-            os.replace(tmp, src)
-    print("[trim] 去首尾静音完成")
-
-
 def _probe_wh(path):
     """探测视频宽高，字幕字号/排版据此自适应。"""
     try:

@@ -68,6 +68,8 @@ EXPECTED = {
     ("/api/series/run", ("POST",)),
 
     ("/api/hw", ("GET",)),
+
+    ("/api/metadata", ("GET",)),
 }
 
 

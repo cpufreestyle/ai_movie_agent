@@ -35,7 +35,8 @@ def test_commands_registry_matches_subcommands():
 def test_expected_subcommands_present():
     expected = {"run", "pipeline", "status", "init", "publish", "publish-concept",
                 "enrich-bible", "webui", "blender", "ltx", "mmh3", "ab",
-                "preflight", "style", "mix", "tts", "charcard", "timeline"}
+                "preflight", "metadata", "enhance", "style", "mix", "tts",
+                "charcard", "timeline"}
     assert expected == _subcommands()
 
 

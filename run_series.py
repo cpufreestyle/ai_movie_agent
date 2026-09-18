@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -39,6 +40,8 @@ os.makedirs(WORK, exist_ok=True)
 MANIFEST = os.path.join(WORK, "series_manifest.json")
 # 非 ltx 引擎的成片后缀，避免覆盖同名的 LTX 成片
 FILM_SUFFIX = ""
+# 成片后自动画质增强的编码档位；空串=不做（见 --enhance）
+ENHANCE_PROFILE = ""
 
 
 def set_workspace(engine: str) -> None:
@@ -386,9 +389,29 @@ def _finish_episode(eng, ep: int, out_dir: str, shot_files: list,
     film = os.path.join(out_dir, f"ep{ep}_series_film{FILM_SUFFIX}.mp4")
     if not concat_shots(eng, shot_files, film):
         return None
+    _enhance_film(film)
     if use_i2v:
         return last_frame(film, os.path.join(WORK, f"ep{ep}_film_last.png"))
     return None
+
+
+def _enhance_film(film: str) -> str:
+    """按 --enhance 档位跑画质增强；未开启/失败都返回原成片（不阻断出片）。"""
+    if not ENHANCE_PROFILE:
+        return film
+    dst = os.path.splitext(film)[0] + "_enhanced.mp4"
+    cmd = [sys.executable, os.path.join(ROOT, "enhance_video.py"), film, dst,
+           "--profile", ENHANCE_PROFILE]
+    print(f"[enhance] {film} -> {dst} (profile={ENHANCE_PROFILE})", flush=True)
+    try:
+        r = subprocess.run(cmd, timeout=7200)
+        if r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+            print(f"[enhance] OK {dst}  {os.path.getsize(dst) / 2 ** 20:.2f}MB")
+            return dst
+        print(f"[enhance] 失败（退出码 {r.returncode}），保留原成片")
+    except Exception as e:  # 增强是可选增益，任何异常都不该毁掉已出的成片
+        print(f"[enhance] 异常，保留原成片: {e}")
+    return film
 
 
 def _free_vram(eng) -> None:
@@ -590,26 +613,82 @@ def _run_one_episode(eng, a, data: dict, ep: int, style_anchor: str, anchor: str
     return True, new_prev
 
 
+def _resolve_episodes(a, data: dict) -> list[int]:
+    """出片集数：--eps 批量 > --ep 单集 > 剧本全部集数（不再写死三集）。"""
+    if a.eps:
+        return _parse_eps(a.eps, data)
+    return [a.ep] if a.ep else _parse_eps("all", data)
+
+
 def _run_episodes(eng, a, data: dict, style_anchor: str, anchor: str,
                   anchor_map: dict, ref_images: list, qa_policy: dict,
                   only) -> int:
-    """依次出片（--ep 指定单集，否则 1/2/3），任一集失败即中止。"""
-    episodes = [a.ep] if a.ep else [1, 2, 3]
+    """依次出片。--eps 批量模式下单集失败不阻断后续集（结束汇总退出码）。"""
+    episodes = _resolve_episodes(a, data)
+    batch = bool((a.eps or "").strip())
+    failures: list[int] = []
     prev_frame = None          # 仅 --i2v 模式下用于续写链
     for ep in episodes:
         ok, prev_frame = _run_one_episode(eng, a, data, ep, style_anchor, anchor,
                                          anchor_map, ref_images, qa_policy,
                                          only, prev_frame)
         if not ok:
+            if batch:
+                print(f"[run_series] 第 {ep} 集失败，批量模式继续下一集")
+                failures.append(ep)
+                prev_frame = None       # 失败后不续写链，避免脏尾帧传染
+                continue
             return 1
         if ep != episodes[-1]:
             time.sleep(2)
+    if failures:
+        print(f"[run_series] 批量完成：成功 {len(episodes) - len(failures)} 集，失败 {failures}")
+        return 1
     return 0
+
+
+def _parse_eps(spec: str, data: dict) -> list[int]:
+    """解析 --eps：'1-5' / '1,3,5' / 'all'（按剧本实际 epN 键，去重升序）。"""
+    spec = (spec or "").strip().lower()
+    keys = sorted(int(str(k)[2:]) for k in data if re.fullmatch(r"ep\d+", str(k)))
+    if not spec or spec == "all":
+        return keys or [1, 2, 3]
+    out: list[int] = []
+    for part in re.split(r"[,\s]+", spec):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)-(\d+)", part)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            out.extend(range(lo, hi + 1))
+        elif part.isdigit():
+            out.append(int(part))
+        else:
+            raise SystemExit(f"[run_series] --eps 片段无法解析：{part!r}")
+    if not out:
+        raise SystemExit("[run_series] --eps 解析结果为空")
+    return sorted(dict.fromkeys(out))
+
+
+def _apply_ratio(a) -> None:
+    """--ratio 预设映射分辨率（9:16 -> 576x1024）；显式 --width/--height 优先。
+
+    引擎/模型需支持该比例（H3 要求宽高 32 整除，两个预设都满足；竖屏出片未实测，
+    本步先保证参数正确传到引擎）。
+    """
+    if getattr(a, "ratio", "") == "9:16" and not (a.width or a.height):
+        a.width, a.height = 576, 1024
 
 
 def _parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ep", type=int, default=0, help="只重出第 N 集；0=全部三集")
+    ap.add_argument("--ep", type=int, default=0, help="只重出第 N 集；0=按剧本全部集数")
+    ap.add_argument("--eps", default="",
+                    help="批量多集：'1-5' / '1,3,5' / 'all'（按剧本实际集数）。"
+                         "批量模式下单集失败不阻断后续集，结束汇总并返回非零退出码")
+    ap.add_argument("--ratio", default="", choices=["", "16:9", "9:16"],
+                    help="画面比例预设：留空/16:9=引擎默认横屏；9:16=竖屏 576x1024"
+                         "（抖音 / Shorts）。显式 --width/--height 优先")
     ap.add_argument("--concat", type=int, default=0, help="只做第 N 集拼接（镜头已生成完）")
     ap.add_argument("--width", type=int, default=0)
     ap.add_argument("--height", type=int, default=0)
@@ -650,12 +729,29 @@ def _parse_args():
                     help="关闭逐镜质检（不看质检、不重 roll）")
     ap.add_argument("--qa-rerolls", type=int, default=None,
                     help="质检不达标时自动换 seed 重出的次数上限（覆盖 config.qa.max_rerolls）")
+    ap.add_argument("--enhance", default="", choices=["", "draft", "standard", "high", "anime"],
+                    help="拼接后自动跑画质增强（RIFE 插帧 → ESRGAN 超分 → 高质量编码），"
+                         "值为编码档位；留空=不做。产物为 *_enhanced.mp4，原片保留。"
+                         "需 ComfyUI 在线，否则自动退化为仅重编码")
     return ap.parse_args()
+
+
+def _cfg_enhance_profile() -> str:
+    """从 config.quality.enhance_profile 读默认增强档位；非法值按「不做」处理。"""
+    try:
+        q = (load_config().get("quality") or {})
+        v = str(q.get("enhance_profile") or "").strip().lower()
+    except Exception:
+        return ""
+    return v if v in ("draft", "standard", "high", "anime") else ""
 
 
 def main():
     a = _parse_args()
+    global ENHANCE_PROFILE
+    ENHANCE_PROFILE = a.enhance or _cfg_enhance_profile()
     only = _parse_only(a.only)
+    _apply_ratio(a)     # --ratio 预设 -> width/height（显式 --width/--height 优先）
 
     # 必须在任何 WORK/MANIFEST 相关操作之前切换工作区，否则会命中其它引擎的镜头缓存
     set_workspace(a.engine)
