@@ -83,3 +83,17 @@ def test_enhance_disabled_returns_original():
 def test_enhance_cli_registered():
     from cli import COMMANDS
     assert "enhance" in COMMANDS
+
+
+def test_make_narration_uses_encode_module():
+    """make_narration 的 ffmpeg 编码必须走 agent.encode，不得再散落 -crf 18。"""
+    src = open("make_narration.py", encoding="utf-8").read()
+    assert "enc.quality_args" in src
+    assert '"-crf", "18"' not in src
+
+
+def test_anime_redraw_uses_encode_module():
+    """anime_redraw 的 ffmpeg 编码必须走 agent.encode，不得再散落 -crf 17。"""
+    src = open("anime_redraw.py", encoding="utf-8").read()
+    assert "enc.quality_args" in src
+    assert '"-crf", "17"' not in src

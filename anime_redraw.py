@@ -28,6 +28,7 @@ import imageio_ffmpeg
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from comfy_paths import comfyui_root                   # noqa: E402
 from tools.comfyui_client import ComfyUIClient         # noqa: E402
+from agent import encode as enc  # 统一编码档位（动漫内容走 anime tune）
 _ROOT = comfyui_root()                                 # noqa: E402
 
 CKPT = "Counterfeit-V3.0_fix_fp16.safetensors"
@@ -225,7 +226,7 @@ def main():
     ff = imageio_ffmpeg.get_ffmpeg_exe()
     subprocess.run([ff, "-y", "-i", tmp, "-i", a.src,
                     "-map", "0:v:0", "-map", "1:a:0?",
-                    "-c:v", "libx264", "-crf", "17", "-pix_fmt", "yuv420p",
+                    *enc.quality_args("anime"),
                     "-c:a", "copy", "-shortest", a.dst], check=False)
     print("done", a.dst)
 

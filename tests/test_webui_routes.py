@@ -70,6 +70,10 @@ EXPECTED = {
     ("/api/hw", ("GET",)),
 
     ("/api/metadata", ("GET",)),
+
+    ("/api/enhance/profiles", ("GET",)),
+    ("/api/enhance", ("POST",)),
+    ("/api/enhance/status", ("GET",)),
 }
 
 

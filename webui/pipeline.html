@@ -268,6 +268,23 @@ html[data-theme="light"] #ui-tip{ box-shadow:0 14px 34px rgba(30,50,80,.20); }
       <div class="row end"><button onclick="copyMeta('title')">复制最佳标题</button><button onclick="copyMeta('desc')">复制简介</button><button onclick="copyMeta('tags')">复制标签</button><button onclick="copyMeta('dynamic')">复制动态</button></div>
     </div>
   </section>
+  <section class="topbar"><div class="wide"><h3>画质增强（RIFE 插帧 → ESRAGN 超分 → 高质量编码）</h3><div class="note">把 outputs 里的成片做成 *_enhanced.mp4（原片保留）。顺序固定「先插帧再超分」（Video2X 推荐）；未开 GPU 时自动降级为仅重编码。增强可能跑几分钟~几十分钟，页面轮询进度。</div>
+    <div class="settings-grid">
+      <label>源片 src<input id="eh-src" placeholder="留空=最新成片" style="width:100%"></label>
+      <label>编码档位 profile<select id="eh-profile"><option value="">（按画风自动）</option><option value="draft">draft</option><option value="standard">standard</option><option value="high">high</option><option value="anime">anime</option></select></label>
+      <label>内容类型 kind<select id="eh-kind"><option value="">（自动）</option><option value="anime">anime</option><option value="real">real</option></select></label>
+      <label>输出 dst<input id="eh-dst" placeholder="（自动 *_enhanced.mp4）" style="width:100%"></label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label style="color:var(--fg);margin:0" data-tip="跳过 RIFE 插帧（只超分 + 编码）"><input type="checkbox" id="eh-no-rife" style="width:auto;vertical-align:middle"> 跳过插帧</label>
+      <label style="color:var(--fg);margin:0" data-tip="跳过 ESRGAN 超分（只插帧 / 仅编码）"><input type="checkbox" id="eh-no-sr" style="width:auto;vertical-align:middle"> 跳过超分</label>
+      <label style="color:var(--fg);margin:0" data-tip="轻度降噪 hqdn3d，抑制扩散模型细密噪点"><input type="checkbox" id="eh-denoise" style="width:auto;vertical-align:middle"> 降噪</label>
+      <button class="primary" onclick="startEnhance()">开始增强</button>
+      <button onclick="loadEnhanceStatus()">刷新状态</button>
+    </div>
+    <div id="eh-state" class="note wide" style="margin-top:10px">未运行</div>
+    <pre id="eh-log" class="scroll" style="max-height:200px;margin-top:8px">—</pre>
+  </section>
   <section class="topbar"><div class="wide"><h3>任务日志</h3><pre class="task-log"></pre></div></section>
 </section>
 
@@ -495,6 +512,27 @@ async function runSeries(concatOnly){const body={ep:+$('ser-ep').value||0,engine
 function boardCard(e){const v=e.vo||e.raw||null;const src=v?'/api/film/play?name='+encodeURIComponent(v.name):'';const spec=v?[['时长',(v.duration_sec??'-')+'s'],['分辨率',v.width?v.width+'×'+v.height:'-'],['帧率',v.fps?v.fps+' fps':'-'],['大小',(v.size_mb??'-')+' MB'],['视频编码',v.vcodec||'-'],['音频',v.acodec?v.acodec+(v.channels?' · '+v.channels:''):'-']]:[];const badges=[['画面',!!e.raw],['旁白',!!e.vo],['字幕',!!e.vo],['同步',e.synced]];const lines=(e.lines_en||[]).map((x,i)=>`<li>${esc(x)}<div class="note">${esc((e.lines_zh||[])[i]||'')}</div></li>`).join('');return `<article class="ep-card"><div class="ep-head"><span class="ep-no">EP ${e.ep}</span><span class="ep-title">${esc(e.title||'')}</span><div class="ep-badges">${badges.map(([t,ok])=>`<span class="badge${ok?' ok':''}">${t}</span>`).join('')}</div></div>${v?`<video controls preload="metadata" src="${esc(src)}"></video>`:'<div class="empty" style="padding:46px 14px;text-align:center">尚未出片</div>'}${spec.length?`<div class="ep-meta">${spec.map(([k,val])=>`<span>${k} <b>${esc(String(val))}</b></span>`).join('')}</div>`:''}${lines?`<div class="ep-lines"><details><summary>台词 ${e.narration} 段 · 英文配音 / 中文对照 · ${e.shots} 镜</summary><ol>${lines}</ol></details></div>`:''}${v?`<div class="ep-actions"><button onclick="publishEp('${esc(v.name)}',${e.ep},'${esc(e.title||'')}')">投稿这集</button><button onclick="openFilm('${esc(v.name)}')">在成片页打开</button></div>`:''}</article>`}
 async function loadBoard(){const j=await(await fetch('/api/board')).json();const s=j.summary||{};window.__series=j.series||'';$('board-series').textContent=(j.series||'系列看板')+' · 三集成片';const cards=[['已出片',(s.ready||0)+' / '+(s.episodes||0)],['总时长',(s.total_duration_sec||0)+'s'],['总体积',(s.total_size_mb||0)+' MB'],['镜头总数',s.shots||0],['旁白段数',s.narration||0],['出片引擎',s.engine||'-']];$('board-stats').innerHTML=cards.map(x=>`<div class="panel">${esc(x[0])}<h3>${esc(String(x[1]))}</h3></div>`).join('');$('board-note').textContent=j.note||'';$('board-eps').innerHTML=(j.episodes||[]).map(boardCard).join('')}
 async function publishEp(name,ep,title){const series=window.__series||'';const t=`${series||'本片'} · 第${ep}集${title?'：'+title:''}`;if(!confirm('将投稿到 B 站：\n\n'+t+'\n\n文件：'+name+'\n\n确定发布？（发布后脚本无法删除，需到创作中心手动操作）'))return;const j=await(await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({video:'outputs/'+name,episode:ep,subtitle:title,submit:true})})).json();if(!j.ok){alert(j.error||'投稿失败');return}msg(j.msg||'已启动投稿')}
+
+// ---------- 画质增强 ----------
+let __ehTimer=null;
+async function startEnhance(){
+  const body={src:($('eh-src').value||'').trim(),dst:($('eh-dst').value||'').trim(),
+    profile:$('eh-profile').value||undefined,kind:$('eh-kind').value||undefined,
+    no_rife:$('eh-no-rife').checked,no_sr:$('eh-no-sr').checked,denoise:$('eh-denoise').checked};
+  Object.keys(body).forEach(k=>body[k]===undefined&&delete body[k]);
+  const j=await(await fetch('/api/enhance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(j.error){alert(j.error);return}
+  msg('增强已启动：'+j.dst);
+  if(__ehTimer)clearInterval(__ehTimer);
+  __ehTimer=setInterval(loadEnhanceStatus,3000);loadEnhanceStatus();
+}
+async function loadEnhanceStatus(){
+  const j=await(await fetch('/api/enhance/status')).json();
+  const st=j.state||'idle';
+  $('eh-state').textContent='状态：'+st+(j.profile?(' · 档位 '+j.profile):'')+(st==='done'?(' · '+j.size_mb+'MB → '+j.dst):'')+(j.error?(' · '+j.error):'');
+  $('eh-log').textContent=j.log_tail||'—';
+  if(st==='done'||st==='error'){if(__ehTimer){clearInterval(__ehTimer);__ehTimer=null}}
+}
 async function openFilm(name){if(!name)return;document.querySelector('nav button[data-tab="film"]').click();await loadFilms();$('film-pick').value=name;playFilm()}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('tab-'+b.dataset.tab).classList.add('active');if(b.dataset.tab==='board')loadBoard();if(b.dataset.tab==='overview'){loadCfg();refreshOverview()}if(b.dataset.tab==='concept')reloadConcept();if(b.dataset.tab==='publish')refreshBiliup();if(b.dataset.tab==='film'){loadFilms();loadStoryboard();loadSeries()}if(b.dataset.tab==='settings'){syncConfig(true);loadHw()};if(b.dataset.tab==='white')loadBlocking();if(b.dataset.tab==='anchor')loadAnchor()});let _wasRunning=false,_logCur=0,_logText='';async function poll(){const j=await(await fetch('/api/logs?since='+_logCur)).json();if(j.reset)_logText='';_logText=(_logText+(j.logs||'')).slice(-200000);_logCur=j.reset?0:(j.cursor??_logCur);const _t=(j.truncated?'[webui] 日志过长，已省略最早部分\n':'')+_logText;document.querySelectorAll('.task-log').forEach(x=>{x.textContent=_t;x.scrollTop=x.scrollHeight});$('dot').className='dot'+(j.running?' on':'');if(j.running)msg('运行中');const justFinished=_wasRunning&&!j.running;_wasRunning=j.running;if(justFinished&&j.result){msg(j.result.error?'任务失败：'+j.result.error:'任务完成',!!j.result.error);loadPipeline();if($('tab-anchor').classList.contains('active'))loadAnchor();if($('tab-film').classList.contains('active')){loadSeries();loadFilms()}}}setInterval(poll,1000);loadPipeline();loadBoard();poll();
 /* ---- 外观偏好：暗/亮 · 密度 · 强调色（持久化 localStorage）---- */

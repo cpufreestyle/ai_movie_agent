@@ -25,10 +25,15 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import wave
 import textwrap
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+from agent import encode as enc  # 统一编码档位（替代散落的 -c:v libx264 -crf 18 ...）
+
 NAR = os.path.join(ROOT, "outputs", "nar")
 os.makedirs(NAR, exist_ok=True)
 
@@ -584,9 +589,8 @@ def build_and_render() -> None:
     fc = ";".join(parts)
     cmd = [ff, "-y", *inputs, "-filter_complex", fc,
            "-map", f"[{vcur}]", "-map", "[aout]",
-           "-c:v", "libx264", "-crf", "18", "-preset", "medium",
-           "-pix_fmt", "yuv420p", "-r", str(FPS),
-           "-c:a", "aac", "-b:a", "192k", OUT]
+           *enc.quality_args("standard", FPS),
+           "-r", str(FPS), OUT]
 
     print("[render] 合成中（字幕+解说+环境音）...")
     # cwd 设为字幕文本目录，滤镜里才能用相对文件名，规避 Windows 路径转义

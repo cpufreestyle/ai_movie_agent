@@ -307,6 +307,15 @@ python enhance_video.py in.mp4 out.mp4 --sr-model 4x-UltraSharp.pth   # 显式�
 `models/upscale_models` 下的权重；缺失时**自动降级为仅重编码**并提示（`--strict`
 则报错）。任何阶段失败都保留已有成片，不会毁掉已跑出来的片子。
 
+### WebUI 一键增强
+发布页签（Publish）里有「画质增强」面板：选源片（默认最新成片）、编码档位、内容类型、
+是否跳过插帧/超分、是否降噪，点「开始增强」后后台运行并轮询进度（输出 `outputs/enhance.log`）。
+后端接口：`POST /api/enhance`、`GET /api/enhance/status`、`GET /api/enhance/profiles`。
+
+### 全链路统一编码
+`make_narration.py`（解说成片）与 `anime_redraw.py`（逐帧动漫重绘）的最终编码也已切到
+`agent/encode.py`，不再散落 `-crf 18 / -crf 17` 之类的硬编码参数。
+
 ## 进阶
 - **更长更连贯**：调大 `overlap_history`(17→37)、`addnoise_condition`(20)，或用异步
   `ar_step` + `causal_block_size`。
