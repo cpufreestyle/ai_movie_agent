@@ -20,9 +20,12 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
+import subprocess
 import sys
+import uuid
 
 import yaml
 from config_env import apply_env_overrides
@@ -228,6 +231,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_cc.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
     p_cc.add_argument("--style", default="anime")
     p_cc.add_argument("--engine", default=None, help="skyreels/ltx/mmh3（缺省只出 JSON）")
+
+    p_mcp = sub.add_parser(
+        "mcp", help="启动 Web MCP 服务，把 Agent 能力以 MCP 工具暴露（供 API/本地模型驱动）")
+    p_mcp.add_argument("--host", default="127.0.0.1",
+                       help="HTTP 监听地址（默认仅本机 127.0.0.1）")
+    p_mcp.add_argument("--port", type=int, default=9000, help="HTTP 监听端口")
+    p_mcp.add_argument("--transport", default="streamable-http",
+                       choices=["streamable-http", "sse", "stdio"],
+                       help="MCP 传输：streamable-http(默认,网页/远程) / sse(旧版HTTP) / stdio(本地)")
+
+    p_call = sub.add_parser(
+        "call", help="单入口 JSON 调度器：JSON 进 / JSON 出，直接调用 Agent 能力"
+                     "（供其他 agent 用 subprocess 驱动，无需起服务、无需 LLM）")
+    p_call.add_argument("tool", help="工具名：list_comfy_models / quality_probe / "
+                                      "enhance_video / generate_clip / agent_status / "
+                                      "generate_metadata / get_job_status")
+    p_call.add_argument("args_json", nargs="?", default="{}",
+                        help="JSON 参数字符串，如 '{\"src\":\"x.mp4\",\"dry_run\":true}'")
+    p_call.add_argument("--wait", action="store_true",
+                        help="长任务（enhance_video/generate_clip）在本进程阻塞到完成，"
+                             "直接返回结果（不返 job_id），适合能阻塞等待的调用方")
+
+    p_jw = sub.add_parser("_job_worker", help=argparse.SUPPRESS)
+    p_jw.add_argument("jid")
+    p_jw.add_argument("tool")
+    p_jw.add_argument("args_json")
 
     p_tl = sub.add_parser("timeline", help="WebUI 时间轴：查看/重建/导出镜头时间轴")
     p_tl.add_argument("--workdir", default=os.path.join(HERE, "outputs"))
@@ -639,6 +668,167 @@ def _cmd_publish(args, config):
         print(agent.publisher.login_guide())
 
 
+def _cmd_mcp(args, config):
+    import webmcp
+    argv = ["--host", args.host, "--port", str(args.port), "--transport", args.transport]
+    raise SystemExit(webmcp.main(argv))
+
+
+# ---------------------------------------------------------------- call：单入口 JSON 调度器
+# 设计（用户选定）：`cli.py call <tool> '{json参数}'` —— JSON 进、JSON 出，直接复用
+# webmcp 的各 handler，无需起服务、无需 LLM。任意 agent 用 subprocess 即可驱动全部能力。
+#   * 短任务（list_comfy_models / quality_probe / agent_status / generate_metadata）
+#     在本进程同步跑完，直接打印结果 JSON。
+#   * 长任务（enhance_video / generate_clip）默认**后台**跑并返回 job_id，
+#     调用方再 `cli.py call get_job_status '{"job_id":"..."}'` 轮询；
+#     若调用方能阻塞等待，加 `--wait` 则在本进程跑到完成直接返回结果。
+#   * 跨进程的 job 状态用「文件型 job store」持久化（每个 job 一个 json），
+#     所以轮询命令是独立进程也能读到上一进程启动的后台任务。
+def _job_dir() -> str:
+    d = os.path.join(HERE, ".webmcp_jobs")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _job_path(jid: str) -> str:
+    return os.path.join(_job_dir(), f"{jid}.json")
+
+
+def _job_write(jid: str, data: dict):
+    tmp = _job_path(jid) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, _job_path(jid))  # 原子写，避免轮询读到半截
+
+
+def _job_read(jid: str):
+    p = _job_path(jid)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _spawn_detached(cmd: list[str], log_path: str):
+    """启动一个与会话脱钩的后台进程（父进程退出后它继续跑）。"""
+    flags = 0
+    if os.name == "nt":
+        flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                 | getattr(subprocess, "DETACHED_PROCESS", 0))
+    with open(log_path, "wb") as lf:
+        return subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf,
+            close_fds=True, creationflags=flags,
+        )
+
+
+def _clean_kwargs(handler, kwargs: dict) -> dict:
+    """只把 handler 接受的形参传进去，避免多余 key 触发 TypeError。"""
+    params = inspect.signature(handler).parameters
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
+def _cmd_call(args, config):
+    import webmcp
+
+    tool = args.tool
+    spec = next((s for s in webmcp.TOOL_SPECS if s["name"] == tool), None)
+    if spec is None:
+        names = ", ".join(s["name"] for s in webmcp.TOOL_SPECS)
+        print(json.dumps({"ok": False, "note": f"未知工具: {tool}。可用: {names}"},
+                          ensure_ascii=False))
+        return
+
+    # 参数解析（失败也要给 JSON，便于调用方判定）
+    try:
+        kwargs = json.loads(args.args_json or "{}")
+    except Exception as e:  # noqa: BLE001
+        print(json.dumps({"ok": False, "note": f"JSON 参数解析失败: {e}"},
+                          ensure_ascii=False))
+        return
+    if not isinstance(kwargs, dict):
+        print(json.dumps({"ok": False, "note": "args_json 必须是 JSON 对象"},
+                          ensure_ascii=False))
+        return
+
+    # get_job_status 是查询：直接读文件型 job store，跨进程有效
+    if tool == "get_job_status":
+        jid = (kwargs.get("job_id") or "").strip()
+        if not jid:
+            print(json.dumps({"ok": False, "note": "get_job_status 需要 job_id"},
+                             ensure_ascii=False))
+            return
+        j = _job_read(jid)
+        if not j:
+            print(json.dumps({"ok": False, "note": f"未知 job_id: {jid}"},
+                             ensure_ascii=False))
+            return
+        print(json.dumps(j, ensure_ascii=False, indent=2))
+        return
+
+    handler = spec["handler"]
+    clean = _clean_kwargs(handler, kwargs)
+
+    # 长任务：默认后台跑 + 返 job_id；--wait 则本进程阻塞到完成
+    if spec.get("long") and not args.wait:
+        jid = uuid.uuid4().hex[:12]
+        _job_write(jid, {"status": "queued", "name": tool, "result": None,
+                         "note": "", "log_tail": ""})
+        log_path = os.path.join(_job_dir(), f"{jid}.log")
+        worker_cmd = [sys.executable, os.path.abspath(__file__),
+                      "_job_worker", jid, tool,
+                      json.dumps(kwargs, ensure_ascii=False)]
+        _spawn_detached(worker_cmd, log_path)
+        print(json.dumps({"job_id": jid, "status": "queued",
+                          "note": "已后台启动，用 get_job_status 轮询结果"},
+                         ensure_ascii=False))
+        return
+
+    res = handler(**clean)
+    if isinstance(res, str):  # 异步 handler 返 JSON 字符串
+        print(res)
+    else:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+
+
+def _cmd_job_worker(args, config):
+    """内部命令：在脱钩后台进程里跑长任务的同步 handler，并把结果写回 job store。
+
+    不加载 config（main() 已为 _job_worker 跳过），也不依赖 mcp。
+    """
+    import webmcp
+
+    jid, tool = args.jid, args.tool
+    try:
+        kwargs = json.loads(args.args_json)
+    except Exception as e:  # noqa: BLE001
+        _job_write(jid, {"status": "failed", "name": tool, "result": None,
+                         "note": f"参数解析失败: {e}", "log_tail": ""})
+        return
+    handler = next((s["handler"] for s in webmcp.TOOL_SPECS if s["name"] == tool), None)
+    if handler is None:
+        _job_write(jid, {"status": "failed", "name": tool, "result": None,
+                         "note": f"未知工具: {tool}"})
+        return
+    try:
+        j = _job_read(jid) or {}
+        j.update({"status": "running"})
+        _job_write(jid, j)
+        res = handler(**_clean_kwargs(handler, kwargs))
+        _job_write(jid, {"status": "done" if res.get("ok") else "failed",
+                         "name": tool, "result": res,
+                         "note": res.get("note", ""),
+                         "log_tail": res.get("log_tail", "")})
+    except Exception as e:  # noqa: BLE001
+        import traceback as _tb
+        _job_write(jid, {"status": "failed", "name": tool, "result": None,
+                         "note": f"{type(e).__name__}: {e}",
+                         "log_tail": _tb.format_exc()})
+
+
 def _cmd_publish_concept(args, config):
     from agent.agent import MovieAgent
     ensure(config.get("publish", {}).get("enabled", False), "未启用发布(publish.enabled)")
@@ -680,6 +870,9 @@ COMMANDS = {
     "tts": _cmd_tts,
     "charcard": _cmd_charcard,
     "timeline": _cmd_timeline,
+    "mcp": _cmd_mcp,
+    "call": _cmd_call,
+    "_job_worker": _cmd_job_worker,
     "publish": _cmd_publish,
     "publish-concept": _cmd_publish_concept,
 }
@@ -687,8 +880,20 @@ COMMANDS = {
 
 def main():
     ap = build_parser()
-    args = ap.parse_args()
-    config = load_config(args.config)
+    # parse_known_args + 针对 call 的容错：argparse 存在「可选参数插在两个位置参数之间」
+    # 的已知缺陷——`call enhance_video --wait '{json}'` 会把 json 当成多余参数。
+    # 这里把 call 子命令留下的「多余参数」归给 args_json；其余命令仍严格报错。
+    args, extra = ap.parse_known_args()
+    if args.cmd == "call":
+        if extra:
+            if len(extra) == 1 and isinstance(getattr(args, "args_json", ""), str):
+                args.args_json = extra[0]
+            else:
+                ap.error(f"无法识别的参数: {' '.join(extra)}")
+    elif extra:
+        ap.error(f"无法识别的参数: {' '.join(extra)}")
+    # _job_worker 是内部后台进程，不需要也不应依赖 config 加载（避免配置缺失时任务直接挂掉）
+    config = {} if args.cmd == "_job_worker" else load_config(args.config)
     handler = COMMANDS.get(args.cmd)
     if handler is None:                  # subparsers(required=True) 之外的兜底
         ap.error(f"未知子命令: {args.cmd}")

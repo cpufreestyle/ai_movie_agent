@@ -3,6 +3,7 @@
 
 ## 环境 / 出片
 - RTX 5070 Ti 16GB (sm_120)。ComfyUI `D:/ComfyUI`:8188。主 venv `d:/ai sheare/repo/ai管理/.venv`（**cu130 必须**）。代理 127.0.0.1:7897。
+- 部署档位 `config_env.HW_TIER_PROFILES`（high/mid/low/cpu/amd395-128g/dgxspark-128g）；档位来源 `HW_TIER`/`config.hw_tier`/`deploy.py --tier`，别名由 `normalize_tier()` 归一。
 - 引擎默认 `comfyui_mmH3`（INT4，须 `comfyui-minimax-h3-audio-T8`+VideoHelperSuite），入口 `run_series.py --engine mmh3`。LTX-2.5 / Wan2.2 备选。
 - 走位用 **H3 Fun Control**（depth，strength 0.8~1.2，≥1.5 崩坏）；白模走位须在视野内（±2.2）。`blender.use_as_fun_control:true` 已全链路接入。
 

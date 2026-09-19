@@ -361,3 +361,58 @@ crf38 劣化片=65.9（明显劣化），能真实区分。
 - **角色一致性**：后续可接入本地图像模型（SDXL/ComfyUI）生成关键帧，再用 SkyReels I2V
   (`--image`) 生成镜头。
 - **配音**：用本地 TTS 生成旁白，editor 阶段合入音轨。
+
+## Web MCP：让 API / 本地模型驱动 Agent
+
+把 Agent 的画质增强 / 客观度量 / 模型清单 / 出片 / 状态 / 元数据等能力，以 **MCP 工具**
+通过 HTTP 暴露出去，从而能被「云端 API 大模型」或「本地模型（Ollama 等）」作为 MCP 客户端
+来驱动。对应需求「加上 webmcp 可以调用 api 或者 本地模型进行对 agent 的使用」。
+
+### 启动服务（依赖 `mcp<2`，已装进仓库 venv）
+```bash
+python cli.py mcp --port 9000                 # streamable-http，默认绑 127.0.0.1（仅本机）
+python cli.py mcp --transport stdio           # 本地 stdio 客户端
+python cli.py mcp --host 0.0.0.0 --port 9000  # 开放给远程/API 模型（建议放隧道/VPN 后，本版无内置鉴权）
+```
+暴露的工具：`list_comfy_models` / `quality_probe` / `enhance_video` / `generate_clip` /
+`agent_status` / `generate_metadata` / `get_job_status`。
+其中 `enhance_video` 与 `generate_clip` 是**分钟级长任务**，调用后**立即返回 job_id**，
+用 `get_job_status` 轮询到 `done` / `failed`。
+
+### 用 API 或本地模型驱动（配套脚本 `webmcp_client.py`）
+```bash
+# 云端 API（OpenAI 兼容）：环境变量 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+python webmcp_client.py "把 outputs/movie_final.mp4 做动漫风画质增强" --llm openai
+
+# 本地模型（Ollama，本机 11434）：环境变量 OLLAMA_URL / OLLAMA_MODEL
+python webmcp_client.py "评估 outputs/raw.mp4 与 outputs/enhanced.mp4 的画质差异" --llm ollama
+```
+该客户端连上 MCP 服务后拉取工具清单，用大模型做 ReAct 循环把自然语言目标翻译成工具调用，
+长任务会自动轮询 `get_job_status` 拿到最终结果再继续。
+
+### 不写客户端也行
+任何支持 MCP 的客户端（Claude Desktop / Cursor / OpenWebUI 等）都能直接连
+`http://127.0.0.1:9000/mcp`，本地模型场景由客户端侧挂载即可。
+
+### 单入口 JSON 调度器（cli.py call，无需起服务 / 无需 LLM）
+不想起 MCP 服务、也不想写客户端时，用一条命令即可让任意 agent 通过 subprocess 驱动全部能力：
+
+```bash
+# JSON 进 / JSON 出，直接复用 webmcp 的工具实现
+python cli.py call agent_status '{"workdir":"outputs"}'
+python cli.py call list_comfy_models '{}'
+
+# 长任务（enhance_video / generate_clip）默认后台跑，返回 job_id，再轮询
+python cli.py call enhance_video '{"src":"outputs/raw.mp4","dry_run":true}'
+# -> {"job_id": "...", "status": "queued", ...}
+python cli.py call get_job_status '{"job_id":"<上一步的 job_id>"}'
+# -> {"status": "done", "result": {...}}
+
+# 调用方能阻塞等待时，加 --wait 直接拿最终结果（不返 job_id）
+python cli.py call enhance_video --wait '{"src":"outputs/raw.mp4","dry_run":true}'
+```
+
+- 短任务（`list_comfy_models` / `quality_probe` / `agent_status` / `generate_metadata`）本进程同步跑完，直接打印结果 JSON；
+- 长任务默认后台跑并返 `job_id`，job 状态写入 `.webmcp_jobs/<jid>.json`（**文件型 job store，跨进程轮询有效**，父进程退出后后台 worker 仍继续）；加 `--wait` 则本进程阻塞到完成。
+- `--wait` 可放在 `call` 之后的任意位置（`call enhance_video --wait '{...}'` 与 `call --wait enhance_video '{...}'` 均可）。
+

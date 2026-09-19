@@ -33,11 +33,14 @@ def test_commands_registry_matches_subcommands():
 
 
 def test_expected_subcommands_present():
+    # 用户可见的核心子命令；内部命令（如 _job_worker）不在此列。
+    # 精确「一一对应」由 test_commands_registry_matches_subcommands 守护，
+    # 这里只断言关键命令都在，避免有人误删。
     expected = {"run", "pipeline", "status", "init", "publish", "publish-concept",
                 "enrich-bible", "webui", "blender", "ltx", "mmh3", "ab",
                 "preflight", "metadata", "enhance", "style", "mix", "tts",
-                "charcard", "timeline"}
-    assert expected == _subcommands()
+                "charcard", "timeline", "mcp", "call"}
+    assert expected <= _subcommands()
 
 
 def test_main_dispatches_by_registry(monkeypatch, tmp_path):

@@ -42,6 +42,8 @@ tools/blender/
 *.bak
 diag_*.png
 comfy_run.log
+# webmcp `cli.py call` 的后台 job 状态存储（跨进程轮询用，运行时生成）
+.webmcp_jobs/
 
 # 创空间部署时的临时克隆（内含嵌套 .git，不能进索引）
 space/_deploy_tmp/
