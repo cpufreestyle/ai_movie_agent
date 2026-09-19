@@ -45,7 +45,7 @@
 ## Lint / 测试 / Git
 - `ruff check .`（`envs/default/Scripts/ruff.exe`，max-complexity 10）。**一律全仓跑**，单文件会漏「用了没 import」。
 - 冻结基线：**新增 CLI 子命令 → 改 `tests/test_cli_registry.py`；新增路由 → 改 `tests/test_webui_routes.py`**。当前 `pytest -q` **446 passed**。
-- 路径是 Junction → `D:\ai sheare\repo\ai_movie_agent`；远端 GitHub `cpufreestyle/ai_movie_agent`。推送 `git -c http.proxy= -c https.proxy= push`。禁 `git rebase`。
+- 路径是 Junction → `D:\ai sheare\repo\ai_movie_agent`；远端 GitHub `cpufreestyle/ai_movie_agent`。推送走**默认环境代理**（`HTTP_PROXY` 当前 `http://127.0.0.1:5051`）即可；**不要** `git -c http.proxy= -c https.proxy= push` 绕过——本环境绕过会 `Connection reset`。禁 `git rebase`。
 - Release：无 gh → GitHub REST API（token 走 `git credential fill`）；notes 发布前必须 grep 对齐 CLI/配置键真名。查 CI `GET /actions/runs?per_page=10`。
 
 ## 收尾
