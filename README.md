@@ -413,6 +413,7 @@ python cli.py call enhance_video --wait '{"src":"outputs/raw.mp4","dry_run":true
 ```
 
 - 短任务（`list_comfy_models` / `quality_probe` / `agent_status` / `generate_metadata`）本进程同步跑完，直接打印结果 JSON；
-- 长任务默认后台跑并返 `job_id`，job 状态写入 `.webmcp_jobs/<jid>.json`（**文件型 job store，跨进程轮询有效**，父进程退出后后台 worker 仍继续）；加 `--wait` 则本进程阻塞到完成。
+- 长任务默认后台跑并返 `job_id`，job 状态写入 `.webmcp_jobs/<jid>.json`（**文件型 job store，跨进程可读**）；加 `--wait` 则本进程阻塞到完成、直接返回结果 JSON。
 - `--wait` 可放在 `call` 之后的任意位置（`call enhance_video --wait '{...}'` 与 `call --wait enhance_video '{...}'` 均可）。
+- ⚠️ **沙箱注意（WorkBuddy 等受限环境）**：父命令结束时，沙箱会连带着回收脱钩的后台 worker，因此 `call <长任务>` 返回的 `job_id` 必须**在同一命令内**用 `get_job_status` 轮询（或改用 `--wait` 进程内阻塞）才能拿到 `done`；跨命令轮询会一直停在 `queued`/`running`。常规宿主机上 worker 可脱离作业对象独立存活，跨命令轮询同样成立。worker 启动时会先尝试 `CREATE_BREAKAWAY_FROM_JOB`，若系统拒绝（如沙箱抛 `[WinError 5] 拒绝访问`）则自动回退到 `DETACHED_PROCESS` 模式。
 

@@ -713,16 +713,34 @@ def _job_read(jid: str):
 
 
 def _spawn_detached(cmd: list[str], log_path: str):
-    """启动一个与会话脱钩的后台进程（父进程退出后它继续跑）。"""
-    flags = 0
-    if os.name == "nt":
-        flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                 | getattr(subprocess, "DETACHED_PROCESS", 0))
+    """启动一个与会话脱钩的后台进程（父进程退出后尽量继续跑）。
+
+    Windows 关键点：沙箱/某些父进程会把子进程放进**作业对象（job object）**，
+    父进程树结束时会连带着把作业里的子进程一起杀掉。理想情况下加
+    CREATE_BREAKAWAY_FROM_JOB 让 worker 脱离作业、从而*跨命令*存活；
+    但部分受限环境（如 WorkBuddy 沙箱）禁止 breakaway，会抛
+    [WinError 5] 拒绝访问——此时回退到「仅 DETACHED_PROCESS」模式，
+    worker 仍能在**同一命令内**被轮询到完成（只是跨命令会被回收）。
+    两条路都失败才把异常抛给调用方（由 _cmd_call 写进 job 状态）。
+    """
     with open(log_path, "wb") as lf:
+        if os.name == "nt":
+            try:
+                return subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf,
+                    close_fds=True,
+                    creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                   | getattr(subprocess, "DETACHED_PROCESS", 0)
+                                   | 0x01000000))  # 先试带 breakaway
+            except OSError:
+                # 回退：不带 breakaway（沙箱等受限环境会拒绝上面的 flag）
+                return subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf,
+                    close_fds=True,
+                    creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                   | getattr(subprocess, "DETACHED_PROCESS", 0)))
         return subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf,
-            close_fds=True, creationflags=flags,
-        )
+            cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, close_fds=True)
 
 
 def _clean_kwargs(handler, kwargs: dict) -> dict:
@@ -781,7 +799,15 @@ def _cmd_call(args, config):
         worker_cmd = [sys.executable, os.path.abspath(__file__),
                       "_job_worker", jid, tool,
                       json.dumps(kwargs, ensure_ascii=False)]
-        _spawn_detached(worker_cmd, log_path)
+        try:
+            _spawn_detached(worker_cmd, log_path)
+        except Exception as e:  # noqa: BLE001 - 后台起不来也要让轮询看得到原因
+            _job_write(jid, {"status": "failed", "name": tool, "result": None,
+                             "note": f"后台 worker 启动失败: {type(e).__name__}: {e}",
+                             "log_tail": ""})
+            print(json.dumps({"job_id": jid, "status": "failed",
+                              "note": f"后台 worker 启动失败: {e}"}, ensure_ascii=False))
+            return
         print(json.dumps({"job_id": jid, "status": "queued",
                           "note": "已后台启动，用 get_job_status 轮询结果"},
                          ensure_ascii=False))
