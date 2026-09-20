@@ -41,10 +41,13 @@
 - SAFE_DELETE 守卫：批量删 >50 会让 pytest rc=1（看 `N passed` 判绿）。
 - Bash shim 缺 coreutils；`python -c` 内 `\n` 变字面 → 写文件再跑。
 - 偶发 Edit 成功未落盘 → 改完 grep 复核；同文件并行 Edit 须串行。
+- **cli.py call 长任务沙箱陷阱**：脱钩的后台 worker 在父命令结束时被沙箱回收 → `call <长任务>` 返的 job_id 必须**同一命令内**用 `get_job_status` 轮询（或 `--wait` 进程内阻塞）才能到 `done`；跨命令轮询永远卡 queued/running。常规宿主机 worker 可独立存活跨命令。
+- `CREATE_BREAKAWAY_FROM_JOB`(0x01000000) 在 WorkBuddy 沙箱抛 `[WinError 5] 拒绝访问` → `_spawn_detached` 须「先试带 flag、except OSError 回退 DETACHED_PROCESS」（已实现于 931ef69）。
+- `supervise.py --once` 父进程退出 → ComfyUI 子进程被回收（8188 起不来）；起常驻服务用**前台** `supervise.py`。
 
 ## Lint / 测试 / Git
 - `ruff check .`（`envs/default/Scripts/ruff.exe`，max-complexity 10）。**一律全仓跑**，单文件会漏「用了没 import」。
-- 冻结基线：**新增 CLI 子命令 → 改 `tests/test_cli_registry.py`；新增路由 → 改 `tests/test_webui_routes.py`**。当前 `pytest -q` **446 passed**。
+- 冻结基线：**新增 CLI 子命令 → 改 `tests/test_cli_registry.py`；新增路由 → 改 `tests/test_webui_routes.py`**。当前 `pytest -q` **477 passed**（含 cli.py call 单入口 JSON 调度器）。
 - 路径是 Junction → `D:\ai sheare\repo\ai_movie_agent`；远端 GitHub `cpufreestyle/ai_movie_agent`。推送走**默认环境代理**（`HTTP_PROXY` 当前 `http://127.0.0.1:5051`）即可；**不要** `git -c http.proxy= -c https.proxy= push` 绕过——本环境绕过会 `Connection reset`。禁 `git rebase`。
 - Release：无 gh → GitHub REST API（token 走 `git credential fill`）；notes 发布前必须 grep 对齐 CLI/配置键真名。查 CI `GET /actions/runs?per_page=10`。
 
